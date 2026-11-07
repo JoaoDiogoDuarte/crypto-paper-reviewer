@@ -1,0 +1,28 @@
+\documentclass[sigconf,anonymous,review]{acmart}
+\usepackage{cleveref}
+\newtheorem{claim}{Claim}
+\begin{document}
+\title{A Fake CCS Paper}
+\author{Anonymous Author}
+\affiliation{\institution{Nowhere University}\city{Nowhere}\country{Nowhere}}
+\email{anon@example.org}
+\begin{abstract}
+An ACM abstract citing \citet{AcmA} and \citep{AcmB}.
+\end{abstract}
+\keywords{fake, test}
+\maketitle
+\section{Introduction}\label{sec:intro}
+As \citet{AcmA} show, and as others confirm~\citep{AcmA,AcmB}, see \cref{cl:one}.
+\begin{claim}\label{cl:one}
+Claims are numbered.
+\end{claim}
+\begin{proof}
+By \cref{sec:intro}.
+\end{proof}
+\begin{table}
+\caption{A table caption above.}\label{tab:t}
+\begin{tabular}{ll} \toprule A & B \\ \midrule 1 & 2 \\ \bottomrule \end{tabular}
+\end{table}
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{acm}
+\end{document}

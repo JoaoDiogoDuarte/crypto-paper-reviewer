@@ -1,0 +1,28 @@
+\documentclass[smallextended]{svjour3}
+\smartqed
+\usepackage{amsmath}
+\journalname{Journal of Cryptology}
+\begin{document}
+\title{A Fake Journal of Cryptology Article}
+\author{Wes Author \and Xia Writer}
+\institute{W. Author \at Fake University \\ \email{w@example.org} \and X. Writer \at Another Place}
+\date{Received: date / Accepted: date}
+\maketitle
+\begin{abstract}
+A Springer abstract with $f(x)$.
+\keywords{fakes \and journals}
+\end{abstract}
+\section{Introduction}\label{sec:intro}
+Svjour3 predefines Theorem~\ref{thm:j} and Lemma~\ref{lem:j}; we cite~\cite{JocA}.
+\begin{theorem}\label{thm:j}
+A journal theorem.
+\end{theorem}
+\begin{lemma}\label{lem:j}
+A journal lemma.
+\end{lemma}
+\begin{proof}
+Obvious. \qed
+\end{proof}
+\bibliographystyle{spmpsci}
+\bibliography{joc}
+\end{document}
