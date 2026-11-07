@@ -52,6 +52,13 @@
   <button data-act="newpara" title="New paragraph at the cursor (Enter)">¶ New</button>
   <span class="sep"></span>
   <button data-act="find" title="Find (Ctrl+F), find and replace (Ctrl+H)">Find/Replace</button>
+  <span class="sep"></span>
+  <button data-act="diff" id="diffbtn" title="Show what changed (read-only while on)">Diff</button>
+  <select id="diffbase" title="Compare with" hidden>
+    <option value="head">since the last commit</option>
+    <option value="session">since the editor opened</option>
+  </select>
+  <span id="diffnav" hidden><button id="diffprev" title="Previous change">‹</button><span id="diffcount"></span><button id="diffnext" title="Next change">›</button></span>
   <button data-act="undo" title="Undo (Ctrl+Z)">↶</button>
   <button data-act="redo" title="Redo (Ctrl+Shift+Z)">↷</button>
 </nav>
@@ -83,6 +90,19 @@
   <div id="drawer-preview"></div>
 </aside>
 <div id="menu" hidden></div>
+<div id="figview" hidden>
+  <div class="fv-head">
+    <span id="fv-title">Figure</span>
+    <span class="fv-tabs">
+      <button data-tab="image">Image</button><button data-tab="text">Text</button>
+      <button data-tab="games" id="fv-games-tab">Games</button><button data-tab="latex">LaTeX</button>
+    </span>
+    <span class="spacer"></span>
+    <button id="fv-apply" title="Use the edited games or LaTeX (save to write the file)">Apply</button>
+    <button id="fv-close" title="Esc">Close</button>
+  </div>
+  <div id="fv-body"></div>
+</div>
 <div id="palette" hidden>
   <div class="pal-head"><span id="pal-title"></span><span class="spacer"></span><span id="pal-tray"></span></div>
   <input id="pal-q" spellcheck="false" autocomplete="off">

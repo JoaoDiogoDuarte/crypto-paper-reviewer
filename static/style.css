@@ -156,3 +156,42 @@ kbd { font: 12px ui-monospace, monospace; border: 1px solid var(--line); border-
 /* Long papers: the browser skips layout and painting of blocks off screen,
    so typing reflows only what is visible; "auto" remembers each block's size. */
 .seg { content-visibility: auto; contain-intrinsic-size: auto 6em; }
+
+/* diff mode */
+.d-del { background: color-mix(in srgb, #d33 22%, transparent); text-decoration: line-through; text-decoration-color: #c33; }
+.d-ins { background: color-mix(in srgb, #2a3 22%, transparent); text-decoration: underline; text-decoration-color: #2a3; }
+.diff-changed { box-shadow: -4px 0 0 #e0a030; }
+.diff-new { box-shadow: -4px 0 0 #2a3; background: color-mix(in srgb, #2a3 8%, transparent); }
+.diff-gone { box-shadow: -4px 0 0 #c33; background: color-mix(in srgb, #d33 8%, transparent); opacity: .85; }
+.diff-gone .para, .diff-gone h2, .diff-gone h3 { text-decoration: line-through; text-decoration-color: #c33; }
+.diff-current { outline: 2px solid var(--accent); outline-offset: 3px; }
+body.diffing #doc [contenteditable] { cursor: default; }
+#diffcount { padding: 0 .4em; color: var(--muted); }
+
+/* figure viewer and game editor */
+#figview { position: fixed; z-index: 45; inset: 4vh 4vw; display: flex; flex-direction: column; background: var(--bg);
+  border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 12px 40px rgba(0,0,0,.35); font: 14px system-ui, sans-serif; }
+.fv-head { display: flex; gap: .6em; align-items: center; padding: .6em .9em; border-bottom: 1px solid var(--line); }
+.fv-tabs button.on { background: var(--accent); color: var(--bg); }
+#fv-body { flex: 1; overflow: auto; padding: 1em; }
+#fv-body img { max-width: 100%; background: #fff; }
+#fv-body pre.figtext { font: 13px/1.45 ui-monospace, monospace; white-space: pre; }
+#fv-body textarea.fv-src { width: 100%; height: 100%; min-height: 50vh; font: 13px/1.45 ui-monospace, monospace;
+  background: var(--math); color: var(--fg); border: 1px solid var(--line); border-radius: 4px; padding: .5em; }
+.game { border: 1px solid var(--line); border-radius: 6px; margin: 0 0 1em; padding: .4em .6em; break-inside: avoid; }
+.game-title { font-weight: 600; padding: .2em 0 .4em; border-bottom: 1px solid var(--line); margin-bottom: .3em; }
+.game-title [contenteditable] { outline: none; }
+.gline { display: flex; align-items: baseline; gap: .4em; padding: .05em 0; font: 15px/1.6 Georgia, serif; }
+.gline .gno { width: 2em; text-align: right; color: var(--muted); font: 11px ui-monospace, monospace; flex: none; }
+.gline .gkw { font-weight: bold; font-family: system-ui, sans-serif; font-size: 13px; flex: none; }
+.gline .gtext { flex: 1; outline: none; white-space: pre-wrap; min-width: 4em; }
+.gline .gtext:focus { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.gline .gcomment { color: var(--muted); font-style: italic; }
+.gline .gtools { opacity: 0; display: flex; gap: 2px; flex: none; }
+.gline:hover .gtools { opacity: 1; }
+.gline .gtools button { padding: 0 .35em; font-size: 12px; }
+.gline.edited .gno { color: var(--dirty); }
+.gproc textarea { width: 100%; font: 13px ui-monospace, monospace; background: var(--math); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 4px; padding: .2em .4em; }
+.gproc .gprev { padding: .1em .4em .5em; }
+.games-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(22em, 1fr)); gap: 1em; }
