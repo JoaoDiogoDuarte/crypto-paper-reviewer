@@ -106,7 +106,11 @@ def check(name, rounds):
         out.append(rep.splitlines()[0] if rep else 'selftest: no report')
         errs = [l for l in rep.splitlines() if l.startswith('MATH ERROR') or l.startswith('HIDDEN')]
         out += ['  ' + e[:150] for e in errs[:5]]
-        # 4. fuzz, twice with different seeds, each on a fresh copy of the sources
+        # 4. reader controls and caret sentence selection
+        reader = selftest.run(main, 'readertest', key='READTEST')
+        ok_reader = reader.startswith('OK')
+        out.append(reader.splitlines()[0] if reader else 'reader test: no report')
+        # 5. fuzz, twice with different seeds, each on a fresh copy of the sources
         ok_fuzz = True
         for seed in (1, 7):
             for f, h in originals.items():   # restore the sources between runs
@@ -139,7 +143,7 @@ def check(name, rounds):
                        f'untouched files {"identical" if untouched_ok else "CHANGED"}')
             out += ['  ' + f[:160] for f in res['fails'][:6]]
         # a third-party paper may need tools we lack: its build is reported, not required
-        status = 'OK' if ((ok_build or external) and ok_rt and ok_self and ok_fuzz) else 'FAIL'
+        status = 'OK' if ((ok_build or external) and ok_rt and ok_self and ok_reader and ok_fuzz) else 'FAIL'
         return status, out
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

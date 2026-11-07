@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A local reading editor for a LaTeX paper.
 
-    paper-editor path/to/main.tex [--port 8765] [--no-open]
+    paper-editor path/to/main.tex [--port 8765] [--browser chrome-app] [--no-open]
 
 Serves the editor on http://127.0.0.1:8765 only.  It reads the main file and
 everything it \\inputs, writes a file back when you save in the editor, then
@@ -41,6 +41,7 @@ STATE = None         # <project>/.paper-editor: config.json, metadata.json, cach
 CACHE = None
 CONFIG = {}
 SESSION_START = {}   # file -> text when the editor first read it (diff baseline)
+PROJECT_LOCK = threading.RLock()
 
 DEFAULT_CONFIG = {
     # house rules applied to edited text when saving
@@ -102,7 +103,8 @@ def find_mains(folder):
     for f in sorted(os.listdir(folder)):
         p = os.path.join(folder, f)
         if f.endswith('.tex') and os.path.isfile(p):
-            t = open(p, encoding='utf-8', errors='replace').read()
+            with open(p, encoding='utf-8', errors='replace') as source:
+                t = source.read()
             if re.search(r'^[^%\n]*\\documentclass', t, re.M) and '\\begin{document}' in t:
                 built = [os.path.getmtime(os.path.join(folder, f[:-4] + e)) for e in ('.aux', '.pdf')
                          if os.path.exists(os.path.join(folder, f[:-4] + e))]
@@ -448,18 +450,11 @@ class Builder:
     def request(self):
         self.wanted.set()
 
-    def loop(self):
+    def build_once(self):
+        self.state = {'state': 'running', 'message': 'latexmk', 'at': time.time()}
+        cmd = CONFIG.get('build') or ['latexmk', '-pdf', '-synctex=1', '-interaction=nonstopmode',
+                                      '-halt-on-error', MAIN]
         try:
-            build_figures(self.log)
-        except Exception as e:  # figures are a nicety; never stop the server
-            self.log(f'figures: {e}')
-        while True:
-            self.wanted.wait()
-            time.sleep(1.5)  # let several saves in a row share one build
-            self.wanted.clear()
-            self.state = {'state': 'running', 'message': 'latexmk', 'at': time.time()}
-            cmd = CONFIG.get('build') or ['latexmk', '-pdf', '-synctex=1', '-interaction=nonstopmode',
-                                          '-halt-on-error', MAIN]
             r = subprocess.run(cmd, cwd=PAPER, capture_output=True, text=True, timeout=600,
                                shell=isinstance(cmd, str))
             if r.returncode == 0:
@@ -469,7 +464,24 @@ class Builder:
             else:
                 err = [l for l in r.stdout.splitlines() if l.startswith('!')][:3]
                 self.state = {'state': 'error', 'message': ' '.join(err) or 'latexmk failed', 'at': time.time()}
-            self.log('build: ' + self.state['message'])
+        except subprocess.TimeoutExpired:
+            self.state = {'state': 'error', 'message': 'latexmk timed out after 600 seconds', 'at': time.time()}
+        except OSError as e:
+            self.state = {'state': 'error', 'message': f'could not run build: {e}', 'at': time.time()}
+        except Exception as e:
+            self.state = {'state': 'error', 'message': f'build failed: {e}', 'at': time.time()}
+        self.log('build: ' + self.state['message'])
+
+    def loop(self):
+        try:
+            build_figures(self.log)
+        except Exception as e:  # figures are a nicety; never stop the server
+            self.log(f'figures: {e}')
+        while True:
+            self.wanted.wait()
+            time.sleep(1.5)  # let several saves in a row share one build
+            self.wanted.clear()
+            self.build_once()
             try:
                 build_figures(self.log)
             except Exception as e:
@@ -1107,6 +1119,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def json_body(self):
+        try:
+            length = int(self.headers.get('Content-Length', 0))
+            return json.loads(self.rfile.read(length))
+        except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
+            return None
+
     def do_GET(self):
         url = urllib.parse.urlparse(self.path)
         p = url.path
@@ -1164,15 +1183,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             BUILDER.log('page: ' + self.rfile.read(n).decode(errors='replace')[:200000])
             return self.send(200, {})
         if urllib.parse.urlparse(self.path).path == '/api/metadata':
-            n = int(self.headers.get('Content-Length', 0))
-            md = json.loads(self.rfile.read(n))
+            md = self.json_body()
+            if not isinstance(md, dict):
+                return self.send(400, {'error': 'expected a JSON object'})
             ensure_state()
             with open(os.path.join(STATE, 'metadata.json'), 'w') as f:
                 json.dump(md, f, indent=2, ensure_ascii=False)
             return self.send(200, metadata())
         if urllib.parse.urlparse(self.path).path == '/api/convert':
-            n = int(self.headers.get('Content-Length', 0))
-            req = json.loads(self.rfile.read(n))
+            req = self.json_body()
+            if not isinstance(req, dict):
+                return self.send(400, {'error': 'expected a JSON object'})
             try:
                 res = run_convert(req.get('target'), bool(req.get('anonymous')), req.get('name'), bool(req.get('overwrite')))
             except FileExistsError as e:
@@ -1182,8 +1203,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             BUILDER.log(f"converted to {req.get('target')}: {res['file']} ({'built' if res['built'] else 'build failed'})")
             return self.send(200, res)
         if urllib.parse.urlparse(self.path).path == '/api/keys':
-            n = int(self.headers.get('Content-Length', 0))
-            keys = json.loads(self.rfile.read(n))
+            keys = self.json_body()
             if not isinstance(keys, dict):
                 return self.send(400, {'error': 'expected an object'})
             os.makedirs(os.path.dirname(KEYS_FILE), exist_ok=True)
@@ -1191,18 +1211,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 json.dump(keys, f, indent=2, sort_keys=True)
             return self.send(200, {})
         if urllib.parse.urlparse(self.path).path == '/api/open':
-            n = int(self.headers.get('Content-Length', 0))
-            name = json.loads(self.rfile.read(n)).get('main', '')
-            if name not in find_mains(os.path.join(PAPER, os.path.dirname(MAIN))):
-                return self.send(400, {'error': 'not a document of this project'})
-            open_paper(os.path.join(PAPER, os.path.dirname(MAIN), name))
-            ensure_state()
-            BUILDER.aux = load_aux()
-            BUILDER.auxver += 1
-            return self.send(200, {'main': MAIN})
+            req = self.json_body()
+            if not isinstance(req, dict):
+                return self.send(400, {'error': 'expected a JSON object'})
+            with PROJECT_LOCK:
+                name = req.get('main', '')
+                if name not in find_mains(os.path.join(PAPER, os.path.dirname(MAIN))):
+                    return self.send(400, {'error': 'not a document of this project'})
+                open_paper(os.path.join(PAPER, os.path.dirname(MAIN), name))
+                ensure_state()
+                BUILDER.aux = load_aux()
+                BUILDER.auxver += 1
+                return self.send(200, {'main': MAIN})
         if urllib.parse.urlparse(self.path).path == '/api/bibadd':
-            n = int(self.headers.get('Content-Length', 0))
-            req = json.loads(self.rfile.read(n))
+            req = self.json_body()
+            if not isinstance(req, dict):
+                return self.send(400, {'error': 'expected a JSON object'})
             try:
                 bib = online_add(req.get('source', ''), req.get('id', ''), req.get('key', ''))
             except Exception as e:
@@ -1211,19 +1235,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send(200, {'bib': bib})
         if urllib.parse.urlparse(self.path).path != '/api/save':
             return self.send(404, {'error': 'not found'})
-        n = int(self.headers.get('Content-Length', 0))
-        req = json.loads(self.rfile.read(n))
+        req = self.json_body()
+        if not isinstance(req, dict):
+            return self.send(400, {'error': 'expected a JSON object'})
         name, base, text = req.get('name'), req.get('base'), req.get('text')
-        if name not in paper_files() or not isinstance(text, str):
-            return self.send(400, {'error': 'unknown file'})
-        current = read(name)
-        if sha(current) != base:
-            return self.send(409, {'error': 'changed on disk', 'hash': sha(current)})
-        path = os.path.join(PAPER, name)
-        tmp = path + '.editor-tmp'
-        with open(tmp, 'w', encoding='utf-8', newline='') as f:
-            f.write(text)
-        os.replace(tmp, path)
+        with PROJECT_LOCK:
+            if name not in paper_files() or not isinstance(text, str):
+                return self.send(400, {'error': 'unknown file'})
+            current = read(name)
+            if sha(current) != base:
+                return self.send(409, {'error': 'changed on disk', 'hash': sha(current)})
+            path = os.path.join(PAPER, name)
+            tmp = None
+            try:
+                with tempfile.NamedTemporaryFile('w', encoding='utf-8', newline='',
+                                                 dir=os.path.dirname(path), prefix='.editor-', suffix='.tmp',
+                                                 delete=False) as f:
+                    tmp = f.name
+                    f.write(text)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, path)
+            finally:
+                if tmp and os.path.exists(tmp):
+                    os.unlink(tmp)
         BUILDER.log(f'saved {name}')
         BUILDER.request()
         self.send(200, {'hash': sha(text)})
@@ -1264,7 +1299,35 @@ def ensure_state():
     os.makedirs(CACHE, exist_ok=True)
     gi = os.path.join(STATE, '.gitignore')
     if not os.path.exists(gi):
-        open(gi, 'w').write('# written by paper-editor: the cache is not worth tracking\ncache/\n')
+        with open(gi, 'w') as f:
+            f.write('# written by paper-editor: the cache is not worth tracking\ncache/\n')
+
+
+def open_browser(url, browser):
+    if browser in ('chrome', 'chrome-app'):
+        executables = ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser']
+        if sys.platform == 'darwin':
+            executables += [
+                '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+                '/Applications/Chromium.app/Contents/MacOS/Chromium',
+            ]
+        elif os.name == 'nt':
+            for root in (os.environ.get('PROGRAMFILES'), os.environ.get('PROGRAMFILES(X86)'), os.environ.get('LOCALAPPDATA')):
+                if root:
+                    executables += [
+                        os.path.join(root, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+                        os.path.join(root, 'Chromium', 'Application', 'chrome.exe'),
+                    ]
+        for executable in executables:
+            found = executable if os.path.isfile(executable) else shutil.which(executable)
+            if found:
+                if browser == 'chrome-app':
+                    subprocess.Popen([found, '--app=' + url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                else:
+                    webbrowser.BackgroundBrowser(found).open(url)
+                return
+        print('Chrome/Chromium was not found; opening the system browser.', flush=True)
+    webbrowser.open(url)
 
 
 def main():
@@ -1275,6 +1338,8 @@ def main():
     ap.add_argument('--cwd', help='the directory LaTeX runs in (default: the main file\'s directory)')
     ap.add_argument('--state', help='where to keep settings and caches (default: <project>/.paper-editor)')
     ap.add_argument('--port', type=int, default=8765)
+    ap.add_argument('--browser', choices=('chrome-app', 'chrome', 'system'), default='chrome-app',
+                    help='browser to open (default: standalone Chrome app window)')
     ap.add_argument('--no-open', action='store_true', help='do not open a browser')
     args = ap.parse_args()
     path = os.path.abspath(args.path)
@@ -1295,7 +1360,7 @@ def main():
     url = f'http://127.0.0.1:{args.port}/'
     print(f'Paper editor for {os.path.join(PAPER, MAIN)} on {url}  (Ctrl+C to stop)', flush=True)
     if not args.no_open:
-        threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+        threading.Timer(0.5, lambda: open_browser(url, args.browser)).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

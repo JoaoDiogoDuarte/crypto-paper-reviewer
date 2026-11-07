@@ -30,6 +30,7 @@ let lastTyping = 0;
 
 async function load(keepScroll) {
   const y = window.scrollY;
+  const caret = captureEditorState();
   const oldMacros = DOC && JSON.stringify(DOC.macros);
   DOC = await (await fetch('/api/doc')).json();
   if (oldMacros !== JSON.stringify(DOC.macros)) KATEX_CACHE.clear();
@@ -41,9 +42,42 @@ async function load(keepScroll) {
   }
   render();
   fillMains();
+  restoreEditorState(caret);
   if (keepScroll) window.scrollTo(0, y);
   setBuild(DOC.build);
   if (new URLSearchParams(location.search).has('selftest')) selfTest();
+}
+
+function captureEditorState() {
+  const selection = getSelection();
+  if (!selection.rangeCount || !selection.isCollapsed) return null;
+  const range = selection.getRangeAt(0);
+  const node = range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement;
+  const seg = segOf(node);
+  if (!seg || !seg.edit || !seg.edit.contains(range.startContainer)) return null;
+  const before = document.createRange();
+  before.selectNodeContents(seg.edit);
+  before.setEnd(range.startContainer, range.startOffset);
+  return { file: seg.file, src: seg.src, offset: before.toString().length };
+}
+
+function restoreEditorState(state) {
+  if (!state) return;
+  const seg = ORDER.find((item) => item.file === state.file && item.src === state.src && item.edit);
+  if (!seg) return;
+  const walker = document.createTreeWalker(seg.edit, NodeFilter.SHOW_TEXT);
+  let node, offset = state.offset;
+  while ((node = walker.nextNode())) {
+    if (offset <= node.data.length) {
+      const range = document.createRange();
+      range.setStart(node, offset); range.collapse(true);
+      const selection = getSelection();
+      selection.removeAllRanges(); selection.addRange(range);
+      seg.edit.focus({ preventScroll: true });
+      return;
+    }
+    offset -= node.data.length;
+  }
 }
 
 // Segments of a file.  Every file is split at its \input/\include/\subfile
@@ -102,6 +136,7 @@ let HEADS = {};
 // ---------------------------------------------------------------- rendering
 
 function render() {
+  if (typeof TTS !== 'undefined') TTS.reset();
   const doc = $('#doc');
   doc.textContent = '';
   ORDER = [];
@@ -883,8 +918,26 @@ async function poll() {
 
 const TTS = (() => {
   let queue = [], idx = 0, speaking = false, paused = false, current = null, audio = null, prefetched = null;
+  let anchor = null;
+  let generation = 0;
   const synth = window.speechSynthesis;
   const voiceSel = $('#voice');
+  const positionKey = () => 'paper-editor:tts:' + location.pathname + ':' + (DOC && DOC.main || '');
+
+  function setState(state) { $('#tts-state').textContent = state; }
+  function updateControls() {
+    $('#pause').disabled = !speaking;
+    $('#stop').disabled = !speaking;
+    $('#pause').setAttribute('aria-pressed', String(paused));
+  }
+  function savePosition(item) {
+    try { localStorage.setItem(positionKey(), JSON.stringify({ file: item.seg.file, src: item.seg.src, text: item.text })); }
+    catch (e) { /* storage unavailable */ }
+  }
+  function savedPosition() {
+    try { return JSON.parse(localStorage.getItem(positionKey()) || 'null'); }
+    catch (e) { return null; }
+  }
 
   function voices() { return synth ? synth.getVoices() : []; }
   // Option values are "engine|voice"; engine "browser" is speechSynthesis,
@@ -939,12 +992,47 @@ const TTS = (() => {
     return q;
   }
 
+  function prepareQueue() {
+    if (anchor) {
+      const queue = build(ORDER.indexOf(anchor.seg));
+      let index = queue.findIndex((item) => item.seg === anchor.seg && rangeContainsCaret(item.range(), anchor.range));
+      if (index < 0) index = 0;
+      return { queue, index };
+    }
+    const saved = savedPosition();
+    if (saved) {
+      const candidates = ORDER.filter((item) => item.file === saved.file && !item.removed);
+      for (const seg of candidates) {
+        const queue = build(ORDER.indexOf(seg));
+        const index = queue.findIndex((item) => item.seg === seg && item.text === saved.text);
+        if (index >= 0) return { queue, index };
+        const fragment = saved.text.trim().slice(0, 60);
+        if (fragment.length >= 20) {
+          const fuzzy = queue.findIndex((item) => item.seg === seg && item.text.includes(fragment));
+          if (fuzzy >= 0) return { queue, index: fuzzy };
+        }
+      }
+    }
+    return { queue: build(startSeg()), index: 0 };
+  }
+
   function play() {
     stop();
     if (!voiceSel.value) { banner('No text-to-speech voice is available. See the README of the editor for how to install one.'); return; }
-    queue = build(startSeg());
-    idx = 0; speaking = true; paused = false;
+    ({ queue, index: idx } = prepareQueue());
+    speaking = true; paused = false;
+    updateControls();
     next();
+  }
+
+  function jump(delta) {
+    if (!queue.length) {
+      ({ queue, index: idx } = prepareQueue());
+    }
+    const target = Math.max(0, Math.min(queue.length - 1, (speaking ? idx - 1 : idx) + delta));
+    stop();
+    idx = target;
+    if (queue[idx]) { speaking = true; paused = false; next(); }
   }
 
   function highlight(seg) {
@@ -954,9 +1042,12 @@ const TTS = (() => {
     if (seg && seg.el) seg.el.classList.add('speaking');
   }
 
-  function next() {
+  function next(run = generation) {
+    if (run !== generation) return;
     if (!speaking || idx >= queue.length) { stop(); return; }
     const item = queue[idx++];
+    savePosition(item);
+    setState('Reading');
     highlight(item.seg);
     markPhrase(item.range());
     const rate = parseFloat($('#rate').value);
@@ -968,8 +1059,8 @@ const TTS = (() => {
       prefetched = idx < queue.length ? new Audio(url(queue[idx])) : null;
       if (prefetched) prefetched.preload = 'auto';
       audio.playbackRate = rate;
-      audio.onended = next;
-      audio.onerror = () => { banner('Speech failed for this voice; see the server output.'); next(); };
+      audio.onended = () => next(run);
+      audio.onerror = () => { if (run !== generation) return; banner('Speech failed for this voice; see the server output.'); next(run); };
       audio.play().catch(() => {});
       return;
     }
@@ -977,31 +1068,70 @@ const TTS = (() => {
     const v = voices().find((x) => x.name === name);
     if (v) { u.voice = v; u.lang = v.lang; }
     u.rate = rate;
-    u.onend = next;
-    u.onerror = (e) => { if (e.error !== 'interrupted' && e.error !== 'canceled') next(); };
+    u.onend = () => next(run);
+    u.onerror = (e) => { if (run === generation && e.error !== 'interrupted' && e.error !== 'canceled') next(run); };
     synth.speak(u);
   }
 
   function stop() {
+    generation++;
     speaking = false;
+    paused = false;
     if (synth) synth.cancel();
     if (audio) { audio.pause(); audio = null; }
+    prefetched = null;
     highlight(null);
     markPhrase(null);
+    setState('Stopped');
+    updateControls();
   }
 
   function pause() {
     if (!speaking) return;
     paused = !paused;
+    setState(paused ? 'Paused' : 'Reading');
     if (audio) { if (paused) audio.pause(); else audio.play(); return; }
     if (paused) synth.pause(); else synth.resume();
   }
 
-  return { play, stop, pause, fillVoices, loadServerVoices, build };
+  function setAnchor(seg, range) { anchor = { seg, range: range.cloneRange() }; }
+
+  function reset() { stop(); queue = []; idx = 0; anchor = null; setState('Ready'); }
+
+  function testPrepare() {
+    const prepared = prepareQueue();
+    return { text: prepared.queue[prepared.index]?.text || null, index: prepared.index };
+  }
+
+  return { play, stop, pause, prev: () => jump(-1), next: () => jump(1), setAnchor, reset, fillVoices, loadServerVoices, build,
+    testPrepare, testSavePosition: savePosition };
 })();
 $('#play').onclick = () => TTS.play();
+$('#tts-prev').onclick = () => TTS.prev();
+$('#tts-next').onclick = () => TTS.next();
 $('#stop').onclick = () => TTS.stop();
 $('#pause').onclick = () => TTS.pause();
+
+function rangeContainsCaret(phrase, caret) {
+  try {
+    return caret.compareBoundaryPoints(Range.START_TO_START, phrase) >= 0 &&
+      caret.compareBoundaryPoints(Range.START_TO_END, phrase) <= 0;
+  } catch (e) { return false; }
+}
+
+function updateSpeechAnchor() {
+  const selection = getSelection();
+  if (!selection.rangeCount || !selection.isCollapsed) return;
+  const range = selection.getRangeAt(0);
+  const seg = segOf(range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement);
+  if (!seg || !seg.edit || (seg.kind !== 'para' && seg.kind !== 'heading')) return;
+  TTS.setAnchor(seg, range);
+}
+
+document.addEventListener('selectionchange', updateSpeechAnchor);
+$('#doc').addEventListener('click', () => {
+  setTimeout(updateSpeechAnchor, 0);
+});
 
 // The spoken text of a block, with the DOM node behind every piece, so that
 // a phrase of the speech maps back to a range of the page.
@@ -1234,9 +1364,42 @@ function editTest() {
   fetch('/api/log', { method: 'POST', headers: { 'X-Token': TOKEN }, body: 'EDITTEST\n' + log.join('\n') });
 }
 
+function readerTest() {
+  const failures = [];
+  const fail = (message) => failures.push(message);
+  const phrases = TTS.build(0);
+  if (phrases.length < 2) fail('not enough speech phrases');
+  else {
+    const target = phrases[1];
+    const source = target.range();
+    const caret = document.createRange();
+    caret.setStart(source.startContainer, source.startOffset);
+    caret.collapse(true);
+    const selection = getSelection();
+    selection.removeAllRanges(); selection.addRange(caret);
+    updateSpeechAnchor();
+    const selected = TTS.testPrepare();
+    if (selected.text !== target.text) fail('caret selected the wrong sentence');
+    TTS.testSavePosition(target);
+    TTS.reset();
+    const resumed = TTS.testPrepare();
+    if (resumed.text !== target.text) fail('saved position did not resume');
+  }
+  if (!$('#pause').disabled || !$('#stop').disabled) fail('idle controls are enabled');
+  const key = 'paper-editor:tts:' + location.pathname + ':' + (DOC && DOC.main || '');
+  try { localStorage.removeItem(key); } catch (e) { /* storage unavailable */ }
+  const msg = `READTEST ${failures.length ? 'FAILED' : 'OK'}: ${failures.length ? failures.join('; ') : 'caret, resume, controls'}`;
+  document.title = msg;
+  console.log(msg);
+  fetch('/api/log', { method: 'POST', headers: { 'X-Token': TOKEN }, body: msg });
+}
+
 load(false).then(() => {
   TTS.loadServerVoices();
-  if (new URLSearchParams(location.search).has('edittest')) editTest(); AUXVER = DOC.auxver; TTS.fillVoices(); poll(); });
+  const query = new URLSearchParams(location.search);
+  if (query.has('edittest')) editTest();
+  if (query.has('readertest')) readerTest();
+  AUXVER = DOC.auxver; TTS.fillVoices(); poll(); });
 
 // =============================================================== keymap
 //
@@ -1416,12 +1579,25 @@ function keyName(e) {
     (e.key.length === 1 ? e.key : e.key);
 }
 
+function closeCurrentMenu() {
+  if (!$('#palette').hidden) { closePalette(); return; }
+  if (!$('#keysbox').hidden) { RECORDING = null; $('#keysbox').hidden = true; return; }
+  if (!$('#paperbox').hidden) { $('#paperbox').hidden = true; return; }
+  if (!$('#figview').hidden) { closeFigure(); return; }
+  if (!$('#drawer').hidden) { closeDrawer(); return; }
+  if (!$('#findbar').hidden) { closeFind(); return; }
+  if (!$('#helpbox').hidden) { $('#helpbox').hidden = true; return; }
+  if (!$('#menu').hidden) $('#menu').hidden = true;
+}
+
 // Bindings available anywhere on the page.
 const GLOBAL_KEYS = {
   'C-s': save, 'C-S': save,
   'C-z': undo, 'C-Z': redo, 'C-y': redo,
   'M-r': () => TTS.play(), 'M-R': () => TTS.play(),
-  'Escape': () => { $('#helpbox').hidden = true; $('#menu').hidden = true; },
+  'M-p': () => TTS.pause(), 'M-P': () => TTS.pause(), 'M-s': () => TTS.stop(), 'M-S': () => TTS.stop(),
+  'C-M-ArrowLeft': () => TTS.prev(), 'C-M-ArrowRight': () => TTS.next(),
+  'Escape': closeCurrentMenu,
 };
 // Bindings inside the text of the paper.
 const TEXT_KEYS = {
@@ -1450,7 +1626,7 @@ const TEXT_KEYS = {
 document.addEventListener('keydown', (e) => {
   const k = keyName(e);
   const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) && !e.target.closest('.seg');
-  if (inField && !['C-s', 'C-S', 'C-f'].includes(k)) return;   // a field keeps its own keys (undo, Escape)
+  if (inField && !['C-s', 'C-S', 'C-f', 'Escape'].includes(k)) return;   // a field keeps its own keys (undo)
   if (GLOBAL_KEYS[k]) { e.preventDefault(); GLOBAL_KEYS[k](); return; }
   const inText = e.target.isContentEditable && segOf(e.target);
   if (!inText) return;
@@ -2577,7 +2753,11 @@ const ACTION_DEFS = [
   ['redo', 'Redo', 'global', ['C-Z', 'C-y'], () => redo()],
   ['find', 'Find', 'global', ['C-f'], () => openFind(false)],
   ['replace', 'Find and replace', 'global', ['C-h'], () => openFind(true)],
-  ['read', 'Read aloud from the cursor', 'global', ['M-r'], () => TTS.play()],
+  ['read', 'Play or resume reading', 'global', ['M-r'], () => TTS.play()],
+  ['readpause', 'Pause or resume reading', 'global', ['M-p'], () => TTS.pause()],
+  ['readstop', 'Stop reading', 'global', ['M-s'], () => TTS.stop()],
+  ['readprev', 'Previous sentence', 'global', ['C-M-ArrowLeft'], () => TTS.prev()],
+  ['readnext', 'Next sentence', 'global', ['C-M-ArrowRight'], () => TTS.next()],
   ['bold', 'Bold (\\textbf)', 'text', ['C-b'], () => wrap('\\textbf{', 'strong')],
   ['emph', 'Emphasis (\\emph)', 'text', ['C-i'], () => wrap('\\emph{', 'em')],
   ['italic', 'Italic (\\textit)', 'text', ['C-I'], () => wrap('\\textit{', 'em')],

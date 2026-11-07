@@ -13,9 +13,12 @@ sources, with the PDF rebuilt after each save.
 
     ./run ~/papers/my-paper              # a project folder (finds the main file)
     ./run ~/papers/my-paper/main.tex     # or the main file itself
-    ./run paper --main other.tex --cwd .. --port 8766
+    ./run paper --main other.tex --cwd .. --port 8766 [--browser chrome]
 
-It listens on 127.0.0.1 only; writes need a token the page gets when it loads.
+  It opens a standalone Chrome/Chromium app window by default and listens on
+  127.0.0.1 only; use `--browser chrome` for a normal browser window,
+  `--browser system` for the desktop's default browser, or `--no-open` to open
+  the URL yourself. Writes need a token the page gets when it loads.
 
 ## What it does
 
@@ -64,6 +67,9 @@ It listens on 127.0.0.1 only; writes need a token the page gets when it loads.
 | `Ctrl+D`, `Alt+W`, `Ctrl+P` | delete line, cut region or line, duplicate region or line |
 | `Ctrl++` | expand the selection: word, line, paragraph |
 | `Alt+R` | read aloud from the cursor |
+| `Alt+P` | pause or resume reading |
+| `Alt+S` | stop reading |
+| `Ctrl+Alt+Left`, `Ctrl+Alt+Right` | previous, next sentence |
 
 Firefox reserves `Ctrl+W`, `Ctrl+Q`, `Ctrl+T`, `Ctrl+N` and
 `Ctrl+Shift+R`. Spelling: right-click → *Add to Dictionary* (the browser's).
@@ -96,6 +102,7 @@ Online voices send the text being read to Microsoft or Google.
 ## Tests
 
     node tests/roundtrip.js ~/papers         # every .tex parses and re-serializes byte for byte
+    python3 -m unittest tests.backend_test   # save, build, document switching and launcher tests
     tests/selftest.py ~/papers/a ~/papers/b  # the page itself, in headless Firefox
 
 `tests/selftest.py` with no arguments reads paths from `tests/papers.local`
