@@ -26,6 +26,8 @@ import urllib.parse
 import urllib.request
 import webbrowser
 
+import convert
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, 'static')
 TOKEN = secrets.token_hex(16)
@@ -253,6 +255,12 @@ def load_macros():
             body, _ = group(pre, m.end())
         except (IndexError, AssertionError):
             continue
+        n, default = int(m.group(3) or 0), m.group(4)
+        if default is not None and n:
+            # KaTeX has no optional arguments: use the default, shift the rest
+            body = body.replace('#1', default[1:-1])
+            for k in range(2, n + 1):
+                body = body.replace('#%d' % k, '#%d' % (k - 1))
         macros[m.group(1) or m.group(2)] = body
     for m in re.finditer(r'\\def\s*(\\[A-Za-z@]+)((?:#\d)*)\s*(?=\{)', pre):
         try:
@@ -274,7 +282,8 @@ def katexify(body):
     KaTeX lacks or that switch to text mode around maths (\\rotatebox,
     \\scalebox, \\raisebox, \\resizebox, \\mbox{...$x$...}), and drop the
     inner dollars and size commands.  The document is not changed."""
-    if '$' not in body and not re.search(r'\\(rotatebox|scalebox|raisebox|resizebox|reflectbox)', body):
+    UNESC = r'(?<!\\)\$'          # a dollar that is not \$
+    if not re.search(UNESC, body) and not re.search(r'\\(rotatebox|scalebox|raisebox|resizebox|reflectbox)', body):
         return body
     out, i = [], 0
     pat = re.compile(r'\\(rotatebox|scalebox|raisebox|resizebox|reflectbox|mbox|hbox|text)\s*(\[[^\]]*\])?\s*(?=\{)')
@@ -297,13 +306,13 @@ def katexify(body):
             out.append(body[m.start():])
             break
         inner = args[-1]
-        if m.group(1) in ('mbox', 'hbox', 'text') and '$' not in inner:
+        if m.group(1) in ('mbox', 'hbox', 'text') and not re.search(UNESC, inner):
             out.append(body[m.start():k])          # ordinary text: keep it
         else:
             inner = re.sub(r'\\(tiny|scriptsize|footnotesize|small|normalsize|large|Large|displaystyle)\b', '', inner)
-            out.append('{' + katexify(inner).replace('$', '') + '}')
+            out.append('{' + re.sub(UNESC, '', katexify(inner)) + '}')
         i = k
-    return ''.join(out).replace('$', '')
+    return re.sub(UNESC, '', ''.join(out))
 
 
 
@@ -1013,6 +1022,65 @@ def synctex_pages():
     return out
 
 
+KEYS_FILE = os.path.join(os.environ.get('XDG_CONFIG_HOME', os.path.expanduser('~/.config')), 'paper-editor', 'keys.json')
+
+
+def load_keys():
+    """Your key bindings (action -> list of keys), shared by every paper."""
+    try:
+        return json.load(open(KEYS_FILE))
+    except (OSError, ValueError):
+        return {}
+
+
+def metadata():
+    """Metadata: what the front matter says, overridden by your edits
+    (saved in .paper-editor/metadata.json)."""
+    extracted = convert.extract(read(MAIN))
+    saved = {}
+    path = os.path.join(STATE, 'metadata.json')
+    if os.path.exists(path):
+        try:
+            saved = json.load(open(path))
+        except ValueError:
+            saved = {}
+    merged = {**extracted, **{k: v for k, v in saved.items() if k != 'source_class'}}
+    return {'metadata': merged, 'extracted': extracted, 'saved': bool(saved),
+            'targets': {k: v[0] for k, v in convert.TARGETS.items()},
+            'missing': {t: convert.missing(merged, t) for t in convert.TARGETS}}
+
+
+def theorems_used():
+    names = set(load_theorems()) | set(convert.PREDEFINED_THEOREMS['llncs'])
+    used = set()
+    for f in paper_files():
+        used |= {e for e in re.findall(r'\\begin\{([A-Za-z]+)\}', strip_comments(read(f))) if e in names}
+    return sorted(used - {'proof'})
+
+
+def run_convert(target, anonymous, name, overwrite):
+    if target not in convert.TARGETS:
+        raise ValueError('unknown target')
+    if not re.fullmatch(r'[A-Za-z0-9._-]+\.tex', name or ''):
+        raise ValueError('the file name must end in .tex, without folders')
+    out_dir = os.path.join(PAPER, os.path.dirname(MAIN))
+    path = os.path.join(out_dir, name)
+    if os.path.exists(path) and not overwrite:
+        raise FileExistsError(name)
+    md = metadata()['metadata']
+    text, warnings = convert.convert(read(MAIN), md, target, anonymous, theorems_used())
+    with open(path, 'w', encoding='utf-8', newline='') as f:
+        f.write(text)
+    r = subprocess.run(['latexmk', '-pdf', '-interaction=nonstopmode', '-halt-on-error', name], cwd=out_dir,
+                       capture_output=True, text=True, timeout=600)
+    log = os.path.join(out_dir, name[:-4] + '.log')
+    log = open(log, errors='replace').read() if os.path.exists(log) else ''
+    errors = [l for l in log.splitlines() if l.startswith('!')][:5]
+    undefined = len(re.findall(r'(Citation|Reference) .* undefined', log))
+    return {'file': name, 'built': r.returncode == 0, 'errors': errors, 'undefined': undefined,
+            'warnings': warnings, 'missing': convert.missing(md, target)}
+
+
 def html_escape(t):
     return t.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
@@ -1070,6 +1138,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if p.startswith('/figtext/') and re.fullmatch(r'/figtext/[0-9a-f]{16}', p):
             f = os.path.join(CACHE, p[9:] + '.txt')
             return self.send(200, {'text': open(f).read() if os.path.exists(f) else ''})
+        if p == '/api/keys':
+            return self.send(200, load_keys())
+        if p == '/api/metadata':
+            return self.send(200, metadata())
         if p == '/api/voices':
             return self.send(200, server_voices())
         if p.startswith('/static/'):
@@ -1086,6 +1158,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if urllib.parse.urlparse(self.path).path == '/api/log':
             n = int(self.headers.get('Content-Length', 0))
             BUILDER.log('page: ' + self.rfile.read(n).decode(errors='replace')[:200000])
+            return self.send(200, {})
+        if urllib.parse.urlparse(self.path).path == '/api/metadata':
+            n = int(self.headers.get('Content-Length', 0))
+            md = json.loads(self.rfile.read(n))
+            ensure_state()
+            with open(os.path.join(STATE, 'metadata.json'), 'w') as f:
+                json.dump(md, f, indent=2, ensure_ascii=False)
+            return self.send(200, metadata())
+        if urllib.parse.urlparse(self.path).path == '/api/convert':
+            n = int(self.headers.get('Content-Length', 0))
+            req = json.loads(self.rfile.read(n))
+            try:
+                res = run_convert(req.get('target'), bool(req.get('anonymous')), req.get('name'), bool(req.get('overwrite')))
+            except FileExistsError as e:
+                return self.send(409, {'error': f'{e} exists'})
+            except Exception as e:
+                return self.send(400, {'error': str(e)})
+            BUILDER.log(f"converted to {req.get('target')}: {res['file']} ({'built' if res['built'] else 'build failed'})")
+            return self.send(200, res)
+        if urllib.parse.urlparse(self.path).path == '/api/keys':
+            n = int(self.headers.get('Content-Length', 0))
+            keys = json.loads(self.rfile.read(n))
+            if not isinstance(keys, dict):
+                return self.send(400, {'error': 'expected an object'})
+            os.makedirs(os.path.dirname(KEYS_FILE), exist_ok=True)
+            with open(KEYS_FILE, 'w') as f:
+                json.dump(keys, f, indent=2, sort_keys=True)
             return self.send(200, {})
         if urllib.parse.urlparse(self.path).path == '/api/open':
             n = int(self.headers.get('Content-Length', 0))

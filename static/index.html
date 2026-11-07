@@ -30,6 +30,9 @@
     <select id="voice" title="Voice"></select>
   </span>
   <span class="group">
+    <select id="mainsel" title="Document of this project" hidden></select>
+    <button id="paperbtn" title="Metadata, conversion to another venue's class, anonymous version">Paper…</button>
+    <button id="keysbtn" title="Keyboard shortcuts: see and change them">Keys</button>
     <button id="theme" title="Colour scheme: follow the system, light or dark">Auto</button>
     <button id="help" title="Keyboard shortcuts">?</button>
   </span>
@@ -90,6 +93,18 @@
   <div id="drawer-preview"></div>
 </aside>
 <div id="menu" hidden></div>
+<div id="paperbox" hidden>
+  <div class="fv-head"><b>Paper</b><span class="spacer"></span>
+    <button id="md-save">Save metadata</button><button id="md-close">Close</button></div>
+  <div id="md-body"></div>
+</div>
+<div id="keysbox" hidden>
+  <div class="fv-head"><b>Keyboard shortcuts</b><span class="spacer"></span>
+    <button id="keys-reset">Reset to defaults</button><button id="keys-save">Save</button><button id="keys-close">Close</button></div>
+  <div id="keys-list"></div>
+  <p class="small">Click Change, then press the new combination (Esc cancels). Shortcuts are saved for you, for every paper.
+  Firefox keeps Ctrl+W, Ctrl+Q, Ctrl+T, Ctrl+N and Ctrl+Shift+R for itself.</p>
+</div>
 <div id="figview" hidden>
   <div class="fv-head">
     <span id="fv-title">Figure</span>

@@ -40,6 +40,7 @@ async function load(keepScroll) {
     FILES[name] = { text: f.text, disk: f.text, base: f.hash };
   }
   render();
+  fillMains();
   if (keepScroll) window.scrollTo(0, y);
   setBuild(DOC.build);
   if (new URLSearchParams(location.search).has('selftest')) selfTest();
@@ -398,6 +399,14 @@ function renderChip(tok, ctx) {
   if (name === 'textasciitilde') return chip('char', tok.s, '~');
   if (name === 'textasciicircum') return chip('char', tok.s, '^');
   if (name === 'textbackslash') return chip('char', tok.s, '\\');
+  // a macro of the document used in text: show it typeset when its body is
+  // maths (\ensuremath{...}, \mathsf{...}, \mathcal...)
+  const body = DOC.macros['\\' + name];
+  if (body !== undefined && /^\s*(\\ensuremath|\\math[a-z]+|\\operatorname|\\textsc)/.test(body)) {
+    const c = chip('math macro', tok.s);
+    typesetInto('$' + tok.s + '$', c, false);
+    if (!c.classList.contains('bad')) return c;
+  }
   return chip('src', tok.s, tok.s.length > 40 ? tok.s.slice(0, 38) + '…' : tok.s);
 }
 
@@ -447,6 +456,11 @@ function mathBody(src) {
 }
 
 const KATEX_CACHE = new Map();   // source -> rendered HTML (cleared when the macros change)
+// LaTeX that KaTeX lacks but papers use in maths and macros
+const KATEX_SHIMS = { '\\ensuremath': '#1', '\\xspace': '', '\\mathchoice': '#1', '\\boldmath': '',
+  '\\unboldmath': '', '\\textsc': '\\text{#1}', '\\mbox': '\\text{#1}',
+  '\\protect': '', '\\nobreak': '', '\\allowbreak': '' };
+const katexMacros = () => ({ ...KATEX_SHIMS, ...DOC.macros });
 function typesetInto(src, node, display) {
   let [body, disp] = mathBody(src);
   body = body.replace(/\\label\{[^}]*\}/g, '').replace(/\\(nonumber|notag)\b/g, '');
@@ -455,7 +469,7 @@ function typesetInto(src, node, display) {
     let html = KATEX_CACHE.get(key);
     if (html === undefined) {
       html = katex.renderToString(body, { displayMode: display || disp, throwOnError: false,
-        macros: { ...DOC.macros }, strict: false, trust: false });
+        macros: katexMacros(), strict: false, trust: false });
       KATEX_CACHE.set(key, html);
     }
     node.innerHTML = html;
@@ -509,11 +523,19 @@ function roman(n) {
 
 // --------------------------------------------------- DOM back to source
 
+// Characters the block being serialized already uses as Unicode (an author
+// who writes — rather than ---): typography leaves them alone.
+let KEEP_UNICODE = '';
 function ser(node) {
   let out = '';
   for (const n of node.childNodes) {
     if (n.nodeType === 3) {
-      let t = L.typeset(L.encodeText(n.data));
+      let t = L.encodeText(n.data);
+      t = KEEP_UNICODE ? t.replace(/[\u2013\u2014\u2018\u2019\u201c\u201d\u2026]/g, (c) => (KEEP_UNICODE.includes(c) ? c : L.typeset(c))) : L.typeset(t);
+      // text right after a % comment would end up inside the comment: start a new line
+      const prevEl = n.previousSibling;
+      if (t && prevEl && prevEl.nodeType === 1 && prevEl.dataset && (prevEl.dataset.src || '').startsWith('%') &&
+          !/^[\r\n]/.test(t)) t = '\n' + t;
       // text typed right after a command must not merge into it: a letter
       // after a control word (\dots + and), or [ or * after any command
       // (\\[, \item[), would change what LaTeX reads
@@ -541,9 +563,10 @@ function ser(node) {
 function segSource(seg, warnings) {
   if (seg.removed) return '';
   if (!seg.touched && seg.kind !== 'code') return seg.src;
+  KEEP_UNICODE = (seg.src.match(/[\u2013\u2014\u2018\u2019\u201c\u201d\u2026]/g) || []).join('');
   const fix = (text, original) => {
     if (text === original) return text;
-    const [t, w] = L.houseRules(text, (DOC.config || {}).house_rules);
+    const [t, w] = L.houseRules(text, (DOC.config || {}).house_rules, original);
     warnings.push(...w);
     return t;
   };
@@ -1074,7 +1097,7 @@ function mathSpeech(src) {
   let [body] = mathBody(src);
   body = body.replace(/\\label\{[^}]*\}/g, '').replace(/\\(nonumber|notag)\b/g, '');
   let html;
-  try { html = katex.renderToString(body, { output: 'mathml', throwOnError: false, macros: { ...DOC.macros }, strict: false }); }
+  try { html = katex.renderToString(body, { output: 'mathml', throwOnError: false, macros: katexMacros(), strict: false }); }
   catch (e) { return ''; }
   const m = new DOMParser().parseFromString(html, 'text/html').querySelector('math');
   return m ? speak(m).replace(/\s+/g, ' ').trim() : '';
@@ -1957,7 +1980,21 @@ async function fuzzTest(n, seed) {
   const CHARS = ['a', 'Z', ' ', '%', '&', '_', '#', '$', '{', '}', '~', '^', '\\', 'é', 'ß', '→', '"', "'", '`',
     '-', '.', ',', '(', ')', '[', ']', '|', '<', '>', '/', '*', '!', '?', ':', ';', '1', '0'];
   const norm = (t) => t.replace(/ /g, ' ').replace(/[ \t\r\n]+/g, ' ').trim();
-  const shown = (src) => { const d = el('div'); renderTokens(L.tokenize(src), d, {}); return norm(d.textContent); };
+  // visible text without what depends on the surrounding document (theorem
+  // and list numbers), and without raw-command display details
+  const visible = (node) => {
+    let out = '';
+    for (const n of node.childNodes) {
+      if (n.nodeType === 3) { out += n.data; continue; }
+      if (n.nodeType !== 1 || n.classList.contains('hidden')) continue;
+      if (n.classList.contains('thmhead') || n.classList.contains('itemmark') || n.classList.contains('runin')) continue;
+      if (n.classList.contains('chip') && n.classList.contains('src')) { out += (n.dataset.src || '').replace(/\{\}/g, ''); continue; }
+      if (n.classList.contains('item')) { out += ' '; continue; }
+      out += visible(n);
+    }
+    return out;
+  };
+  const shown = (src) => { const d = el('div'); renderTokens(L.tokenize(src), d, {}); return norm(visible(d)); };
   const fails = [];
   commit();
   const before = () => Object.fromEntries(Object.entries(FILES).map(([k, f]) => [k, f.text]));
@@ -2020,13 +2057,15 @@ async function fuzzTest(n, seed) {
     if (seg.kind === 'para' && L.serializeTokens(L.tokenize(newSrc)) !== newSrc) fails.push(`#${i} ${op}: block does not round-trip`);
     // fidelity: the source shows what the page shows (paragraphs; a heading or
     // caption compares its title or caption)
-    const pageText = norm(seg.edit.textContent || seg.edit.value || '');
+    const pageText = norm(seg.edit.tagName === 'TEXTAREA' ? seg.edit.value : visible(seg.edit));
     let srcText = null;
     if (seg.kind === 'para') srcText = shown(newSrc);
     else if (seg.kind === 'heading') { const h = L.headingParts(newSrc); srcText = h && shown(h.title); }
     else if (seg.kind === 'figure' || seg.kind === 'table') { const c = L.captionParts(newSrc); srcText = c && shown(c.caption); }
     if (srcText !== null && op !== 'code' && srcText.replace(/\s/g, '') !== pageText.replace(/[\s¶]/g, '')) {
-      fails.push(`#${i} ${op}: page shows ${JSON.stringify(pageText.slice(0, 80))} but the source shows ${JSON.stringify(srcText.slice(0, 80))}`);
+      const pa = pageText.replace(/[\s¶]/g, ''), sb = srcText.replace(/\s/g, '');
+      let d = 0; while (pa[d] === sb[d]) d++;
+      fails.push(`#${i} ${op}: page …${JSON.stringify(pa.slice(Math.max(0, d - 25), d + 35))} vs source …${JSON.stringify(sb.slice(Math.max(0, d - 25), d + 35))}`);
     }
     seg.src = newSrc; seg.touched = false;   // the next round compares with this state
     if (seg.kind === 'heading') seg.parts = L.headingParts(newSrc);
@@ -2355,7 +2394,7 @@ function procLine(g, l, li) {
   const prev = el('div', 'gprev');
   const show = () => {
     prev.textContent = '';
-    try { katex.render(l.content.replace(/\\\\\s*$/, ''), prev, { throwOnError: false, macros: { ...DOC.macros, ...CRYPTOCODE_MACROS } }); }
+    try { katex.render(l.content.replace(/\\\\\s*$/, ''), prev, { throwOnError: false, macros: { ...katexMacros(), ...CRYPTOCODE_MACROS } }); }
     catch (e) { prev.textContent = l.content; }
   };
   ta.oninput = () => { l.content = ta.value; show(); };
@@ -2525,3 +2564,287 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#fig
     }, 300);
   }
 }
+
+// ============================================================ shortcuts
+//
+// Every action with a key, in one table; your changes (saved in
+// ~/.config/paper-editor/keys.json) replace the default keys of an action.
+
+const ACTION_DEFS = [
+  // scope global: anywhere on the page; text: in the text of the paper
+  ['save', 'Save', 'global', ['C-s'], () => save()],
+  ['undo', 'Undo', 'global', ['C-z'], () => undo()],
+  ['redo', 'Redo', 'global', ['C-Z', 'C-y'], () => redo()],
+  ['find', 'Find', 'global', ['C-f'], () => openFind(false)],
+  ['replace', 'Find and replace', 'global', ['C-h'], () => openFind(true)],
+  ['read', 'Read aloud from the cursor', 'global', ['M-r'], () => TTS.play()],
+  ['bold', 'Bold (\\textbf)', 'text', ['C-b'], () => wrap('\\textbf{', 'strong')],
+  ['emph', 'Emphasis (\\emph)', 'text', ['C-i'], () => wrap('\\emph{', 'em')],
+  ['italic', 'Italic (\\textit)', 'text', ['C-I'], () => wrap('\\textit{', 'em')],
+  ['math', 'Inline maths', 'text', ['C-m', '$'], () => insertMath(false)],
+  ['display', 'Displayed equation', 'text', ['C-M'], () => insertMath(true)],
+  ['cite', 'Cite (search)', 'text', ['C-M-c'], () => citePalette()],
+  ['ref', 'Reference (search)', 'text', ['C-M-r'], () => refPalette()],
+  ['latex', 'Insert LaTeX', 'text', ['C-\\'], () => insertLatex('\\cref{}', 'Insert LaTeX')],
+  ['section', 'Section heading at the cursor', 'text', ['C-M-1'], () => headingAtCaret('section')],
+  ['subsection', 'Subsection heading at the cursor', 'text', ['C-M-2'], () => headingAtCaret('subsection')],
+  ['paragraph', '\\paragraph heading at the cursor', 'text', ['C-M-3'], () => headingAtCaret('paragraph')],
+  ['linestart', 'Start of line', 'text', ['C-a'], () => getSelection().modify('move', 'backward', 'lineboundary')],
+  ['lineend', 'End of line', 'text', ['C-e'], () => getSelection().modify('move', 'forward', 'lineboundary')],
+  ['selstart', 'Select to start of line', 'text', ['C-A'], () => getSelection().modify('extend', 'backward', 'lineboundary')],
+  ['selend', 'Select to end of line', 'text', ['C-E'], () => getSelection().modify('extend', 'forward', 'lineboundary')],
+  ['deleteline', 'Delete the line', 'text', ['C-d'], () => deleteLine()],
+  ['cut', 'Cut the region, or the line', 'text', ['M-w'], () => cutRegionOrLine()],
+  ['duplicate', 'Duplicate the region, or the line', 'text', ['C-p'], () => duplicate()],
+  ['expand', 'Expand the selection', 'text', ['C-+', 'C-='], () => expandRegion()],
+];
+let USER_KEYS = {};
+
+function applyKeymap() {
+  for (const k of Object.keys(GLOBAL_KEYS)) if (k !== 'Escape') delete GLOBAL_KEYS[k];
+  for (const k of Object.keys(TEXT_KEYS)) delete TEXT_KEYS[k];
+  for (const [id, , scope, defaults, fn] of ACTION_DEFS) {
+    for (const key of USER_KEYS[id] || defaults) (scope === 'global' ? GLOBAL_KEYS : TEXT_KEYS)[key] = fn;
+  }
+}
+fetch('/api/keys').then((r) => r.json()).then((k) => { USER_KEYS = k || {}; applyKeymap(); }).catch(applyKeymap);
+
+// "C-M-r" -> "Ctrl+Alt+R"
+const prettyKey = (k) => k.replace(/^((?:[CMS]-)*)(.+)$/, (_, mods, key) =>
+  mods.replace(/C-/g, 'Ctrl+').replace(/M-/g, 'Alt+').replace(/S-/g, 'Shift+') +
+  (key.length === 1 && key !== key.toLowerCase() ? 'Shift+' + key : key.length === 1 ? key.toUpperCase() : key));
+
+let KEYS_DRAFT = null, RECORDING = null;
+function openKeys() {
+  KEYS_DRAFT = JSON.parse(JSON.stringify(USER_KEYS));
+  drawKeys();
+  $('#keysbox').hidden = false;
+}
+function drawKeys() {
+  const list = $('#keys-list');
+  list.textContent = '';
+  const current = (id, d) => KEYS_DRAFT[id] || d;
+  const used = {};
+  for (const [id, , , d] of ACTION_DEFS) for (const k of current(id, d)) (used[k] = used[k] || []).push(id);
+  for (const [id, label, , d] of ACTION_DEFS) {
+    const keys = current(id, d);
+    const row = el('div', 'keyrow');
+    if (keys.some((k) => used[k].length > 1)) row.classList.add('conflict');
+    if (RECORDING === id) row.classList.add('recording');
+    row.append(el('span', '', label));
+    const ks = el('span', 'keys');
+    if (RECORDING === id) ks.textContent = 'press a key…';
+    else keys.forEach((k) => ks.append(el('kbd', '', prettyKey(k))));
+    const ch = el('button', '', 'Change');
+    ch.onclick = () => { RECORDING = id; drawKeys(); };
+    row.append(ks, ch);
+    list.append(row);
+  }
+}
+document.addEventListener('keydown', (e) => {
+  if (!RECORDING) return;
+  e.preventDefault(); e.stopImmediatePropagation();
+  if (['Control', 'Alt', 'Shift', 'Meta'].includes(e.key)) return;
+  if (e.key !== 'Escape') KEYS_DRAFT[RECORDING] = [keyName(e)];
+  RECORDING = null;
+  drawKeys();
+}, true);
+$('#keysbtn').onclick = openKeys;
+$('#keys-close').onclick = () => { RECORDING = null; $('#keysbox').hidden = true; };
+$('#keys-reset').onclick = () => { KEYS_DRAFT = {}; drawKeys(); };
+$('#keys-save').onclick = async () => {
+  await fetch('/api/keys', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
+    body: JSON.stringify(KEYS_DRAFT) });
+  USER_KEYS = KEYS_DRAFT;
+  applyKeymap();
+  $('#keysbox').hidden = true;
+  banner('Shortcuts saved.');
+};
+
+// ======================================================= main switcher
+
+function fillMains() {
+  const sel = $('#mainsel');
+  const mains = DOC.mains || [];
+  sel.hidden = mains.length < 2;
+  sel.textContent = '';
+  const here = DOC.main.split('/').pop();
+  for (const m of mains) sel.append(new Option(m, m, false, m === here));
+}
+$('#mainsel').onchange = async () => {
+  if (editedFiles().length && !confirm('You have unsaved edits; switching documents discards them. Switch?')) { fillMains(); return; }
+  const r = await fetch('/api/open', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
+    body: JSON.stringify({ main: $('#mainsel').value }) });
+  if (!r.ok) { banner('Could not open it: ' + (await r.json()).error); return; }
+  for (const k of Object.keys(FILES)) delete FILES[k];
+  await load(false);
+};
+
+// ============================================================ paper dialog
+//
+// Metadata (extracted from the front matter, edited here, saved in the
+// project's .paper-editor/metadata.json), and conversion to another class.
+
+const MD = { data: null, info: null, target: 'llncs', anon: false };
+
+async function openPaper() {
+  MD.info = await (await fetch('/api/metadata')).json();
+  MD.data = JSON.parse(JSON.stringify(MD.info.metadata));
+  drawPaper();
+  $('#paperbox').hidden = false;
+}
+
+function drawPaper() {
+  const md = MD.data, body = $('#md-body');
+  body.textContent = '';
+  const need = new Set(missingNow().map(([w, f]) => w + '|' + f));
+  const field = (obj, key, label, where, width) => {
+    const i = el('input'); i.type = 'text'; i.value = obj[key] || ''; i.placeholder = label;
+    i.style.width = width || '14em';
+    if (need.has(where + '|' + key)) i.classList.add('need');
+    i.oninput = () => { obj[key] = i.value; refreshMissing(); };
+    const l = el('label', '', label + ' '); l.append(i);
+    return l;
+  };
+  body.append(el('div', 'small', `Read from the front matter (${md.source_class})${MD.info.saved ? ', with your saved edits' : ''}. Names keep their LaTeX (accents, macros).`));
+  body.append(el('h4', '', 'Paper'));
+  let r = el('div', 'row');
+  r.append(field(md, 'title', 'Title', 'paper', '30em'), field(md, 'running_title', 'Running title', 'paper'));
+  body.append(r);
+  r = el('div', 'row');
+  const kw = el('input'); kw.type = 'text'; kw.value = (md.keywords || []).join(', '); kw.style.width = '30em';
+  kw.oninput = () => { md.keywords = kw.value.split(',').map((x) => x.trim()).filter(Boolean); };
+  const kl = el('label', '', 'Keywords (comma-separated) '); kl.append(kw);
+  r.append(kl, field(md, 'license', 'Licence (e.g. CC-by)', 'paper', '9em'));
+  body.append(r);
+  body.append(el('h4', '', 'Authors'));
+  md.authors.forEach((a, i) => {
+    const where = `author ${i + 1} (${a.name || '?'})`;
+    const c = el('div', 'card');
+    r = el('div', 'row');
+    r.append(field(a, 'name', 'Name', where, '16em'), field(a, 'email', 'Email', where), field(a, 'orcid', 'ORCID', where, '11em'));
+    const del = el('button', '', '✕'); del.title = 'Remove this author';
+    del.onclick = () => { md.authors.splice(i, 1); drawPaper(); };
+    r.append(del);
+    c.append(r);
+    r = el('div', 'row');
+    r.append(el('span', need.has(where + '|affiliation') ? 'missing' : '', 'Affiliations:'));
+    md.affiliations.forEach((af, k) => {
+      const cb = el('input'); cb.type = 'checkbox'; cb.checked = (a.affiliations || []).includes(k);
+      cb.onchange = () => { a.affiliations = md.affiliations.map((_, j) => j).filter((j) => (j === k ? cb.checked : (a.affiliations || []).includes(j))); refreshMissing(); };
+      const l = el('label', '', ' ' + (k + 1) + '. ' + (af.name || '?').slice(0, 30)); l.prepend(cb);
+      r.append(l);
+    });
+    c.append(r);
+    body.append(c);
+  });
+  const addA = el('button', '', '＋ author');
+  addA.onclick = () => { md.authors.push({ name: '', email: '', orcid: '', affiliations: [] }); drawPaper(); };
+  body.append(addA);
+  body.append(el('h4', '', 'Affiliations'));
+  md.affiliations.forEach((af, k) => {
+    const where = `affiliation ${k + 1} (${af.name || '?'})`;
+    r = el('div', 'row card');
+    r.append(el('b', '', (k + 1) + '.'), field(af, 'name', 'Name', where, '18em'), field(af, 'department', 'Department', where, '10em'),
+      field(af, 'city', 'City', where, '8em'), field(af, 'country', 'Country', where, '8em'), field(af, 'ror', 'ROR id', where, '8em'));
+    const del = el('button', '', '✕');
+    del.onclick = () => {
+      md.affiliations.splice(k, 1);
+      for (const a of md.authors) a.affiliations = (a.affiliations || []).filter((j) => j !== k).map((j) => (j > k ? j - 1 : j));
+      drawPaper();
+    };
+    r.append(del);
+    body.append(r);
+  });
+  const addF = el('button', '', '＋ affiliation');
+  addF.onclick = () => { md.affiliations.push({ name: '', department: '', city: '', country: '', ror: '' }); drawPaper(); };
+  body.append(addF);
+  // conversion
+  const cv = el('div', 'convert');
+  cv.append(el('h4', '', 'Convert to another class'));
+  r = el('div', 'row');
+  const sel = el('select');
+  for (const [k, label] of Object.entries(MD.info.targets)) sel.append(new Option(label, k, false, k === MD.target));
+  sel.onchange = () => { MD.target = sel.value; drawPaper(); };
+  const an = el('input'); an.type = 'checkbox'; an.checked = MD.anon;
+  an.onchange = () => { MD.anon = an.checked; drawPaper(); };
+  const al = el('label', '', ' anonymous (no authors, affiliations or acknowledgements)'); al.prepend(an);
+  const name = el('input'); name.type = 'text'; name.style.width = '16em';
+  name.value = DOC.main.split('/').pop().replace(/\.tex$/, '') + '-' + MD.target + (MD.anon ? '-anon' : '') + '.tex';
+  const go = el('button', '', 'Convert and build');
+  r.append(sel, al);
+  cv.append(r);
+  r = el('div', 'row');
+  const nl = el('label', '', 'New main file '); nl.append(name);
+  r.append(nl, go);
+  cv.append(r);
+  const miss = el('div', 'missingbox');
+  cv.append(miss);
+  const result = el('div');
+  cv.append(result);
+  body.append(cv);
+  refreshMissing();
+  go.onclick = async () => {
+    await saveMetadata(true);
+    result.textContent = 'Converting and building…';
+    const send = (overwrite) => fetch('/api/convert', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
+      body: JSON.stringify({ target: MD.target, anonymous: MD.anon, name: name.value, overwrite }) });
+    let resp = await send(false);
+    if (resp.status === 409 && confirm(`${name.value} exists. Overwrite it?`)) resp = await send(true);
+    const res = await resp.json();
+    if (!resp.ok) { result.textContent = res.error; return; }
+    result.textContent = '';
+    result.append(el('p', res.built && !res.undefined ? 'ok' : 'missing',
+      res.built ? `${res.file} written and built` + (res.undefined ? `, with ${res.undefined} undefined references or citations` : '.') :
+        `${res.file} written, but the build failed: ${res.errors.join(' ')}`));
+    for (const w of res.warnings) result.append(el('p', 'small', '• ' + w));
+    const open = el('button', '', 'Open it in the editor');
+    open.onclick = async () => {
+      await fetch('/api/open', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN }, body: JSON.stringify({ main: res.file }) });
+      for (const k of Object.keys(FILES)) delete FILES[k];
+      $('#paperbox').hidden = true;
+      await load(false);
+    };
+    result.append(open);
+  };
+}
+
+function missingNow() {
+  // what the chosen target needs, computed here so the form updates as you type
+  const req = { ieee: [['name'], ['name'], ['title']], llncs: [['name'], ['name'], ['title']],
+    iacrcc: [['name', 'email'], ['name', 'country'], ['title', 'license']], iacrtrans: [['name'], ['name'], ['title']],
+    acmart: [['name', 'email'], ['name', 'city', 'country'], ['title']], lipics: [['name'], ['name'], ['title', 'license']],
+    article: [['name'], [], ['title']] }[MD.target];
+  const md = MD.data, out = [];
+  if (!req) return out;
+  for (const f of req[2]) if (!md[f]) out.push(['paper', f]);
+  if (!md.authors.length && !MD.anon) out.push(['paper', 'authors']);
+  if (MD.anon) return out;     // an anonymous version needs no author data
+  md.authors.forEach((a, i) => {
+    const w = `author ${i + 1} (${a.name || '?'})`;
+    for (const f of req[0]) if (!a[f]) out.push([w, f]);
+    if (req[1].length && !(a.affiliations || []).length) out.push([w, 'affiliation']);
+  });
+  md.affiliations.forEach((af, k) => { for (const f of req[1]) if (!af[f]) out.push([`affiliation ${k + 1} (${af.name || '?'})`, f]); });
+  return out;
+}
+
+function refreshMissing() {
+  const box = document.querySelector('#md-body .missingbox');
+  if (!box) return;
+  const m = missingNow();
+  box.className = 'missingbox ' + (m.length ? 'missing' : 'ok');
+  box.textContent = m.length ? `${MD.info.targets[MD.target]} needs: ` + m.map(([w, f]) => `${f} of ${w}`).join('; ')
+    : `Everything ${MD.info.targets[MD.target]} needs is filled in.`;
+}
+
+async function saveMetadata(quiet) {
+  const r = await fetch('/api/metadata', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
+    body: JSON.stringify(MD.data) });
+  MD.info = await r.json();
+  if (!quiet) banner('Metadata saved in .paper-editor/metadata.json.');
+}
+
+$('#paperbtn').onclick = openPaper;
+$('#md-save').onclick = () => saveMetadata(false);
+$('#md-close').onclick = () => { $('#paperbox').hidden = true; };

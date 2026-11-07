@@ -260,10 +260,22 @@
     if (!text) return;
     const re = /\r?\n[ \t\r]*\n\s*/g;
     let i = 0, m;
+    // blank lines inside these environments do not end a paragraph
+    const keep = [];
+    const envRe = /\\begin\{([A-Za-z]+\*?)\}/g;
+    let em;
+    while ((em = envRe.exec(text))) {
+      if (!(MATH_ENVS.has(em[1]) || VERBATIM_ENVS.has(em[1]) || /^(algorithm|algorithmic|tabularx?|array|cases|minipage|center)\*?$/.test(em[1]))) continue;
+      if (inComment(text, em.index)) continue;
+      const e = envEnd(text, em.index, em[1]);
+      if (e > 0) { keep.push([em.index, e]); envRe.lastIndex = e; }
+    }
+    const kept = (p) => keep.some(([a, b]) => p > a && p < b);
     const lead = /^\s*/.exec(text)[0];
     if (lead) { segs.push({ kind: 'gap', src: lead }); i = lead.length; }
     re.lastIndex = i;
     while ((m = re.exec(text))) {
+      if (kept(m.index)) continue;
       if (m.index > i) segs.push(paraSeg(text.slice(i, m.index)));
       segs.push({ kind: 'gap', src: m[0] });
       i = m.index + m[0].length;
@@ -311,12 +323,15 @@
 
   // House formatting for an edited paragraph: a tie before \cite and \ref,
   // as everywhere in the paper.  Returns [text, warnings].
-  function houseRules(text, rules) {
+  // House rules for edited text.  With the block's original source given,
+  // a match that is already there (the author's own style) is left alone.
+  function houseRules(text, rules, original) {
     rules = rules || { tie_before: ['cite', 'ref'], flag_bracketed_cref: true };
     const warnings = [];
     if (rules.tie_before && rules.tie_before.length) {
       const cmds = rules.tie_before.map((c) => c.replace(/[^A-Za-z]/g, '')).join('|');
-      text = text.replace(new RegExp('([A-Za-z0-9.]) +\\\\(' + cmds + ')\\{', 'g'), '$1~\\$2{');
+      text = text.replace(new RegExp('(\\S*[A-Za-z0-9.]) +\\\\(' + cmds + ')\\{([^}]*)\\}', 'g'),
+        (all, w, cmd, arg) => (original && original.includes(all) ? all : `${w}~\\${cmd}{${arg}}`));
     }
     if (rules.flag_bracketed_cref && /\(\s*\\[cC]ref\{/.test(text)) warnings.push('bracketed \\cref: refer in prose instead');
     if (/  +/.test(text.replace(/\n[ \t]*/g, '\n'))) {
