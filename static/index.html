@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="token" content="__TOKEN__">
+<title>Paper editor</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header id="bar">
+  <span id="title">Paper editor</span>
+  <span class="group">
+    <button id="save" title="Save edited files (Ctrl+S)">Save</button>
+    <span id="dirty"></span>
+  </span>
+  <span class="group">
+    <button id="cols" title="Switch between one and two columns">Two columns</button>
+  </span>
+  <span class="group" id="ttsbar">
+    <button id="play" title="Read aloud from the paragraph with the cursor (Alt+R)">▶ Read</button>
+    <button id="pause" title="Pause or resume">⏸</button>
+    <button id="stop" title="Stop">⏹</button>
+    <select id="rate" title="Speed">
+      <option value="0.8">0.8×</option><option value="1" selected>1×</option>
+      <option value="1.2">1.2×</option><option value="1.4">1.4×</option><option value="1.7">1.7×</option>
+    </select>
+    <select id="voice" title="Voice"></select>
+  </span>
+  <span class="group">
+    <button id="theme" title="Colour scheme: follow the system, light or dark">Auto</button>
+    <button id="help" title="Keyboard shortcuts">?</button>
+  </span>
+  <span id="build"></span>
+</header>
+<nav id="toolbar" aria-label="Editing">
+  <button data-act="bold" title="Bold \textbf (Ctrl+B)"><b>B</b></button>
+  <button data-act="emph" title="Emphasis \emph (Ctrl+I)"><i>I</i></button>
+  <span class="sep"></span>
+  <button data-act="math" title="Inline maths (Ctrl+M or $)">$x$</button>
+  <button data-act="display" title="Displayed equation (Ctrl+Shift+M)">∑ equation</button>
+  <span class="sep"></span>
+  <button data-act="cite" title="Cite: search references.bib and cryptobib (Ctrl+Alt+C)">Cite…</button>
+  <button data-act="ref" title="Reference a section, theorem, figure, table or equation (Ctrl+Alt+R)">Ref…</button>
+  <button data-act="latex" title="Insert any LaTeX (Ctrl+\)">\…</button>
+  <span class="sep"></span>
+  <button data-act="section" title="Section heading at the cursor (Ctrl+Alt+1)">§ Section</button>
+  <button data-act="subsection" title="Subsection heading at the cursor (Ctrl+Alt+2)">§§</button>
+  <button data-act="paragraph" title="\paragraph heading at the cursor (Ctrl+Alt+3)">¶ Heading</button>
+  <button data-act="newpara" title="New paragraph at the cursor (Enter)">¶ New</button>
+  <span class="sep"></span>
+  <button data-act="find" title="Find (Ctrl+F), find and replace (Ctrl+H)">Find/Replace</button>
+  <button data-act="undo" title="Undo (Ctrl+Z)">↶</button>
+  <button data-act="redo" title="Redo (Ctrl+Shift+Z)">↷</button>
+</nav>
+<div id="findbar" hidden>
+  <input id="find-q" placeholder="Find" spellcheck="false">
+  <input id="find-r" placeholder="Replace with" spellcheck="false">
+  <label title="Regular expression"><input type="checkbox" id="find-re"> .*</label>
+  <label title="Match case"><input type="checkbox" id="find-case"> Aa</label>
+  <label title="Whole words"><input type="checkbox" id="find-word"> W</label>
+  <span id="find-count"></span>
+  <button id="find-prev" title="Previous (Shift+Enter)">↑</button>
+  <button id="find-next" title="Next (Enter)">↓</button>
+  <button id="find-one" title="Replace this match">Replace</button>
+  <button id="find-all" title="Replace every match">All</button>
+  <button id="find-close" title="Close (Esc)">✕</button>
+  <span class="small">text only: maths and LaTeX chips are not searched</span>
+</div>
+<div id="banner" hidden></div>
+<main id="doc" spellcheck="true"></main>
+<aside id="drawer" hidden>
+  <div class="drawer-head">
+    <span id="drawer-title">Edit LaTeX</span>
+    <span class="spacer"></span>
+    <button id="drawer-apply" title="Ctrl+Enter">Apply</button>
+    <button id="drawer-delete">Delete</button>
+    <button id="drawer-cancel" title="Esc">Cancel</button>
+  </div>
+  <textarea id="drawer-src" spellcheck="false"></textarea>
+  <div id="drawer-preview"></div>
+</aside>
+<div id="menu" hidden></div>
+<div id="palette" hidden>
+  <div class="pal-head"><span id="pal-title"></span><span class="spacer"></span><span id="pal-tray"></span></div>
+  <input id="pal-q" spellcheck="false" autocomplete="off">
+  <div id="pal-list"></div>
+  <div id="pal-foot"></div>
+</div>
+<div id="helpbox" hidden>
+  <h3>Editing</h3>
+  <ul>
+    <li>Type anywhere in the text. <kbd>Enter</kbd> starts a new paragraph; <kbd>Backspace</kbd> at the start of a paragraph joins it to the one before.</li>
+    <li><kbd>$</kbd> or <kbd>Ctrl</kbd>+<kbd>M</kbd>: inline maths. <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd>: displayed maths.</li>
+    <li><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd>: cite (search by key, title, author or year; Ctrl+Enter picks several; not found? search online and add it to references.bib).</li>
+    <li><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>R</kbd>: reference a section, theorem, figure, table or equation.</li>
+    <li><kbd>Ctrl</kbd>+<kbd>F</kbd>: find and replace. <kbd>Ctrl</kbd>+<kbd>\</kbd>: insert any LaTeX.</li>
+    <li><kbd>Ctrl</kbd>+<kbd>I</kbd> / <kbd>Ctrl</kbd>+<kbd>B</kbd>: <code>\emph</code> / <code>\textbf</code>.</li>
+    <li>Click maths, a reference or any grey chip to edit its LaTeX; <kbd>Ctrl</kbd>+<kbd>Enter</kbd> applies.</li>
+    <li>Hover a block and use <b>＋</b> to add a paragraph, heading or displayed maths after it, or <b>✕</b> to delete a heading.</li>
+    <li>Headings, figure and table captions are edited in place; listings in their box.</li>
+    <li><kbd>Ctrl</kbd>+<kbd>S</kbd> saves. Saving writes only the files you changed, applies the house rules, and rebuilds the PDF.</li>
+  </ul>
+  <h3>Reading aloud</h3>
+  <ul><li>Put the cursor in a paragraph and press ▶ (or <kbd>Alt</kbd>+<kbd>R</kbd>). Maths is read as words.</li></ul>
+  <button id="helpclose">Close</button>
+</div>
+<script src="/static/latex.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
