@@ -154,7 +154,8 @@ def preamble_text():
 
 
 def read(name):
-    with open(os.path.join(PAPER, name), encoding='utf-8', errors='replace') as f:
+    # newline='': keep \r\n exactly as it is in the file
+    with open(os.path.join(PAPER, name), encoding='utf-8', errors='replace', newline='') as f:
         return f.read()
 
 
@@ -706,8 +707,10 @@ def online_add(source, ident, key):
         raise ValueError('unknown source')
     bib = format_bib(urllib.request.urlopen(req, timeout=20).read().decode(), key)
     path = os.path.join(PAPER, bib_target())
-    text = open(path, encoding='utf-8').read() if os.path.exists(path) else ''
-    with open(path, 'w', encoding='utf-8') as f:
+    text = open(path, encoding='utf-8', newline='').read() if os.path.exists(path) else ''
+    nl = '\r\n' if '\r\n' in text else '\n'
+    bib = bib.replace('\n', nl)
+    with open(path, 'w', encoding='utf-8', newline='') as f:
         f.write(text.rstrip('\n') + '\n\n' + bib + '\n')
     return bib
 
@@ -1044,7 +1047,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send(403, {'error': 'bad token'})
         if urllib.parse.urlparse(self.path).path == '/api/log':
             n = int(self.headers.get('Content-Length', 0))
-            BUILDER.log('page: ' + self.rfile.read(n).decode(errors='replace')[:4000])
+            BUILDER.log('page: ' + self.rfile.read(n).decode(errors='replace')[:200000])
             return self.send(200, {})
         if urllib.parse.urlparse(self.path).path == '/api/open':
             n = int(self.headers.get('Content-Length', 0))
@@ -1077,7 +1080,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send(409, {'error': 'changed on disk', 'hash': sha(current)})
         path = os.path.join(PAPER, name)
         tmp = path + '.editor-tmp'
-        with open(tmp, 'w', encoding='utf-8') as f:
+        with open(tmp, 'w', encoding='utf-8', newline='') as f:
             f.write(text)
         os.replace(tmp, path)
         BUILDER.log(f'saved {name}')
@@ -1097,7 +1100,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send(200, audio, ctype)
 
 
-def open_paper(path, cwd=None):
+def open_paper(path, cwd=None, state=None):
     """Point the editor at a main file (path relative to PAPER or absolute)."""
     global PAPER, MAIN, ROOT, STATE, CACHE, CONFIG, VOICES
     path = os.path.abspath(path)
@@ -1106,7 +1109,7 @@ def open_paper(path, cwd=None):
     r = subprocess.run(['git', 'rev-parse', '--show-toplevel'], cwd=os.path.dirname(path),
                        capture_output=True, text=True)
     ROOT = r.stdout.strip() if r.returncode == 0 else PAPER
-    STATE = os.path.join(os.path.dirname(path), '.paper-editor')
+    STATE = os.path.abspath(state) if state else os.path.join(os.path.dirname(path), '.paper-editor')
     CACHE = os.path.join(STATE, 'cache')
     CONFIG = json.loads(json.dumps(DEFAULT_CONFIG))
     for cfg in (os.path.join(os.path.dirname(path), '.paper-editor.json'), os.path.join(STATE, 'config.json')):
@@ -1129,6 +1132,7 @@ def main():
     ap.add_argument('path', help='a project folder, or its main .tex file')
     ap.add_argument('--main', help='the main file, when the folder has several documents')
     ap.add_argument('--cwd', help='the directory LaTeX runs in (default: the main file\'s directory)')
+    ap.add_argument('--state', help='where to keep settings and caches (default: <project>/.paper-editor)')
     ap.add_argument('--port', type=int, default=8765)
     ap.add_argument('--no-open', action='store_true', help='do not open a browser')
     args = ap.parse_args()
@@ -1142,7 +1146,7 @@ def main():
         path = os.path.join(path, mains[0])
     if not os.path.isfile(path):
         ap.error(f'{args.path}: no such file')
-    open_paper(path, args.cwd)
+    open_paper(path, args.cwd, args.state)
     ensure_state()
     BUILDER = Builder()
     threading.Thread(target=bib_entries, daemon=True).start()

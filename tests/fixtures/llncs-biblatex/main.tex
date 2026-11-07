@@ -1,0 +1,52 @@
+\documentclass{llncs}
+\usepackage{amsmath,amssymb}
+\usepackage[style=alphabetic,backend=biber]{biblatex}
+\addbibresource{lit.bib}
+\usepackage{hyperref,cleveref}
+\spnewtheorem{assumption}{Assumption}{\bfseries}{\itshape}
+\crefname{assumption}{Assumption}{Assumptions}
+\newcommand{\Enc}{\mathsf{Enc}}
+\begin{document}
+\title{A Fake LNCS Paper}
+\author{First Author\inst{1} \and Second Author\inst{2}}
+\institute{Fake University \and Another Institute}
+\maketitle
+\begin{abstract}
+An abstract with $\Enc(k,m)$ and a citation~\cite{Lit1}.
+\keywords{fake \and test}
+\end{abstract}
+
+\section{Introduction}
+We assume \cref{as:one} and prove \cref{thm:a,lem:b}; see also \cite{Lit1,Lit2}.
+
+\begin{assumption}\label{as:one}
+Encryption is imaginary.
+\end{assumption}
+
+\begin{theorem}\label{thm:a}
+$\Enc$ is secure.
+\end{theorem}
+\begin{lemma}[Helper]\label{lem:b}
+Labelled equations:
+\begin{align}
+  a &= b \label{eq:a}\\
+  c &= d \nonumber\\
+  e &= f \label{eq:e}
+\end{align}
+and \eqref{eq:a} with \eqref{eq:e}.
+\end{lemma}
+\begin{proof}
+Trivial.\qed
+\end{proof}
+\begin{definition}
+A definition with an item list:
+\begin{enumerate}
+\item one, \item two.
+\end{enumerate}
+\end{definition}
+
+\section*{Unnumbered section}
+Text in an unnumbered section.
+
+\printbibliography
+\end{document}

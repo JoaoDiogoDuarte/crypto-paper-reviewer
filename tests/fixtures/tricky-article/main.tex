@@ -1,0 +1,34 @@
+﻿\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amsthm,listings,verbatim,xparse}
+\newtheorem{thm}{Théorème}
+\def\pair#1#2{\langle #1, #2\rangle}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\NewDocumentCommand{\twice}{m}{#1#1}
+\makeatletter
+\newcommand{\at@private}{secret}
+\makeatother
+\begin{document}
+\section{Unicode, tabs and line endings}
+Café, naïve, Gödel, Łukasiewicz, → arrows; tabs	between	words.
+A pair $\pair{a}{b}$, $\argmax_x f(x)$ and $\twice{x}$.
+
+\iffalse
+Hidden text with $unbalanced math and a % percent and \begin{itemize}.
+\fi
+\begin{comment}
+Also hidden: $x and }{ braces.
+\end{comment}
+
+\begin{verbatim}
+\begin{document} % not a real one
+$not math$ and {unbalanced
+\end{verbatim}
+
+\begin{thm}[Unicode name]
+Every théorème is true.
+\end{thm}
+
+Escaped specials: \% \& \_ \# \$ \{ \} and a backslash \textbackslash{} in text.
+A trailing paragraph without a final newline.
+\end{document}

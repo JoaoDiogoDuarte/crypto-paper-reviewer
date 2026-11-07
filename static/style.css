@@ -76,7 +76,7 @@ h4 { font-size: 1em; }
 .chip.math.display { display: block; text-align: center; margin: .5em 0; background: var(--math); padding: .2em 0;
   white-space: normal; overflow-x: auto; }
 .chip.hidden { display: none; }
-.chip.nl, .chip.tie { cursor: text; }
+.chip.nl, .chip.tie, .chip.char { cursor: text; }
 .chip.nl:hover, .chip.tie:hover { outline: none; }
 .chip.parbreak { display: block; height: .8em; cursor: text; }
 .chip.parbreak::after { content: "¶"; color: var(--muted); font-size: .8em; }

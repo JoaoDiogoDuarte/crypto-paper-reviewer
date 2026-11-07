@@ -33,10 +33,12 @@ def free_port():
         return s.getsockname()[1]
 
 
-def run(paper, mode='selftest', timeout=60):
+def run(paper, mode='selftest', timeout=60, key=None):
     port = free_port()
     log = tempfile.NamedTemporaryFile('w+', suffix='.log', delete=False)
-    srv = subprocess.Popen([PY, os.path.join(ROOT, 'server.py'), paper, '--port', str(port), '--no-open'],
+    state = tempfile.mkdtemp(prefix='pe-state-')   # never write into the paper's folder
+    srv = subprocess.Popen([PY, os.path.join(ROOT, 'server.py'), paper, '--port', str(port), '--no-open',
+                            '--state', state],
                            stdout=log, stderr=subprocess.STDOUT)
     profile = tempfile.mkdtemp(prefix='pe-ff-')
     try:
@@ -61,11 +63,17 @@ def run(paper, mode='selftest', timeout=60):
         while time.time() < deadline:
             log.seek(0)
             text = log.read()
-            key = 'SELFTEST' if mode == 'selftest' else mode.upper()
-            if 'page: ' + key in text:
+            k = key or ('SELFTEST' if mode == 'selftest' else mode.upper())
+            if 'page: JSERROR' in text and 'page: ' + k not in text:
+                time.sleep(1)
+                log.seek(0)
+                report = 'JSERROR ' + log.read().split('page: JSERROR', 1)[1].split('\n')[0]
+                break
+            if 'page: ' + k in text:
                 time.sleep(0.5)
                 log.seek(0)
-                report = log.read().split('page: ', 1)[1]
+                report = log.read().split('page: ' + k, 1)[1]
+                report = (k + report) if k == 'SELFTEST' else report.strip()
                 break
             time.sleep(0.5)
         ff.kill()
@@ -74,6 +82,7 @@ def run(paper, mode='selftest', timeout=60):
         srv.kill()
         srv.wait()
         shutil.rmtree(profile, ignore_errors=True)
+        shutil.rmtree(state, ignore_errors=True)
         os.unlink(log.name)
 
 

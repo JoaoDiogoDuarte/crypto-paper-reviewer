@@ -61,11 +61,10 @@
   // backslash other than the escapes below, and none of the characters that
   // the tokenizer turns into tokens, so encode(decode(s)) === s.
   function decodeText(s) { return s.replace(/\\([%&_#${}])/g, '$1'); }
-  function encodeText(t) {
-    return t.replace(/\u00a0/g, ' ').replace(/\\/g, '\\textbackslash{}')
-      .replace(/[%&_#${}]/g, '\\$&').replace(/~/g, '\\textasciitilde{}')
-      .replace(/\^/g, '\\textasciicircum{}');
-  }
+  // one pass, so that an escape is never escaped again
+  const ENC = { '%': '\\%', '&': '\\&', '_': '\\_', '#': '\\#', '$': '\\$', '{': '\\{', '}': '\\}',
+    '\\': '\\textbackslash{}', '~': '\\textasciitilde{}', '^': '\\textasciicircum{}', '\u00a0': ' ' };
+  function encodeText(t) { return t.replace(/[%&_#${}\\~^\u00a0]/g, (c) => ENC[c]); }
 
   // ---------------------------------------------------------------- tokenizer
 
@@ -114,6 +113,18 @@
             push({ t: 'env', mode: name, env, opt, s: s.slice(i, end) });
             i = end; continue;
           }
+          if ((name === 'verb' || name === 'lstinline' || name === 'mintinline') && s[k] !== '{') {
+            // \verb|...|: everything up to the next delimiter is literal
+            let k2 = k;
+            if (s[k2] === '*') k2++;
+            if (name === 'mintinline' && s[k2] === '{') k2 = groupEnd(s, k2);
+            while (s[k2] === '[') { const e = groupEnd(s, k2); if (e < 0) break; k2 = e; }
+            const delim = s[k2];
+            const close = delim === undefined ? -1 : s.indexOf(delim, k2 + 1);
+            const end = close < 0 ? s.length : close + 1;
+            push({ t: 'cmd', name: 'verb', s: s.slice(i, end) });
+            i = end; continue;
+          }
           if (FMT_CMDS.has(name)) {
             let k2 = k;
             while (s[k2] === ' ') k2++;
@@ -132,7 +143,9 @@
           while (s[end] === '{' || s[end] === '[') {
             const ge = groupEnd(s, end);
             if (ge < 0) break;
+            const empty = ge === end + 2 && s[end] === '{';
             end = ge;
+            if (empty) break;   // \cmd{} ends the command: what follows is text
           }
           push({ t: 'cmd', name, s: s.slice(i, end) });
           i = end; continue;
@@ -166,8 +179,9 @@
         i = e; continue;
       }
       if (c === '~') { push({ t: 'tie', s: '~' }); i++; continue; }
-      if (c === '\n') {
-        let k = i + 1;
+      if (c === '\n' || (c === '\r' && s[i + 1] === '\n')) {
+        // a line break (\n or \r\n) and the indentation after it
+        let k = i + (c === '\r' ? 2 : 1);
         while (k < s.length && (s[k] === ' ' || s[k] === '\t')) k++;
         push({ t: 'nl', s: s.slice(i, k) });
         i = k; continue;
@@ -244,7 +258,7 @@
 
   function splitParas(text, segs) {
     if (!text) return;
-    const re = /\n[ \t]*\n\s*/g;
+    const re = /\r?\n[ \t\r]*\n\s*/g;
     let i = 0, m;
     const lead = /^\s*/.exec(text)[0];
     if (lead) { segs.push({ kind: 'gap', src: lead }); i = lead.length; }

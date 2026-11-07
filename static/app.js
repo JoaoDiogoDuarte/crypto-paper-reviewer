@@ -3,6 +3,20 @@
 // every structural change and every save.  A file is edited exactly when
 // its committed text differs from the text read from disk.
 'use strict';
+// report script errors to the server log (visible in tests and in the terminal)
+window.addEventListener('error', (e) => {
+  try {
+    const t = document.querySelector('meta[name=token]').content;
+    fetch('/api/log', { method: 'POST', headers: { 'X-Token': t },
+      body: `JSERROR ${e.message} at ${(e.filename || '').split('/').pop()}:${e.lineno}` });
+  } catch (_) { /* nothing to do */ }
+});
+window.addEventListener('unhandledrejection', (e) => {
+  try {
+    const t = document.querySelector('meta[name=token]').content;
+    fetch('/api/log', { method: 'POST', headers: { 'X-Token': t }, body: 'JSERROR ' + (e.reason && e.reason.stack || e.reason) });
+  } catch (_) { /* nothing to do */ }
+});
 const L = window.LatexDoc;
 const TOKEN = document.querySelector('meta[name=token]').content;
 const $ = (s) => document.querySelector(s);
@@ -379,7 +393,11 @@ function renderChip(tok, ctx) {
   if (name === ',' || name === ' ' || name === ';' || name === '@') return chip('nl', tok.s, ' ');
   if (name === 'dots' || name === 'ldots') return chip('nl', tok.s, '…');
   if (name === 'verbatim') return chip('src', tok.s, '[' + tok.env + ']');
-  if (name === 'textasciitilde') return chip('nl', tok.s, '~');
+  // characters typed into the text are saved as these commands; show them as
+  // the characters
+  if (name === 'textasciitilde') return chip('char', tok.s, '~');
+  if (name === 'textasciicircum') return chip('char', tok.s, '^');
+  if (name === 'textbackslash') return chip('char', tok.s, '\\');
   return chip('src', tok.s, tok.s.length > 40 ? tok.s.slice(0, 38) + '…' : tok.s);
 }
 
@@ -494,7 +512,17 @@ function roman(n) {
 function ser(node) {
   let out = '';
   for (const n of node.childNodes) {
-    if (n.nodeType === 3) { out += L.typeset(L.encodeText(n.data)); continue; }
+    if (n.nodeType === 3) {
+      let t = L.typeset(L.encodeText(n.data));
+      // text typed right after a command must not merge into it: a letter
+      // after a control word (\dots + and), or [ or * after any command
+      // (\\[, \item[), would change what LaTeX reads
+      if (t && /\\(?:[A-Za-z@]+\*?|.)$/.test(out) && !/\\[%&_#${} ]$/.test(out) &&
+          (/^[A-Za-z@]/.test(t) && /\\[A-Za-z@]+$/.test(out) || /^[\[*]/.test(t))) t = '{}' + t;
+      else if (t && /^[\[*]/.test(t) && /\\[A-Za-z@]+\*?(\{[^{}]*\}|\[[^\]]*\])+$/.test(out)) t = '{}' + t;
+      out += t;
+      continue;
+    }
     if (n.nodeType !== 1) continue;
     if (n.dataset.src !== undefined) { out += n.dataset.src; continue; }
     if (n.dataset.prefix !== undefined) { out += n.dataset.prefix + ser(n) + '}'; continue; }
@@ -1120,7 +1148,9 @@ function selfTest() {
   if (shown.length) { bad++; report.push('HIDDEN BUT SHOWN: ' + shown.map((e) => '#' + e.id).join(' ')); }
   // timing: a typed character and a click into a block, with layout forced
   const timeIt = (label) => {
-    const seg = ORDER.filter((x) => x.kind === 'para' && x.edit && !x.edit.classList.contains('quiet'))[40];
+    const ps = ORDER.filter((x) => x.kind === 'para' && x.edit && !x.edit.classList.contains('quiet'));
+    const seg = ps[Math.min(40, ps.length - 1)];
+    if (!seg) return;
     const t0 = performance.now();
     for (let i = 0; i < 5; i++) {
       const tn = document.createTextNode('x');
@@ -1910,4 +1940,113 @@ async function uiTest() {
 }
 if (new URLSearchParams(location.search).has('uitest')) {
   const t = setInterval(() => { if (ORDER.length) { clearInterval(t); setTimeout(uiTest, 500); } }, 200);
+}
+
+// ================================================================ fuzz
+//
+// ?fuzz=N&seed=S: N random edits through the page, each checked for
+//   locality: the file changed only inside the edited block;
+//   fidelity: the saved source, parsed again, shows the text on the page;
+//   round trip: the block's new source parses and serializes exactly.
+// Then a real save; the page logs a hash of every file it wrote, which
+// tests/fixtures.py compares with the files on disk.  Only for copies.
+async function fuzzTest(n, seed) {
+  let x = seed || 1;
+  const rnd = (k) => { x = (x * 1103515245 + 12345) & 0x7fffffff; return x % k; };
+  const pick = (a) => a[rnd(a.length)];
+  const CHARS = ['a', 'Z', ' ', '%', '&', '_', '#', '$', '{', '}', '~', '^', '\\', 'é', 'ß', '→', '"', "'", '`',
+    '-', '.', ',', '(', ')', '[', ']', '|', '<', '>', '/', '*', '!', '?', ':', ';', '1', '0'];
+  const norm = (t) => t.replace(/ /g, ' ').replace(/[ \t\r\n]+/g, ' ').trim();
+  const shown = (src) => { const d = el('div'); renderTokens(L.tokenize(src), d, {}); return norm(d.textContent); };
+  const fails = [];
+  commit();
+  const before = () => Object.fromEntries(Object.entries(FILES).map(([k, f]) => [k, f.text]));
+  for (let i = 0; i < n; i++) {
+    const segs = ORDER.filter((sg) => sg.edit && !sg.removed && sg.el &&
+      !(sg.edit.classList && sg.edit.classList.contains('quiet')));
+    const seg = pick(segs);
+    const old = before();
+    const oldSrc = seg.src;
+    const offset = (() => { // where the segment starts in its file
+      let o = 0;
+      for (const sg of FILES[seg.file].segs) { if (sg === seg) return o; o += sg.src.length; }
+      return -1;
+    })();
+    let op;
+    if (seg.edit.tagName === 'TEXTAREA') {
+      op = 'code';
+      const v = seg.edit.value, at = rnd(v.length + 1);
+      seg.edit.value = v.slice(0, at) + pick(CHARS) + pick(CHARS) + v.slice(at);
+      seg.touched = true;
+    } else {
+      const texts = [];
+      const w = document.createTreeWalker(seg.edit, NodeFilter.SHOW_TEXT);
+      let t;
+      while ((t = w.nextNode())) if (!t.parentElement.closest('.chip')) texts.push(t);
+      op = pick(['type', 'type', 'type', 'delete', 'math', 'emph', seg.kind === 'para' ? 'parbreak' : 'type']);
+      const tn = texts.length ? pick(texts) : null;
+      if (!tn && op !== 'math') op = 'append';
+      if (op === 'type' || op === 'append') {
+        const s = Array.from({ length: 1 + rnd(5) }, () => pick(CHARS)).join('');
+        if (tn) { const at = rnd(tn.data.length + 1); tn.data = tn.data.slice(0, at) + s + tn.data.slice(at); }
+        else seg.edit.append(document.createTextNode(s));
+      } else if (op === 'delete') {
+        const a = rnd(tn.data.length + 1), b = Math.min(tn.data.length, a + 1 + rnd(4));
+        tn.data = tn.data.slice(0, a) + tn.data.slice(b);
+      } else if (op === 'math') {
+        const m = mathChip(pick(['$x_1$', '$\\frac{a}{b}$', '$\\{0,1\\}^n$', '$50\\%$']), false);
+        if (tn) { const at = rnd(tn.data.length + 1); const rest = tn.splitText(at); rest.before(m); }
+        else seg.edit.append(m);
+      } else if (op === 'emph') {
+        const at = rnd(tn.data.length + 1); const rest = tn.splitText(at);
+        const e = el('em'); e.dataset.prefix = '\\emph{'; e.append(document.createTextNode('word'));
+        rest.before(e);
+      } else if (op === 'parbreak') {
+        const at = rnd(tn.data.length + 1); const rest = tn.splitText(at);
+        rest.before(chip('parbreak', '\n\n', ''));
+      }
+      seg.touched = true;
+    }
+    commit();
+    const now = before();
+    const newSrc = segSource(seg, []);
+    // locality: other files untouched; this file = prefix + new block + suffix
+    for (const f of Object.keys(now)) {
+      if (f !== seg.file && now[f] !== old[f]) fails.push(`#${i} ${op}: ${f} changed although ${seg.file} was edited`);
+    }
+    const expect = old[seg.file].slice(0, offset) + newSrc + old[seg.file].slice(offset + oldSrc.length);
+    if (now[seg.file] !== expect) fails.push(`#${i} ${op}: ${seg.file} changed outside the edited block`);
+    // round trip of the new block
+    if (seg.kind === 'para' && L.serializeTokens(L.tokenize(newSrc)) !== newSrc) fails.push(`#${i} ${op}: block does not round-trip`);
+    // fidelity: the source shows what the page shows (paragraphs; a heading or
+    // caption compares its title or caption)
+    const pageText = norm(seg.edit.textContent || seg.edit.value || '');
+    let srcText = null;
+    if (seg.kind === 'para') srcText = shown(newSrc);
+    else if (seg.kind === 'heading') { const h = L.headingParts(newSrc); srcText = h && shown(h.title); }
+    else if (seg.kind === 'figure' || seg.kind === 'table') { const c = L.captionParts(newSrc); srcText = c && shown(c.caption); }
+    if (srcText !== null && op !== 'code' && srcText.replace(/\s/g, '') !== pageText.replace(/[\s¶]/g, '')) {
+      fails.push(`#${i} ${op}: page shows ${JSON.stringify(pageText.slice(0, 80))} but the source shows ${JSON.stringify(srcText.slice(0, 80))}`);
+    }
+    seg.src = newSrc; seg.touched = false;   // the next round compares with this state
+    if (seg.kind === 'heading') seg.parts = L.headingParts(newSrc);
+    if (seg.kind === 'figure' || seg.kind === 'table') seg.parts = L.captionParts(newSrc);
+    if (seg.kind === 'code') seg.parts = L.splitCode(newSrc);
+  }
+  // a real save, then the hashes of what was written
+  await save();
+  const hashes = {};
+  for (const [name, f] of Object.entries(FILES)) {
+    const buf = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(f.text));
+    hashes[name] = [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+  const edited = Object.keys(FILES).filter((k) => FILES[k].text !== DOC.files[k].text);
+  fetch('/api/log', { method: 'POST', headers: { 'X-Token': TOKEN },
+    body: 'FUZZ ' + JSON.stringify({ rounds: n, fails: fails.slice(0, 30), nfails: fails.length, hashes, edited }) });
+}
+{
+  const q = new URLSearchParams(location.search);
+  if (q.has('fuzz')) {
+    const t = setInterval(() => { if (ORDER.length) { clearInterval(t); setTimeout(() => fuzzTest(+q.get('fuzz') || 200, +q.get('seed') || 1), 500); } }, 200);
+  }
 }

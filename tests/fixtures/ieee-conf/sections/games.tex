@@ -1,0 +1,49 @@
+\section{Games}\label{sec:games}
+
+\begin{figure*}[t]
+\begin{minipage}{.48\textwidth}
+\begin{algorithmic}[1]
+\Statex \underline{$\G{0}$}
+\State $x\sample\{0,1\}^n$
+\If{$x = 0$}
+  \State \Return $1$ \Comment{a comment with 50\% percent}
+\EndIf
+\end{algorithmic}
+\end{minipage}\hfill
+\begin{minipage}{.48\textwidth}
+\begin{algorithmic}[1]
+\Statex \underline{$\G{1}$}
+\For{$i=1,\dots,\qq$}
+  \State $y_i\sample\{0,1\}^n$
+\EndFor
+\end{algorithmic}
+\end{minipage}
+\caption{Games $\G{0}$ and $\G{1}$, side by side, across both columns.}\label{fig:games}
+\end{figure*}
+
+\begin{definition}[Imaginary oracle]\label{def:oracle}
+An oracle is \emph{imaginary} if it answers $\bot$ on every query $x\in\{0,1\}^n$.
+\end{definition}
+
+\begin{lemma}[First]\label{lem:one}
+$\Pr[\G{0}^{\Adv}=1]\le\Pr[\G{1}^{\Adv}=1]+\negl(n)$.
+\end{lemma}
+\begin{proof}
+By \cref{def:oracle}, the games are identical until bad, so
+\begin{align}
+  \Pr[\G{0}^{\Adv}=1] &\le \Pr[\G{1}^{\Adv}=1] + \Pr[\mathsf{bad}] \label{eq:hop}\\
+  &\le \Pr[\G{1}^{\Adv}=1] + \frac{\qq^2}{2^n}. \label{eq:bound}
+\end{align}
+\end{proof}
+
+\begin{lemma}\label{lem:two}
+Every query costs at most one unit.
+\end{lemma}
+
+\begin{lstlisting}
+proc main() = {
+  var x : int;      (* 50% of the time; a $dollar *)
+  x <- 3%r;
+  return x;
+}
+\end{lstlisting}
