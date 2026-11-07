@@ -195,3 +195,12 @@ body.diffing #doc [contenteditable] { cursor: default; }
   border: 1px solid var(--line); border-radius: 4px; padding: .2em .4em; }
 .gproc .gprev { padding: .1em .4em .5em; }
 .games-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(22em, 1fr)); gap: 1em; }
+
+/* table cell editor */
+table.cells { border-collapse: collapse; margin: .5em 0 1em; font: 15px/1.5 Georgia, serif; }
+table.cells td { border: 1px solid var(--line); padding: .25em .5em; min-width: 4em; vertical-align: top; }
+table.cells td[contenteditable]:focus { background: color-mix(in srgb, var(--accent) 8%, transparent); outline: none; }
+table.cells tr.rule td.rulecell { border: 0; padding: 0; font: 11px ui-monospace, monospace; color: var(--muted); }
+table.cells td.rowtools { border: 0; white-space: nowrap; opacity: .3; }
+table.cells tr:hover td.rowtools { opacity: 1; }
+table.cells td.edited { box-shadow: inset 3px 0 0 var(--dirty); }

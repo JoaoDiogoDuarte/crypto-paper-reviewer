@@ -450,8 +450,71 @@
   function gameLineSrc(l) { return l.prefix + l.content + l.suffix; }
 
 
+  // A tabular split for cell editing: [{start, end, specRange, rows}] where a
+  // row is {lead (rules, spaces), cells:[{lead, content, trail}], sep (\\, its
+  // optional [..] and the spaces after)}.  Rebuilt with tabularSrc.
+  function parseTabulars(src) {
+    const out = [];
+    const re = /\\begin\{(tabular\*?|tabularx)\}/g;
+    let m;
+    while ((m = re.exec(src))) {
+      if (inComment(src, m.index)) continue;
+      const end = envEnd(src, m.index, m[1]);
+      if (end < 0) continue;
+      let k = m.index + m[0].length;
+      while (src[k] === '[') k = groupEnd(src, k);
+      if (m[1] !== 'tabular' && src[k] === '{') k = groupEnd(src, k);   // width
+      if (src[k] !== '{') continue;
+      const specEnd = groupEnd(src, k);
+      const specRange = [k + 1, specEnd - 1];
+      const bodyStart = specEnd, bodyEnd = end - ('\\end{' + m[1] + '}').length;
+      const body = src.slice(bodyStart, bodyEnd);
+      // split rows at top-level \\
+      const rows = [];
+      let depth = 0, last = 0;
+      const pushRow = (text, sep) => {
+        const lead = /^(\s*(\\(toprule|midrule|bottomrule|hline|cmidrule|cline)\s*(\([^)]*\))?\s*(\{[^}]*\})?\s*|%[^\n]*\n\s*)*)/.exec(text)[0];
+        const rest = text.slice(lead.length);
+        const cells = [];
+        let d = 0, c0 = 0;
+        for (let i = 0; i <= rest.length; i++) {
+          const ch = rest[i];
+          if (ch === '\\') { i++; continue; }
+          if (ch === '{') d++; else if (ch === '}') d--;
+          if ((ch === '&' && d === 0) || i === rest.length) {
+            const raw = rest.slice(c0, i);
+            const l = /^\s*/.exec(raw)[0], t = /\s*$/.exec(raw.slice(l.length))[0];
+            cells.push({ lead: l, content: raw.slice(l.length, raw.length - t.length), trail: t });
+            c0 = i + 1;
+          }
+        }
+        rows.push({ lead, cells: rest.trim() === '' && cells.length === 1 ? [] : cells, empty: rest.trim() === '', sep, rawRest: rest });
+      };
+      for (let i = 0; i < body.length; i++) {
+        const ch = body[i];
+        if (ch === '\\' && body[i + 1] === '\\' && depth === 0) {
+          let e = i + 2;
+          if (body[e] === '[') e = groupEnd(body, e);
+          while (e < body.length && /[ \t\r\n]/.test(body[e])) e++;
+          pushRow(body.slice(last, i), body.slice(i, e));
+          last = e; i = e - 1; continue;
+        }
+        if (ch === '\\') { i++; continue; }
+        if (ch === '{') depth++; else if (ch === '}') depth--;
+      }
+      pushRow(body.slice(last), '');
+      out.push({ env: m[1], start: m.index, bodyStart, bodyEnd, specRange, spec: src.slice(specRange[0], specRange[1]), rows });
+      re.lastIndex = end;
+    }
+    return out;
+  }
+
+  function tabularBody(t) {
+    return t.rows.map((r) => r.lead + (r.empty ? r.rawRest : r.cells.map((c, i) => c.lead + c.content + c.trail + (i < r.cells.length - 1 ? '&' : '')).join('')) + r.sep).join('');
+  }
+
   const api = { tokenize, serializeTokens, segment, serializeSegments, splitCode, documentPieces,
-    decodeText, encodeText, houseRules, headingParts, captionParts, typeset, setCodeEnvs, parseGames, parseGameLine, gameLineSrc, groupEnd, envEnd, inComment, THM_ENVS, MATH_ENVS };
+    decodeText, encodeText, houseRules, headingParts, captionParts, typeset, setCodeEnvs, parseGames, parseGameLine, gameLineSrc, parseTabulars, tabularBody, groupEnd, envEnd, inComment, THM_ENVS, MATH_ENVS };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.LatexDoc = api;
 })(this);

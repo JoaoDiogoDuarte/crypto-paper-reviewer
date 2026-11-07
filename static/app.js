@@ -2253,10 +2253,12 @@ function openFigure(seg) {
   FV.seg = seg;
   FV.src = seg.figSrc || seg.src;
   FV.games = parseGames(FV.src);
+  FV.tables = L.parseTabulars(FV.src);
   $('#fv-title').textContent = (seg.kind === 'figure' ? 'Figure ' : 'Table ') + (seg.el.querySelector('.capnum')?.textContent || '');
   $('#fv-games-tab').hidden = !FV.games.length;
+  $('#fv-cells-tab').hidden = !FV.tables.length;
   $('#figview').hidden = false;
-  showFigTab(FV.games.length ? 'games' : 'image');
+  showFigTab(FV.games.length ? 'games' : FV.tables.length ? 'cells' : 'image');
 }
 
 function showFigTab(tab) {
@@ -2283,6 +2285,8 @@ function showFigTab(tab) {
     body.append(ta);
   } else if (tab === 'games') {
     renderGames(body);
+  } else if (tab === 'cells') {
+    renderCells(body);
   }
 }
 
@@ -2364,16 +2368,81 @@ function procLine(g, l, li) {
   return row;
 }
 
-// The figure source with the edited games (or the edited LaTeX).
+function renderCells(body) {
+  FV.tables.forEach((t) => {
+    const ncols = Math.max(1, ...t.rows.map((r) => r.cells.length));
+    const tbl = el('table', 'cells');
+    t.rows.forEach((r, ri) => {
+      if (r.lead.trim()) {   // rules above the row
+        const tr = el('tr', 'rule');
+        const td = el('td', 'rulecell', r.lead.trim().replace(/\s+/g, ' '));
+        td.colSpan = ncols + 1;
+        tr.append(td); tbl.append(tr);
+      }
+      if (r.empty) return;
+      const tr = el('tr');
+      r.cells.forEach((c) => {
+        const td = el('td'); td.contentEditable = 'true';
+        renderTokens(L.tokenize(c.content), td, {});
+        td.addEventListener('input', () => { c.content = ser(td); td.classList.add('edited'); });
+        tr.append(td);
+      });
+      for (let k = r.cells.length; k < ncols; k++) tr.append(el('td'));
+      const tools = el('td', 'rowtools');
+      const add = el('button', '', '＋ row'); add.title = 'Add an empty row below';
+      add.onclick = () => {
+        const nr = { lead: '', empty: false, rawRest: '', sep: r.sep || ' \\\\\n',
+          cells: Array.from({ length: ncols }, (_, k) => ({ lead: k ? ' ' : '', content: '', trail: ' ' })) };
+        if (!r.sep) r.sep = ' \\\\\n';
+        t.rows.splice(ri + 1, 0, nr); showFigTab('cells');
+      };
+      const del = el('button', '', '✕'); del.title = 'Delete this row';
+      del.onclick = () => { t.rows.splice(ri, 1); showFigTab('cells'); };
+      tools.append(add, del);
+      tr.append(tools);
+      tbl.append(tr);
+    });
+    const col = el('button', '', '＋ column');
+    col.title = 'Add a column at the right (the column spec gets the same type as the last column)';
+    col.onclick = () => {
+      for (const r of t.rows) if (!r.empty && r.cells.length) {
+        const lastCell = r.cells[r.cells.length - 1];
+        lastCell.trail = lastCell.trail || ' ';
+        r.cells.push({ lead: ' ', content: '', trail: lastCell.trail });
+        lastCell.trail = ' ';
+      }
+      const m = /([lcrX]|p\{[^}]*\})(@\{\}|\|)?\s*$/.exec(t.spec);
+      t.spec = m ? t.spec.slice(0, m.index + m[1].length) + m[1] + t.spec.slice(m.index + m[1].length) : t.spec + 'l';
+      t.specEdited = true;
+      showFigTab('cells');
+    };
+    body.append(tbl, col);
+  });
+  body.append(el('p', 'small', 'Edit cells in place. Rules (\\toprule, \\hline …) stay with their rows; untouched cells keep their exact source. Apply, then save.'));
+}
+
+// The figure source with the edited games, cells (or the edited LaTeX).
 function figureWithEdits() {
   if (FV.tab === 'latex' && FV.latexEdited) return $('#fv-body textarea').value;
   let src = FV.src;
-  for (const g of [...FV.games].reverse()) {   // last first, so offsets stay valid
+  for (const t of [...(FV.tables || [])].reverse()) {
+    src = src.slice(0, t.bodyStart) + L.tabularBody(t) + src.slice(t.bodyEnd);
+    if (t.specEdited) src = src.slice(0, t.specRange[0]) + t.spec + src.slice(t.specRange[1]);
+  }
+  const games = FV.tables && FV.tables.length ? parseGamesKeepingEdits(src) : FV.games;
+  for (const g of [...games].reverse()) {   // last first, so offsets stay valid
     const body = g.kind === 'proc' ? g.lines.map(gameLineSrc).join('') : g.lines.map(gameLineSrc).join('\n');
     src = src.slice(0, g.bodyStart) + body + src.slice(g.bodyEnd);
     if (g.newTitle !== undefined && g.titleRange) src = src.slice(0, g.titleRange[0]) + g.newTitle + src.slice(g.titleRange[1]);
   }
   return src;
+}
+
+// after table edits shift offsets, find the games again and carry their edits over
+function parseGamesKeepingEdits(src) {
+  const fresh = parseGames(src);
+  fresh.forEach((g, i) => { if (FV.games[i]) { g.lines = FV.games[i].lines; g.newTitle = FV.games[i].newTitle; } });
+  return fresh;
 }
 
 function applyFigure() {
@@ -2429,6 +2498,30 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#fig
       log.push(`${seg.file}: -${JSON.stringify(a.slice(i, a.length - j))}\n+${JSON.stringify(b.slice(i, b.length - j))}`);
       log.push('other files changed: ' + Object.keys(FILES).filter((n) => n !== seg.file && FILES[n].text !== FILES[n].disk).length);
       fetch('/api/log', { method: 'POST', headers: { 'X-Token': TOKEN }, body: 'GAMETEST\n' + log.join('\n') });
+    }, 300);
+  }
+}
+{
+  const q = new URLSearchParams(location.search);
+  if (q.has('tabletest')) {
+    const t = setInterval(() => {
+      if (!ORDER.length) return;
+      clearInterval(t);
+      const seg = ORDER.find((x) => x.kind === 'table' && L.parseTabulars(x.src).length);
+      openFigure(seg);
+      const tb = FV.tables[0];
+      const row = tb.rows.find((r) => r.cells.length && r.cells[0].content === 'Classical');
+      row.cells[2].content = 'yes, \\emph{tight}';
+      showFigTab('cells');
+      [...document.querySelectorAll('table.cells td.rowtools button')][0].click();   // a row below the header
+      [...document.querySelectorAll('#fv-body > button')][0].click();               // a column
+      applyFigure();
+      commit();
+      const a = FILES[seg.file].disk, b = FILES[seg.file].text;
+      let i = 0; while (a[i] === b[i]) i++;
+      let j = 0; while (j < a.length - i && a[a.length - 1 - j] === b[b.length - 1 - j]) j++;
+      fetch('/api/log', { method: 'POST', headers: { 'X-Token': TOKEN },
+        body: 'TABLETEST\n' + b.slice(b.lastIndexOf('\\begin{tabular}', i), b.indexOf('\\end{tabular}', i) + 13) });
     }, 300);
   }
 }
