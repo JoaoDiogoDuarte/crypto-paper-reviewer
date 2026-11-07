@@ -20,14 +20,17 @@
     <button id="cols" title="Switch between one and two columns">Two columns</button>
   </span>
   <span class="group" id="ttsbar">
-    <button id="play" title="Read aloud from the paragraph with the cursor (Alt+R)">▶ Read</button>
-    <button id="pause" title="Pause or resume">⏸</button>
-    <button id="stop" title="Stop">⏹</button>
+    <button id="play" aria-label="Play or resume reading" title="Read aloud from the sentence at the cursor (Alt+R)">▶ Read</button>
+    <button id="tts-prev" aria-label="Previous sentence" title="Previous sentence">‹</button>
+    <button id="tts-next" aria-label="Next sentence" title="Next sentence">›</button>
+    <button id="pause" aria-label="Pause or resume reading" title="Pause or resume">⏸</button>
+    <button id="stop" aria-label="Stop reading" title="Stop">⏹</button>
     <select id="rate" title="Speed">
       <option value="0.8">0.8×</option><option value="1" selected>1×</option>
       <option value="1.2">1.2×</option><option value="1.4">1.4×</option><option value="1.7">1.7×</option>
     </select>
     <select id="voice" title="Voice"></select>
+    <span id="tts-state" aria-live="polite">Ready</span>
   </span>
   <span class="group">
     <select id="mainsel" title="Document of this project" hidden></select>
@@ -139,7 +142,7 @@
     <li><kbd>Ctrl</kbd>+<kbd>S</kbd> saves. Saving writes only the files you changed, applies the house rules, and rebuilds the PDF.</li>
   </ul>
   <h3>Reading aloud</h3>
-  <ul><li>Put the cursor in a paragraph and press ▶ (or <kbd>Alt</kbd>+<kbd>R</kbd>). Maths is read as words.</li></ul>
+  <ul><li>Click in a sentence and press ▶ (or <kbd>Alt</kbd>+<kbd>R</kbd>); use ‹ and › to move between sentences. Maths is read as words.</li></ul>
   <button id="helpclose">Close</button>
 </div>
 <script src="/static/latex.js"></script>

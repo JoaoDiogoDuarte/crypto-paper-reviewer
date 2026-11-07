@@ -27,11 +27,14 @@ body { margin: 0; background: var(--bg); color: var(--fg);
 button, select { font: inherit; color: var(--fg); background: var(--chip); border: 1px solid var(--line);
   border-radius: 4px; padding: .2em .6em; cursor: pointer; }
 button:hover { border-color: var(--accent); }
+button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 #save.has-changes { background: var(--dirty); color: #fff; border-color: var(--dirty); }
 #dirty { color: var(--dirty); }
 #build { color: var(--muted); }
 #build.error { color: #c0392b; }
 #banner { padding: .5em 1em; background: var(--speak); font: 14px system-ui, sans-serif; }
+#tts-state { color: var(--muted); min-width: 4.5em; }
+#ttsbar button:disabled { opacity: .45; cursor: default; }
 
 #doc { max-width: 46em; margin: 1.5em auto 50vh; padding: 0 1.2em; }
 body.two #doc { max-width: 76em; }
