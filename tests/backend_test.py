@@ -88,12 +88,54 @@ class BackendTest(unittest.TestCase):
         self.assertEqual(code, 409)
         self.assertIn('changed', result['error'])
 
+        code, result = self.post('/api/backup', {'name': 'main.tex', 'text': updated})
+        self.assertEqual(code, 200)
+        backup = os.path.join(self.tmp, result['backup'])
+        self.assertTrue(os.path.exists(backup))
+        with open(backup) as f:
+            self.assertEqual(f.read(), updated)
+
     def test_switch_documents(self):
         code, result = self.post('/api/open', {'main': 'other.tex'})
         self.assertEqual(code, 200)
         self.assertEqual(result['main'], 'other.tex')
         code, result = self.post('/api/open', {'main': 'missing.tex'})
         self.assertEqual(code, 400)
+
+    @mock.patch('server.choose_directory')
+    def test_pick_directory_and_open_project(self, picker):
+        picker.return_value = self.tmp
+        code, result = self.post('/api/pick-directory', {})
+        self.assertEqual(code, 200)
+        self.assertEqual(result['path'], self.tmp)
+        self.assertEqual(set(result['mains']), {'main.tex', 'other.tex'})
+        code, result = self.post('/api/open-project', {'path': self.tmp, 'main': 'other.tex'})
+        self.assertEqual(code, 200)
+        self.assertEqual(result['main'], 'other.tex')
+
+    def test_create_file_and_reject_overwrite(self):
+        code, result = self.post('/api/create-file', {'name': 'sections/new.tex', 'text': 'New section.\n'})
+        self.assertEqual(code, 201)
+        self.assertEqual(result['name'], 'sections/new.tex')
+        with open(os.path.join(self.tmp, 'sections', 'new.tex')) as f:
+            self.assertEqual(f.read(), 'New section.\n')
+        code, result = self.post('/api/create-file', {'name': 'sections/new.tex', 'text': 'Changed.'})
+        self.assertEqual(code, 409)
+        code, result = self.post('/api/create-file', {'name': '../escape.tex', 'text': 'bad'})
+        self.assertEqual(code, 400)
+
+    def test_makefile_is_default_build_command(self):
+        with open(os.path.join(self.tmp, 'Makefile'), 'w') as f:
+            f.write('all:\n\t@true\n')
+        builder = server.Builder.__new__(server.Builder)
+        old_config = server.CONFIG
+        server.CONFIG = {}
+        try:
+            self.assertEqual(builder.build_command(), ['make'])
+            server.CONFIG = {'build': ['custom-build']}
+            self.assertEqual(builder.build_command(), ['custom-build'])
+        finally:
+            server.CONFIG = old_config
 
     def test_build_failure_is_reported(self):
         builder = server.Builder.__new__(server.Builder)

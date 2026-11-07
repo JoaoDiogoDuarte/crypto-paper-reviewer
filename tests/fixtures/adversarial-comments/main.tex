@@ -1,0 +1,30 @@
+\documentclass{article}
+\newcommand{\named}[1]{\textbf{#1}}
+\title{Comments and Escapes}
+\author{Edge Case}
+\begin{document}
+\maketitle
+
+% A comment with fake structure: \section{not real}
+\section{Escaped text}
+Text with \% percent, \& ampersand, \# hash, \_ underscore, \{ braces \}, and ``quotes''.
+A macro says \named{bold text}; a URL-like token is \texttt{path/to/a\_file}.
+
+\begin{quote}
+A quoted paragraph has a line break
+inside the source but remains one visual block.
+\end{quote}
+
+\begin{enumerate}
+\item First item with an inline command.
+\item Second item with a footnote\footnote{The footnote contains commas, braces \{x\}, and a percent \%.}.
+\end{enumerate}
+
+\section{Raw commands}
+\verb|\section{not parsed}| and \verb*| spaces stay literal |.
+\begin{verbatim}
+% this is not a comment
+\textbf{this is not bold}
+\end{verbatim}
+
+\end{document}

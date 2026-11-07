@@ -1,0 +1,14 @@
+\documentclass{article}
+\title{Bibliography Pressure}
+\author{Edge Case}
+\begin{document}
+\maketitle
+\section{Citations}
+This cites one source~\cite{alpha}, two sources~\cite{alpha,beta}, and a missing-looking label~\ref{sec:end}.
+\section{End}\label{sec:end}
+The bibliography is intentionally long enough to make the editor parse references.
+\begin{thebibliography}{99}
+\bibitem{alpha} A. Author. An entry with ``quotes'' and a URL-like string.
+\bibitem{beta} B. Author. Another entry with \emph{emphasis} and punctuation.
+\end{thebibliography}
+\end{document}

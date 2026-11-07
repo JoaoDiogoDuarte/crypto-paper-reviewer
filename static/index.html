@@ -13,6 +13,8 @@
 <header id="bar">
   <span id="title">Paper editor</span>
   <span class="group">
+    <button id="openbtn" title="Open a paper directory">Open…</button>
+    <button id="newfilebtn" title="Create a new TeX section file">New file…</button>
     <button id="save" title="Save edited files (Ctrl+S)">Save</button>
     <span id="dirty"></span>
   </span>
@@ -25,11 +27,11 @@
     <button id="tts-next" aria-label="Next sentence" title="Next sentence">›</button>
     <button id="pause" aria-label="Pause or resume reading" title="Pause or resume">⏸</button>
     <button id="stop" aria-label="Stop reading" title="Stop">⏹</button>
-    <select id="rate" title="Speed">
+    <select id="rate" aria-label="Reading speed" title="Speed">
       <option value="0.8">0.8×</option><option value="1" selected>1×</option>
       <option value="1.2">1.2×</option><option value="1.4">1.4×</option><option value="1.7">1.7×</option>
     </select>
-    <select id="voice" title="Voice"></select>
+    <select id="voice" aria-label="Reading voice" title="Voice"></select>
     <span id="tts-state" aria-live="polite">Ready</span>
   </span>
   <span class="group">
@@ -55,6 +57,7 @@
   <button data-act="section" title="Section heading at the cursor (Ctrl+Alt+1)">§ Section</button>
   <button data-act="subsection" title="Subsection heading at the cursor (Ctrl+Alt+2)">§§</button>
   <button data-act="paragraph" title="\paragraph heading at the cursor (Ctrl+Alt+3)">¶ Heading</button>
+  <button data-act="splitsection" title="Split the current section at the cursor">Split section</button>
   <button data-act="newpara" title="New paragraph at the cursor (Enter)">¶ New</button>
   <span class="sep"></span>
   <button data-act="find" title="Find (Ctrl+F), find and replace (Ctrl+H)">Find/Replace</button>
@@ -83,8 +86,40 @@
   <span class="small">text only: maths and LaTeX chips are not searched</span>
 </div>
 <div id="banner" hidden></div>
+<div id="external" hidden role="dialog" aria-labelledby="external-title">
+  <b id="external-title">Files changed outside the editor</b>
+  <div id="external-files"></div>
+  <div class="external-actions">
+    <button id="external-reload">Reload</button>
+    <button id="external-overwrite">Overwrite disk</button>
+    <button id="external-backup">Save backup</button>
+    <button id="external-later">Later</button>
+  </div>
+</div>
+<div id="openbox" role="dialog" aria-modal="true" aria-labelledby="open-title" hidden>
+  <b id="open-title">Choose the main document</b>
+  <div id="open-path"></div>
+  <label for="open-main">Main file</label>
+  <select id="open-main"></select>
+  <div class="external-actions">
+    <button id="open-confirm">Open</button>
+    <button id="open-cancel">Cancel</button>
+  </div>
+</div>
+<div id="newfilebox" role="dialog" aria-modal="true" aria-labelledby="newfile-title" hidden>
+  <b id="newfile-title">Create a TeX file</b>
+  <label for="newfile-name">Path relative to the paper directory</label>
+  <input id="newfile-name" placeholder="sections/new-section.tex" spellcheck="false">
+  <label for="newfile-text">Initial content</label>
+  <textarea id="newfile-text">Write here.
+</textarea>
+  <div class="external-actions">
+    <button id="newfile-create">Create and insert</button>
+    <button id="newfile-cancel">Cancel</button>
+  </div>
+</div>
 <main id="doc" spellcheck="true"></main>
-<aside id="drawer" hidden>
+<aside id="drawer" role="dialog" aria-labelledby="drawer-title" hidden>
   <div class="drawer-head">
     <span id="drawer-title">Edit LaTeX</span>
     <span class="spacer"></span>
@@ -96,19 +131,19 @@
   <div id="drawer-preview"></div>
 </aside>
 <div id="menu" hidden></div>
-<div id="paperbox" hidden>
+<div id="paperbox" role="dialog" aria-labelledby="paper-title" hidden>
   <div class="fv-head"><b>Paper</b><span class="spacer"></span>
     <button id="md-save">Save metadata</button><button id="md-close">Close</button></div>
   <div id="md-body"></div>
 </div>
-<div id="keysbox" hidden>
+<div id="keysbox" role="dialog" aria-labelledby="keys-title" hidden>
   <div class="fv-head"><b>Keyboard shortcuts</b><span class="spacer"></span>
     <button id="keys-reset">Reset to defaults</button><button id="keys-save">Save</button><button id="keys-close">Close</button></div>
   <div id="keys-list"></div>
   <p class="small">Click Change, then press the new combination (Esc cancels). Shortcuts are saved for you, for every paper.
   Firefox keeps Ctrl+W, Ctrl+Q, Ctrl+T, Ctrl+N and Ctrl+Shift+R for itself.</p>
 </div>
-<div id="figview" hidden>
+<div id="figview" role="dialog" aria-labelledby="fv-title" hidden>
   <div class="fv-head">
     <span id="fv-title">Figure</span>
     <span class="fv-tabs">
@@ -127,8 +162,8 @@
   <div id="pal-list"></div>
   <div id="pal-foot"></div>
 </div>
-<div id="helpbox" hidden>
-  <h3>Editing</h3>
+<div id="helpbox" role="dialog" aria-labelledby="help-title" hidden>
+  <h3 id="help-title">Editing</h3>
   <ul>
     <li>Type anywhere in the text. <kbd>Enter</kbd> starts a new paragraph; <kbd>Backspace</kbd> at the start of a paragraph joins it to the one before.</li>
     <li><kbd>$</kbd> or <kbd>Ctrl</kbd>+<kbd>M</kbd>: inline maths. <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd>: displayed maths.</li>
@@ -138,6 +173,7 @@
     <li><kbd>Ctrl</kbd>+<kbd>I</kbd> / <kbd>Ctrl</kbd>+<kbd>B</kbd>: <code>\emph</code> / <code>\textbf</code>.</li>
     <li>Click maths, a reference or any grey chip to edit its LaTeX; <kbd>Ctrl</kbd>+<kbd>Enter</kbd> applies.</li>
     <li>Hover a block and use <b>＋</b> to add a paragraph, heading or displayed maths after it, or <b>✕</b> to delete a heading.</li>
+    <li>Heading tools move sections up or down and combine a section with the one before it; put the cursor in a section and use <b>Split section</b> to divide it.</li>
     <li>Headings, figure and table captions are edited in place; listings in their box.</li>
     <li><kbd>Ctrl</kbd>+<kbd>S</kbd> saves. Saving writes only the files you changed, applies the house rules, and rebuilds the PDF.</li>
   </ul>

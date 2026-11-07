@@ -45,7 +45,8 @@ PROJECT_LOCK = threading.RLock()
 
 DEFAULT_CONFIG = {
     # house rules applied to edited text when saving
-    'house_rules': {'tie_before': ['cite', 'ref'], 'flag_bracketed_cref': True},
+    'house_rules': {'tie_before': ['cite', 'ref'], 'flag_bracketed_cref': True,
+                    'one_sentence_per_line': False},
     # key style for bibliography entries added from Crossref/arXiv
     'key_style': 'cryptobib',
     # .bib file that receives new entries (default: the smallest listed one)
@@ -450,10 +451,16 @@ class Builder:
     def request(self):
         self.wanted.set()
 
+    def build_command(self):
+        if CONFIG.get('build'):
+            return CONFIG['build']
+        if os.path.isfile(os.path.join(PAPER, 'Makefile')):
+            return ['make']
+        return ['latexmk', '-pdf', '-synctex=1', '-interaction=nonstopmode', '-halt-on-error', MAIN]
+
     def build_once(self):
-        self.state = {'state': 'running', 'message': 'latexmk', 'at': time.time()}
-        cmd = CONFIG.get('build') or ['latexmk', '-pdf', '-synctex=1', '-interaction=nonstopmode',
-                                      '-halt-on-error', MAIN]
+        cmd = self.build_command()
+        self.state = {'state': 'running', 'message': 'make' if cmd == ['make'] else 'latexmk', 'at': time.time()}
         try:
             r = subprocess.run(cmd, cwd=PAPER, capture_output=True, text=True, timeout=600,
                                shell=isinstance(cmd, str))
@@ -1233,6 +1240,58 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.send(400, {'error': str(e)})
             BUILDER.log(f"added {req.get('key')} to references.bib")
             return self.send(200, {'bib': bib})
+        if urllib.parse.urlparse(self.path).path == '/api/backup':
+            req = self.json_body()
+            if not isinstance(req, dict) or not isinstance(req.get('text'), str):
+                return self.send(400, {'error': 'expected a JSON object with text'})
+            name, text = req.get('name'), req['text']
+            with PROJECT_LOCK:
+                if name not in paper_files():
+                    return self.send(400, {'error': 'unknown file'})
+                path = os.path.join(PAPER, name)
+                stamp = time.strftime('%Y%m%d-%H%M%S')
+                with tempfile.NamedTemporaryFile('w', encoding='utf-8', newline='',
+                                                 dir=os.path.dirname(path),
+                                                 prefix=os.path.basename(path) + '.editor-backup-' + stamp + '-',
+                                                 delete=False) as f:
+                    f.write(text)
+                    backup = f.name
+            return self.send(200, {'backup': os.path.relpath(backup, PAPER)})
+        if urllib.parse.urlparse(self.path).path == '/api/pick-directory':
+            directory = choose_directory()
+            if not directory:
+                return self.send(204, b'', 'text/plain')
+            return self.send(200, {'path': directory, 'mains': find_mains(directory)})
+        if urllib.parse.urlparse(self.path).path == '/api/open-project':
+            req = self.json_body()
+            if not isinstance(req, dict):
+                return self.send(400, {'error': 'expected a JSON object'})
+            directory, main = os.path.abspath(req.get('path', '')), req.get('main', '')
+            with PROJECT_LOCK:
+                mains = find_mains(directory) if os.path.isdir(directory) else []
+                if main not in mains:
+                    return self.send(400, {'error': 'main file is not in that paper directory'})
+                open_paper(os.path.join(directory, main))
+                ensure_state()
+                BUILDER.aux = load_aux()
+                BUILDER.auxver += 1
+                return self.send(200, {'main': MAIN, 'path': PAPER})
+        if urllib.parse.urlparse(self.path).path == '/api/create-file':
+            req = self.json_body()
+            if not isinstance(req, dict) or not isinstance(req.get('name'), str) or not isinstance(req.get('text'), str):
+                return self.send(400, {'error': 'expected a JSON object with name and text'})
+            name, text = req['name'], req['text']
+            normalized = os.path.normpath(name)
+            if not name.endswith('.tex') or os.path.isabs(name) or normalized == '..' or normalized.startswith('..' + os.sep):
+                return self.send(400, {'error': 'file name must be a relative .tex path'})
+            path = os.path.join(PAPER, normalized)
+            with PROJECT_LOCK:
+                if os.path.exists(path):
+                    return self.send(409, {'error': 'file already exists'})
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, 'w', encoding='utf-8', newline='') as f:
+                    f.write(text)
+            return self.send(201, {'name': normalized})
         if urllib.parse.urlparse(self.path).path != '/api/save':
             return self.send(404, {'error': 'not found'})
         req = self.json_body()
@@ -1328,6 +1387,31 @@ def open_browser(url, browser):
                 return
         print('Chrome/Chromium was not found; opening the system browser.', flush=True)
     webbrowser.open(url)
+
+
+def choose_directory():
+    commands = []
+    if sys.platform == 'darwin':
+        commands.append(['osascript', '-e', 'POSIX path of (choose folder with prompt "Open paper directory")'])
+    elif os.name == 'nt':
+        script = ('Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; '
+                  'if ($d.ShowDialog() -eq "OK") { $d.SelectedPath }')
+        commands.append(['powershell', '-NoProfile', '-Command', script])
+    else:
+        commands += [
+            ['zenity', '--file-selection', '--directory', '--title=Open paper directory'],
+            ['kdialog', '--getexistingdirectory', os.path.expanduser('~')],
+        ]
+    for command in commands:
+        if not shutil.which(command[0]):
+            continue
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=300)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if result.returncode == 0 and result.stdout.strip():
+            return os.path.abspath(result.stdout.strip())
+    return None
 
 
 def main():

@@ -499,6 +499,9 @@ def convert(main_text, md, target, anonymous, theorems_used, resolve=None, all_t
     if target in ('ieee', 'article') and ('\\begin{proof}' in everything or theorems_used) and 'amsthm' not in loaded:
         pre_shims.append('\\usepackage{amsthm}')        # before any \\newtheorem
     shims.append('\\providecommand{\\appendices}{\\appendix}')
+    if target == 'ieee' and '\\part' in everything:
+        shims.append('\\providecommand{\\part}[1]{\\section{#1}}')
+        warnings.append('\\part is mapped to \\section for IEEEtran.')
     # the body: old front matter out
     body = remove_cmds(body, FRONT_CMDS + ['maketitle'])
     body = re.sub(r'\\begin\{(abstract|textabstract)\}.*?\\end\{\1\}\s*', '', body, count=1, flags=re.S)
