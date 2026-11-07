@@ -136,6 +136,7 @@ let HEADS = {};
 // ---------------------------------------------------------------- rendering
 
 function render() {
+  const speech = typeof TTS !== 'undefined' ? TTS.capture() : null;
   if (typeof TTS !== 'undefined') TTS.reset();
   const doc = $('#doc');
   doc.textContent = '';
@@ -163,6 +164,7 @@ function render() {
   layoutPages(doc);
   watchEdits();
   markEdited();
+  if (speech) TTS.restore(speech);
 }
 
 // Pages: from SyncTeX (the page each source line went to), or estimated from
@@ -302,7 +304,16 @@ function renderHeading(seg, ctx) {
   const del = el('button', '', '✕');
   del.title = 'Delete this heading (keeps the text under it)';
   del.onclick = (e) => { e.stopPropagation(); if (confirm('Delete this heading?')) structural(() => removeSeg(seg)); };
-  return wrapSeg(seg, node, [del]);
+  const up = el('button', '', '↑');
+  up.title = 'Move this section up';
+  up.onclick = (e) => { e.stopPropagation(); moveSection(seg, -1); };
+  const down = el('button', '', '↓');
+  down.title = 'Move this section down';
+  down.onclick = (e) => { e.stopPropagation(); moveSection(seg, 1); };
+  const merge = el('button', '', '⇐');
+  merge.title = 'Combine this section with the previous one';
+  merge.onclick = (e) => { e.stopPropagation(); if (confirm('Combine this section with the previous one?')) structural(() => removeSeg(seg)); };
+  return wrapSeg(seg, node, [up, down, merge, del]);
 }
 
 function renderCode(seg) {
@@ -561,6 +572,7 @@ function roman(n) {
 // Characters the block being serialized already uses as Unicode (an author
 // who writes — rather than ---): typography leaves them alone.
 let KEEP_UNICODE = '';
+let HOUSE_RULE_CHANGES = [];
 function ser(node) {
   let out = '';
   for (const n of node.childNodes) {
@@ -595,13 +607,14 @@ function ser(node) {
 
 // The current source of one segment, from its DOM; edited paragraphs get
 // the house rules.
-function segSource(seg, warnings) {
+function segSource(seg, warnings, changes, applyRules = true) {
   if (seg.removed) return '';
   if (!seg.touched && seg.kind !== 'code') return seg.src;
   KEEP_UNICODE = (seg.src.match(/[\u2013\u2014\u2018\u2019\u201c\u201d\u2026]/g) || []).join('');
   const fix = (text, original) => {
-    if (text === original) return text;
+    if (!applyRules || text === original) return text;
     const [t, w] = L.houseRules(text, (DOC.config || {}).house_rules, original);
+    if (t !== text && changes) changes.push(seg);
     warnings.push(...w);
     return t;
   };
@@ -620,11 +633,12 @@ function segSource(seg, warnings) {
 }
 
 // Write the page back into the file texts.  Returns house-rule warnings.
-function commit() {
+function commit(applyRules = true) {
   const warnings = [];
+  HOUSE_RULE_CHANGES = [];
   for (const [name, f] of Object.entries(FILES)) {
     if (!f.segs) continue;
-    f.text = f.segs.map((s) => segSource(s, warnings)).join('');
+    f.text = f.segs.map((s) => segSource(s, warnings, HOUSE_RULE_CHANGES, applyRules)).join('');
   }
   return warnings;
 }
@@ -668,6 +682,51 @@ function insertAfter(seg, src) {
   const segs = FILES[seg.file].segs;
   const i = segs.indexOf(seg);
   segs.splice(i + 1, 0, { kind: 'gap', src: '\n\n', file: seg.file }, { kind: 'para', src, file: seg.file });
+}
+
+const HEADING_RANK = { part: 0, chapter: 1, section: 2, subsection: 3, subsubsection: 4, paragraph: 5 };
+function headingRank(seg) {
+  const h = seg && seg.kind === 'heading' && L.headingParts(seg.src);
+  return h ? HEADING_RANK[h.level] : null;
+}
+
+function sectionEnd(segs, start, rank) {
+  for (let i = start + 1; i < segs.length; i++) {
+    const next = headingRank(segs[i]);
+    if (next !== null && next <= rank) return i;
+  }
+  return segs.length;
+}
+
+function moveSection(seg, direction) {
+  const segs = FILES[seg.file] && FILES[seg.file].segs;
+  const start = segs && segs.indexOf(seg);
+  const rank = headingRank(seg);
+  if (!segs || start < 0 || rank === null) return;
+  const end = sectionEnd(segs, start, rank);
+  if (direction < 0) {
+    let previous = -1;
+    for (let i = start - 1; i >= 0; i--) {
+      const r = headingRank(segs[i]);
+      if (r !== null && r < rank) break;
+      if (r === rank) { previous = i; break; }
+    }
+    if (previous < 0) { banner('This section is already first among its siblings.'); return; }
+    structural(() => {
+      const before = segs.slice(previous, start);
+      const current = segs.slice(start, end);
+      segs.splice(previous, end - previous, ...current, ...before);
+    });
+    return;
+  }
+  const next = end < segs.length ? headingRank(segs[end]) : null;
+  if (next !== rank) { banner('This section is already last among its siblings.'); return; }
+  const nextEnd = sectionEnd(segs, end, rank);
+  structural(() => {
+    const current = segs.slice(start, end);
+    const following = segs.slice(end, nextEnd);
+    segs.splice(start, nextEnd - start, ...following, ...current);
+  });
 }
 
 const PLACEHOLDER = 'Write here.';
@@ -852,7 +911,14 @@ $('#helpclose').onclick = () => { $('#helpbox').hidden = true; };
 // ----------------------------------------------------------------- save
 
 async function save() {
-  const warnings = commit();
+  commit(false);
+  const rawTexts = Object.fromEntries(Object.entries(FILES).map(([name, f]) => [name, f.text]));
+  const warnings = commit(true);
+  if (HOUSE_RULE_CHANGES.length) {
+    const kinds = [...new Set(HOUSE_RULE_CHANGES.map((seg) => seg.kind))].join(', ');
+    const apply = confirm(`House rules will adjust ${HOUSE_RULE_CHANGES.length} edited ${kinds} block${HOUSE_RULE_CHANGES.length === 1 ? '' : 's'} (including spacing${(DOC.config || {}).house_rules?.one_sentence_per_line ? ' and sentence-per-line formatting' : ''}). Apply them before saving?`);
+    if (!apply) for (const [name, text] of Object.entries(rawTexts)) FILES[name].text = text;
+  }
   const files = Object.keys(FILES).filter((n) => FILES[n].text !== FILES[n].disk);
   if (!files.length) return setBuild({ state: 'idle', message: 'nothing to save' });
   for (const name of files) {
@@ -897,18 +963,77 @@ function setBuild(b) {
 
 // Poll for builds and for changes made outside the editor.
 let AUXVER = 0;
+let PENDING_EXTERNAL = null;
+const IGNORED_EXTERNAL = {};
+
+function showExternal(changed) {
+  if (PENDING_EXTERNAL) return;
+  PENDING_EXTERNAL = changed;
+  $('#external-files').textContent = changed.map((name) => name).join(', ');
+  $('#external').hidden = false;
+}
+
+function discardExternalEdits(names) {
+  for (const name of names) {
+    const f = FILES[name];
+    if (f) f.text = f.disk;
+  }
+}
+
+async function reloadExternal() {
+  if (!PENDING_EXTERNAL) return;
+  const names = PENDING_EXTERNAL.map(([name]) => name);
+  names.forEach((name) => { delete IGNORED_EXTERNAL[name]; });
+  PENDING_EXTERNAL = null; $('#external').hidden = true;
+  discardExternalEdits(names);
+  await load(true);
+}
+
+async function overwriteExternal() {
+  if (!PENDING_EXTERNAL) return;
+  const pending = PENDING_EXTERNAL;
+  pending.forEach(([name]) => { delete IGNORED_EXTERNAL[name]; });
+  PENDING_EXTERNAL = null; $('#external').hidden = true;
+  for (const [name, hash] of pending) if (FILES[name]) FILES[name].base = hash;
+  await save();
+}
+
+async function backupExternal() {
+  if (!PENDING_EXTERNAL) return;
+  const names = PENDING_EXTERNAL.map(([name]) => name);
+  names.forEach((name) => { delete IGNORED_EXTERNAL[name]; });
+  commit();
+  for (const name of names) {
+    const f = FILES[name];
+    if (!f) continue;
+    await fetch('/api/backup', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
+      body: JSON.stringify({ name, text: f.text }) });
+  }
+  PENDING_EXTERNAL = null; $('#external').hidden = true;
+  discardExternalEdits(names);
+  await load(true);
+  banner('Local edits were saved as a backup before reloading the external changes.');
+}
+
+$('#external-reload').onclick = reloadExternal;
+$('#external-overwrite').onclick = overwriteExternal;
+$('#external-backup').onclick = backupExternal;
+$('#external-later').onclick = () => {
+  if (PENDING_EXTERNAL) for (const [name, hash] of PENDING_EXTERNAL) IGNORED_EXTERNAL[name] = hash;
+  PENDING_EXTERNAL = null; $('#external').hidden = true;
+};
+
 async function poll() {
   try {
     const s = await (await fetch('/api/state')).json();
     setBuild(s.build);
-    const changed = Object.keys(s.hashes).filter((n) => FILES[n] && s.hashes[n] !== FILES[n].base);
+    const changed = Object.keys(s.hashes).filter((n) => FILES[n] && s.hashes[n] !== FILES[n].base && IGNORED_EXTERNAL[n] !== s.hashes[n]);
     const busy = Date.now() - lastTyping < 4000 || !$('#drawer').hidden;
     if ((changed.length || s.auxver !== AUXVER) && !busy) {
       commit();
-      const conflicts = changed.filter((n) => FILES[n].text !== FILES[n].disk);
-      if (conflicts.length) banner(`${conflicts.join(', ')} changed on disk while you were editing it; your version is kept until you save (which will refuse) or reload.`);
+      const hashes = changed.map((name) => [name, s.hashes[name]]);
+      if (hashes.length) showExternal(hashes);
       AUXVER = s.auxver;
-      await load(true);
     }
   } catch (e) { /* server restarting */ }
   setTimeout(poll, 2000);
@@ -1098,12 +1223,30 @@ const TTS = (() => {
 
   function reset() { stop(); queue = []; idx = 0; anchor = null; setState('Ready'); }
 
+  function capture() {
+    const item = speaking && queue[idx - 1];
+    return item ? { file: item.seg.file, src: item.seg.src, text: item.text, paused } : null;
+  }
+
+  function restore(state) {
+    if (!state) return;
+    const seg = ORDER.find((item) => item.file === state.file && !item.removed);
+    if (!seg) return;
+    queue = build(ORDER.indexOf(seg));
+    idx = queue.findIndex((item) => item.seg === seg && item.text === state.text);
+    if (idx < 0) idx = queue.findIndex((item) => item.seg === seg && item.text.includes(state.text.trim().slice(0, 60)));
+    if (idx < 0) return;
+    speaking = true; paused = false;
+    next();
+    if (state.paused) pause();
+  }
+
   function testPrepare() {
     const prepared = prepareQueue();
     return { text: prepared.queue[prepared.index]?.text || null, index: prepared.index };
   }
 
-  return { play, stop, pause, prev: () => jump(-1), next: () => jump(1), setAnchor, reset, fillVoices, loadServerVoices, build,
+  return { play, stop, pause, prev: () => jump(-1), next: () => jump(1), setAnchor, reset, capture, restore, fillVoices, loadServerVoices, build,
     testPrepare, testSavePosition: savePosition };
 })();
 $('#play').onclick = () => TTS.play();
@@ -1159,18 +1302,17 @@ function speechMap(root) {
   return { text, parts };
 }
 
-// Phrases: sentences, split again at ; and :, and in long sentences at
-// commas.  Returns [start, end) offsets into the spoken text.
+// Phrases: sentences, split again at ; and :.  Commas stay inside one
+// utterance so speech does not pause unnaturally at every long clause.
 const ABBREV = /\b(Fig|Figs|Thm|Eq|Sec|Sect|Lem|Def|Cor|App|i\.e|e\.g|cf|vs|resp|al|Prop)\.$/;
 function phraseBounds(text) {
   const out = [];
   let start = 0, m;
-  const re = /[.!?;:,](?=\s)/g;
+  const re = /[.!?;:](?=\s)/g;
   while ((m = re.exec(text))) {
     const end = m.index + 1;
     const piece = text.slice(start, end).trim();
     if (m[0] === '.' && ABBREV.test(piece)) continue;
-    if (m[0] === ',' && piece.length < 60) continue;
     if (piece.length < 12 && m[0] !== '.') continue;
     out.push([start, end]);
     start = end;
@@ -1367,6 +1509,8 @@ function editTest() {
 function readerTest() {
   const failures = [];
   const fail = (message) => failures.push(message);
+  if (phraseBounds('This is a deliberately long clause that contains a comma, and it should remain one natural spoken sentence.')
+      .length !== 1) fail('comma split speech into multiple phrases');
   const phrases = TTS.build(0);
   if (phrases.length < 2) fail('not enough speech phrases');
   else {
@@ -1499,6 +1643,19 @@ function headingAtCaret(level) {
   structural(() => PLACEHOLDER);
 }
 
+function splitSectionAtCaret() {
+  const r = selRange();
+  const seg = segOf(editableAt(r) || document.body);
+  if (!seg || seg.kind !== 'para') { banner('Put the cursor in the section where it should split.'); return; }
+  const segs = FILES[seg.file].segs;
+  const at = segs.indexOf(seg);
+  let heading = null;
+  for (let i = at - 1; i >= 0; i--) if (segs[i].kind === 'heading') { heading = segs[i]; break; }
+  const h = heading && L.headingParts(heading.src);
+  if (!h) { banner('This text is not inside a named section.'); return; }
+  headingAtCaret(h.level);
+}
+
 function insertMath(display) {
   const m = display ? mathChip('\\[\n  \n\\]', true) : mathChip('$ $', false);
   const nodes = display ? [chip('nl', '\n', ' '), m, chip('nl', '\n', ' ')] : [m];
@@ -1580,6 +1737,9 @@ function keyName(e) {
 }
 
 function closeCurrentMenu() {
+  if (!$('#external').hidden) { $('#external-later').click(); return; }
+  if (!$('#openbox').hidden) { $('#open-cancel').click(); return; }
+  if (!$('#newfilebox').hidden) { $('#newfile-cancel').click(); return; }
   if (!$('#palette').hidden) { closePalette(); return; }
   if (!$('#keysbox').hidden) { RECORDING = null; $('#keysbox').hidden = true; return; }
   if (!$('#paperbox').hidden) { $('#paperbox').hidden = true; return; }
@@ -2073,6 +2233,7 @@ const ACTIONS = {
   section: () => headingAtCaret('section'),
   subsection: () => headingAtCaret('subsection'),
   paragraph: () => headingAtCaret('paragraph'),
+  splitsection: splitSectionAtCaret,
   newpara: () => insertNodes([chip('parbreak', '\n\n', '')]),
   find: () => openFind(false),
   undo, redo,
@@ -2769,6 +2930,7 @@ const ACTION_DEFS = [
   ['section', 'Section heading at the cursor', 'text', ['C-M-1'], () => headingAtCaret('section')],
   ['subsection', 'Subsection heading at the cursor', 'text', ['C-M-2'], () => headingAtCaret('subsection')],
   ['paragraph', '\\paragraph heading at the cursor', 'text', ['C-M-3'], () => headingAtCaret('paragraph')],
+  ['splitsection', 'Split section at the cursor', 'text', [], () => splitSectionAtCaret()],
   ['linestart', 'Start of line', 'text', ['C-a'], () => getSelection().modify('move', 'backward', 'lineboundary')],
   ['lineend', 'End of line', 'text', ['C-e'], () => getSelection().modify('move', 'forward', 'lineboundary')],
   ['selstart', 'Select to start of line', 'text', ['C-A'], () => getSelection().modify('extend', 'backward', 'lineboundary')],
@@ -2842,6 +3004,66 @@ $('#keys-save').onclick = async () => {
 };
 
 // ======================================================= main switcher
+
+let OPEN_PROJECT = null;
+
+function showNewFile() {
+  if (!editableAt(selRange())) { banner('Put the cursor in the paper where the new file should be included.'); return; }
+  $('#newfilebox').hidden = false;
+  $('#newfile-name').focus();
+}
+
+async function createNewFile() {
+  const name = $('#newfile-name').value.trim();
+  const text = $('#newfile-text').value;
+  if (!name) return;
+  const r = await fetch('/api/create-file', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
+    body: JSON.stringify({ name, text }) });
+  if (!r.ok) { banner('Could not create the file: ' + (await r.json()).error); return; }
+  const created = (await r.json()).name;
+  const input = created.replace(/\.tex$/, '');
+  if (!insertNodes([chip('src', '\\input{' + input + '}', '\\input{' + input + '}')])) return;
+  $('#newfilebox').hidden = true;
+  $('#newfile-name').value = '';
+  commit();
+  await load(true);
+}
+
+$('#newfilebtn').onclick = showNewFile;
+$('#newfile-create').onclick = createNewFile;
+$('#newfile-cancel').onclick = () => { $('#newfilebox').hidden = true; };
+
+async function chooseProjectDirectory() {
+  const r = await fetch('/api/pick-directory', { method: 'POST', headers: { 'X-Token': TOKEN, 'Content-Type': 'application/json' }, body: '{}' });
+  if (r.status === 204) return;
+  if (!r.ok) { banner('Could not choose a paper directory.'); return; }
+  const picked = await r.json();
+  if (!picked.mains.length) { banner('That directory contains no main LaTeX documents.'); return; }
+  OPEN_PROJECT = picked;
+  $('#open-path').textContent = picked.path;
+  const select = $('#open-main');
+  select.textContent = '';
+  for (const main of picked.mains) select.append(new Option(main, main));
+  $('#openbox').hidden = false;
+  select.focus();
+}
+
+async function openSelectedProject() {
+  if (!OPEN_PROJECT) return;
+  if (editedFiles().length && !confirm('You have unsaved edits; opening another paper discards them. Continue?')) return;
+  const r = await fetch('/api/open-project', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
+    body: JSON.stringify({ path: OPEN_PROJECT.path, main: $('#open-main').value }) });
+  if (!r.ok) { banner('Could not open it: ' + (await r.json()).error); return; }
+  $('#openbox').hidden = true;
+  OPEN_PROJECT = null;
+  for (const k of Object.keys(FILES)) delete FILES[k];
+  await load(false);
+  AUXVER = DOC.auxver;
+}
+
+$('#openbtn').onclick = chooseProjectDirectory;
+$('#open-confirm').onclick = openSelectedProject;
+$('#open-cancel').onclick = () => { OPEN_PROJECT = null; $('#openbox').hidden = true; };
 
 function fillMains() {
   const sel = $('#mainsel');

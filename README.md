@@ -11,6 +11,10 @@ A local reading editor for a LaTeX paper: the paper rendered as text with
 typeset maths, edited in place, read aloud, and saved back to the `.tex`
 sources, with the PDF rebuilt after each save.
 
+The **Open…** button can choose a paper directory through the operating
+system's folder picker and then lets you select which detected document is the
+main file. The same project can contain several main documents.
+
     ./run ~/papers/my-paper              # a project folder (finds the main file)
     ./run ~/papers/my-paper/main.tex     # or the main file itself
     ./run paper --main other.tex --cwd .. --port 8766 [--browser chrome]
@@ -45,6 +49,8 @@ sources, with the PDF rebuilt after each save.
   under a cryptobib-style key; every `\label` by number, type and text.
 - **Find and replace**, toolbar, undo/redo for every kind of edit,
   light/dark/auto colours, one or two columns.
+- Sections can be moved, combined, or split at the cursor; new TeX section
+  files can be created from the interface and inserted with `\input`.
 - **Reads aloud**, phrase by phrase, highlighting the phrase; maths is read
   as words. Voices: the browser's, Kokoro and Piper (offline), Edge
   (unofficial endpoint), Azure and Google (official, need keys).
@@ -82,12 +88,16 @@ bibliography index, audio; ignored by its own `.gitignore`). The editor's
 folder holds only the program and the shared voice models.
 
     {
-      "house_rules": {"tie_before": ["cite", "ref"], "flag_bracketed_cref": true},
+      "house_rules": {"tie_before": ["cite", "ref"], "flag_bracketed_cref": true, "one_sentence_per_line": false},
       "key_style": "cryptobib",
       "bib_add_to": "references.bib",
       "build": ["latexmk", "-pdf", "-synctex=1", "main.tex"],
       "code_envs": ["ecblock"]
     }
+
+  When saving edited content, the editor asks before applying the configured
+  house rules. Existing untouched content is preserved exactly; only edited
+  blocks can be changed by those rules.
 
 ## Setup
 

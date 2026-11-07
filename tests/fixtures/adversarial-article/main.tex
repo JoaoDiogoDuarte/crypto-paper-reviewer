@@ -1,0 +1,22 @@
+\documentclass[11pt]{article}
+\title{An Adversarial Test Paper}
+\author{Test Author}
+\begin{document}
+\maketitle
+
+\section{Punctuation, braces and commands}
+This sentence has commas, semicolons; parentheses (and brackets), plus \textbf{bold text} and \emph{emphasis}.  It contains a percent sign \% and an ampersand \&.
+
+\input{sections/part}
+
+\section{Maths and raw text}
+Inline maths $a_{i}^{2} + b_{i}^{2} = c_{i}^{2}$ should render.  Displayed maths follows:
+\[
+  \sum_{i=1}^{n} i = \frac{n(n+1)}{2}
+\]
+
+\begin{verbatim}
+raw text % with braces { and commands \section{not a section}
+\end{verbatim}
+
+\end{document}

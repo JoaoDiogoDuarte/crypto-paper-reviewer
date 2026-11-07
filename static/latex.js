@@ -334,6 +334,9 @@
         (all, w, cmd, arg) => (original && original.includes(all) ? all : `${w}~\\${cmd}{${arg}}`));
     }
     if (rules.flag_bracketed_cref && /\(\s*\\[cC]ref\{/.test(text)) warnings.push('bracketed \\cref: refer in prose instead');
+        if (rules.one_sentence_per_line) {
+          text = text.replace(/([.!?])\s+(?=[A-Z\\])/g, '$1\n');
+        }
     if (/  +/.test(text.replace(/\n[ \t]*/g, '\n'))) {
       text = text.replace(/([^\n ]) {2,}/g, '$1 ');
     }

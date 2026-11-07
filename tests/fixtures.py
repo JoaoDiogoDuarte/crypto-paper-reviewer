@@ -21,6 +21,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -93,8 +94,17 @@ def check(name, rounds):
                            timeout=300)
         log = open(main[:-4] + '.log', errors='replace').read() if os.path.exists(main[:-4] + '.log') else ''
         undefined = [l for l in log.splitlines() if 'undefined' in l and ('Citation' in l or 'Reference' in l)]
-        ok_build = r.returncode == 0 and not undefined
+        pdf = main[:-4] + '.pdf'
+        info = subprocess.run(['pdfinfo', pdf], capture_output=True, text=True) if os.path.exists(pdf) else None
+        pages = int(re.search(r'^Pages:\s+(\d+)', info.stdout, re.M).group(1)) if info and info.returncode == 0 and re.search(r'^Pages:\s+(\d+)', info.stdout, re.M) else 0
+        text = subprocess.run(['pdftotext', pdf, '-'], capture_output=True, text=True).stdout if pages else ''
+        pdf_warnings = [l for l in log.splitlines() if ('LaTeX Warning:' in l or 'Overfull \\hbox' in l or 'Underfull \\hbox' in l)]
+        unresolved_pdf = bool(re.search(r'(?<!\?)\?\?(?!\?)', text))
+        pdf_ok = bool(info and info.returncode == 0 and pages > 0 and os.path.getsize(pdf) > 0 and not unresolved_pdf)
+        ok_build = r.returncode == 0 and not undefined and pdf_ok
         out.append(f'build: {"ok" if ok_build else "FAILED"}' + (f' ({len(undefined)} undefined)' if undefined else ''))
+        out.append(f'pdf: {"ok" if pdf_ok else "FAILED"}, pages={pages}, LaTeX warnings={len(pdf_warnings)}')
+        out += ['  warning: ' + w[:180] for w in pdf_warnings[:5]]
         originals = {f: sha1(f) for f in tex_files(work)}
         # 2. round trip
         rt = subprocess.run(['node', os.path.join(HERE, 'roundtrip.js'), work], capture_output=True, text=True)
