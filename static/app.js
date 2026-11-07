@@ -881,6 +881,10 @@ doc.addEventListener('paste', (e) => {
   if (e.target.tagName === 'TEXTAREA') return;
   e.preventDefault();
   const text = e.clipboardData.getData('text/plain').replace(/\r\n?/g, '\n').replace(/\n{2,}/g, ' ').replace(/\n/g, ' ');
+  const display = /^\$\$([^]*)\$\$$/.exec(text.trim());
+  const inline = /^\$([^]*)\$$/.exec(text.trim());
+  if (display && insertNodes([mathChip('$$' + display[1] + '$$', true)])) return;
+  if (inline && insertNodes([mathChip('$' + inline[1] + '$', false)])) return;
   document.execCommand('insertText', false, text);
 });
 
@@ -1615,6 +1619,33 @@ function wrap(prefix, tag) {
   markEditedSoon();
 }
 
+function wrapLiteral(open, close) {
+  const r = selRange();
+  if (!editableAt(r)) return;
+  snapshot();
+  if (r.collapsed) {
+    const text = document.createTextNode(open + close);
+    r.insertNode(text);
+    r.setStart(text, open.length); r.collapse(true);
+  } else {
+    const contents = r.extractContents();
+    const frag = document.createDocumentFragment();
+    frag.append(document.createTextNode(open), contents, document.createTextNode(close));
+    r.insertNode(frag);
+  }
+  markEditedSoon();
+}
+
+function mathAtSelection() {
+  const r = selRange();
+  if (!r || r.collapsed || !editableAt(r)) return insertMath(false);
+  snapshot();
+  const source = '$' + ser(r.cloneContents()) + '$';
+  const math = mathChip(source, false);
+  r.deleteContents(); r.insertNode(math); setCaretAfter(math);
+  markEditedSoon();
+}
+
 // Insert chips at the caret: a paragraph break, maths, raw LaTeX.
 function insertNodes(nodes) {
   const r = selRange();
@@ -1764,8 +1795,8 @@ const TEXT_KEYS = {
   'C-b': () => wrap('\\textbf{', 'strong'),
   'C-i': () => wrap('\\emph{', 'em'),
   'C-I': () => wrap('\\textit{', 'em'),
-  'C-m': () => insertMath(false), 'C-M': () => insertMath(true),
-  '$': () => insertMath(false),
+  'C-m': mathAtSelection, 'C-M': () => insertMath(true),
+  '$': mathAtSelection, '"': () => wrapLiteral('"', '"'),
   'C-\\': () => insertLatex('\\cref{}', 'Insert LaTeX'),
   'C-M-r': () => insertLatex('\\cref{}', 'Insert a reference'),
   'C-M-c': () => insertLatex('\\cite{}', 'Insert a citation'),
@@ -2225,7 +2256,7 @@ try { setTheme(localStorage.getItem('theme') || 'auto'); } catch (e) { setTheme(
 const ACTIONS = {
   bold: () => wrap('\\textbf{', 'strong'),
   emph: () => wrap('\\emph{', 'em'),
-  math: () => insertMath(false),
+  math: mathAtSelection,
   display: () => insertMath(true),
   cite: citePalette,
   ref: refPalette,
