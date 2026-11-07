@@ -62,7 +62,18 @@ def run(source, target, anon):
             for f in files:
                 if f.endswith('.tex'):
                     used |= set(re.findall(r'\\begin\{(' + THM + r')\}', open(os.path.join(root, f), errors='replace').read()))
-        out, warns = convert.convert(text, md, target, anon, sorted(used))
+        def resolve(n):
+            for c in (n, n + '.tex'):
+                p = os.path.join(d, c)
+                if os.path.isfile(p):
+                    return open(p, errors='replace').read()
+            return None
+        everything = ''
+        for root, _, files in os.walk(d):
+            for f in files:
+                if f.endswith('.tex') and os.path.join(root, f) != main:
+                    everything += open(os.path.join(root, f), errors='replace').read()
+        out, warns = convert.convert(text, md, target, anon, sorted(used), resolve, everything)
         name = f'main-{target}{"-anon" if anon else ""}.tex'
         open(os.path.join(d, name), 'w').write(out)
         r = subprocess.run(['latexmk', '-pdf', '-interaction=nonstopmode', '-halt-on-error', name], cwd=d,
@@ -73,8 +84,9 @@ def run(source, target, anon):
         anon_ok = None
         if anon and r.returncode == 0:
             txt = subprocess.run(['pdftotext', name[:-4] + '.pdf', '-'], cwd=d, capture_output=True, text=True).stdout
-            names = [a['name'] for a in md['authors'] if a['name'] != 'Placeholder Author']
-            anon_ok = not any(n and n in txt for n in names)
+            names = [a['name'] for a in md['authors'] if a['name'] != 'Placeholder Author' and 'Anonymous' not in a['name']]
+            info = subprocess.run(['pdfinfo', name[:-4] + '.pdf'], cwd=d, capture_output=True, text=True).stdout
+            anon_ok = not any(n and (n in txt or n in info) for n in names)
         return r.returncode == 0, undef, err, warns, anon_ok
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
