@@ -77,23 +77,23 @@ def run(source, target, anon):
         name = f'main-{target}{"-anon" if anon else ""}.tex'
         open(os.path.join(d, name), 'w').write(out)
         r = subprocess.run(['latexmk', '-pdf', '-interaction=nonstopmode', '-halt-on-error', name], cwd=d,
-                           capture_output=True, text=True, timeout=240)
+                           capture_output=True, text=True, errors='replace', timeout=240)
         log = open(os.path.join(d, name[:-4] + '.log'), errors='replace').read() if os.path.exists(os.path.join(d, name[:-4] + '.log')) else ''
         undef = len(re.findall(r'(Citation|Reference) .* undefined', log))
         err = next((l for l in log.splitlines() if l.startswith('!')), '')
         pdf = os.path.join(d, name[:-4] + '.pdf')
-        info = subprocess.run(['pdfinfo', pdf], cwd=d, capture_output=True, text=True) if os.path.exists(pdf) else None
+        info = subprocess.run(['pdfinfo', pdf], cwd=d, capture_output=True, text=True, errors='replace') if os.path.exists(pdf) else None
         pages_match = re.search(r'^Pages:\s+(\d+)', info.stdout, re.M) if info and info.returncode == 0 else None
         pages = int(pages_match.group(1)) if pages_match else 0
-        pdf_text = subprocess.run(['pdftotext', pdf, '-'], cwd=d, capture_output=True, text=True).stdout if pages else ''
+        pdf_text = subprocess.run(['pdftotext', pdf, '-'], cwd=d, capture_output=True, text=True, errors='replace').stdout if pages else ''
         pdf_ok = bool(info and info.returncode == 0 and pages > 0 and os.path.getsize(pdf) > 0 and
                   not re.search(r'(?<!\?)\?\?(?!\?)', pdf_text))
         pdf_warnings = [l for l in log.splitlines() if ('LaTeX Warning:' in l or 'Overfull \\hbox' in l or 'Underfull \\hbox' in l)]
         anon_ok = None
         if anon and r.returncode == 0:
-            txt = subprocess.run(['pdftotext', name[:-4] + '.pdf', '-'], cwd=d, capture_output=True, text=True).stdout
+            txt = subprocess.run(['pdftotext', name[:-4] + '.pdf', '-'], cwd=d, capture_output=True, text=True, errors='replace').stdout
             names = [a['name'] for a in md['authors'] if a['name'] != 'Placeholder Author' and 'Anonymous' not in a['name']]
-            info = subprocess.run(['pdfinfo', name[:-4] + '.pdf'], cwd=d, capture_output=True, text=True).stdout
+            info = subprocess.run(['pdfinfo', name[:-4] + '.pdf'], cwd=d, capture_output=True, text=True, errors='replace').stdout
             anon_ok = not any(n and (n in txt or n in info) for n in names)
         return r.returncode == 0, undef, err, warns, anon_ok, pdf_ok, pages, pdf_warnings
     finally:
