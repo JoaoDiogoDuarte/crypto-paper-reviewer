@@ -17,7 +17,7 @@ function texFiles(p) {
 const args = process.argv.slice(2);
 if (!args.length) { console.log('usage: node tests/roundtrip.js FILE_OR_DIR...'); process.exit(2); }
 const files = args.flatMap(texFiles);
-let failures = 0, blocks = 0, ruleChanges = 0;
+let failures = 0, blocks = 0, ruleChanges = 0, gamesSeen = 0;
 const fail = (msg) => { failures++; if (failures <= 20) console.log('FAIL ' + msg); };
 
 for (const f of files) {
@@ -36,6 +36,15 @@ for (const f of files) {
     if (seg.kind === 'figure' || seg.kind === 'table') {
       const c = L.captionParts(seg.src);
       if (c && c.prefix + c.caption + c.suffix !== seg.src) fail(`${f}: caption split`);
+      // games: reassembling untouched lines gives the figure back
+      const games = L.parseGames(seg.src);
+      gamesSeen += games.length;
+      let rebuilt = seg.src;
+      for (const g of [...games].reverse()) {
+        const body = g.kind === 'proc' ? g.lines.map(L.gameLineSrc).join('') : g.lines.map(L.gameLineSrc).join('\n');
+        rebuilt = rebuilt.slice(0, g.bodyStart) + body + rebuilt.slice(g.bodyEnd);
+      }
+      if (rebuilt !== seg.src) fail(`${f}: games do not rebuild their figure`);
     }
     if (seg.kind !== 'para' && seg.kind !== 'heading') continue;
     blocks++;
@@ -53,7 +62,7 @@ for (const f of files) {
 const [fixed] = L.houseRules('see Section \\ref{sec:x} and \\cite{A}.');
 if (fixed !== 'see Section~\\ref{sec:x} and~\\cite{A}.') fail('house rules: ' + fixed);
 
-console.log(`${files.length} files, ${blocks} paragraphs and headings; ` +
+console.log(`${files.length} files, ${blocks} paragraphs and headings, ${gamesSeen} games; ` +
   `house rules would change ${ruleChanges} existing paragraphs`);
 console.log(failures ? `${failures} FAILURES` : 'round trip OK');
 process.exit(failures ? 1 : 0);

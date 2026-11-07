@@ -64,13 +64,23 @@ def sha1(path):
 
 
 def check(name, rounds):
-    src = os.path.join(FIX, name)
     out = []
-    tmp = tempfile.mkdtemp(prefix=f'pe-fix-{name}-')
+    if os.path.isfile(name):
+        # a real paper: copy its whole repository, keep the main file's place in it
+        mainpath = os.path.abspath(name)
+        r = subprocess.run(['git', 'rev-parse', '--show-toplevel'], cwd=os.path.dirname(mainpath),
+                           capture_output=True, text=True)
+        src = r.stdout.strip() if r.returncode == 0 else os.path.dirname(mainpath)
+        rel_main = os.path.relpath(mainpath, src)
+        label = os.path.basename(src)
+        external = True
+    else:
+        src, rel_main, label, external = os.path.join(FIX, name), None, name, False
+    tmp = tempfile.mkdtemp(prefix=f'pe-fix-{label}-')
     try:
-        work = os.path.join(tmp, name)
-        shutil.copytree(src, work)
-        main = main_of(work)
+        work = os.path.join(tmp, label)
+        shutil.copytree(src, work, ignore=shutil.ignore_patterns('.git'))
+        main = os.path.join(work, rel_main) if rel_main else main_of(work)
         missing = needed_class_missing(main)
         if missing:
             return 'SKIP', [f'{missing} not installed; put it in tests/classes/']
@@ -101,7 +111,8 @@ def check(name, rounds):
         for seed in (1, 7):
             for f, h in originals.items():   # restore the sources between runs
                 rel = os.path.relpath(f, work)
-                shutil.copy(os.path.join(src, rel), f)
+                if os.path.exists(os.path.join(src, rel)):
+                    shutil.copy(os.path.join(src, rel), f)
             rep = selftest.run(main, f'fuzz={rounds}&seed={seed}', timeout=180, key='FUZZ')
             try:
                 res = json.loads(rep.split('\n', 1)[0])
@@ -118,7 +129,7 @@ def check(name, rounds):
                     out.append(f'  disk differs from the page: {rel}')
             for f, h in originals.items():
                 rel = os.path.relpath(f, base)
-                if rel not in res['edited'] and sha1(f) != h:
+                if os.path.exists(os.path.join(src, os.path.relpath(f, work))) and sha1(f) != sha1(os.path.join(src, os.path.relpath(f, work))) and rel not in res['edited']:
                     untouched_ok = False
                     out.append(f'  file not edited by the fuzzing changed: {rel}')
             good = res['nfails'] == 0 and disk_ok and untouched_ok
@@ -127,7 +138,8 @@ def check(name, rounds):
                        f'{len(res["edited"])} files saved, disk {"=" if disk_ok else "≠"} page, '
                        f'untouched files {"identical" if untouched_ok else "CHANGED"}')
             out += ['  ' + f[:160] for f in res['fails'][:6]]
-        status = 'OK' if (ok_build and ok_rt and ok_self and ok_fuzz) else 'FAIL'
+        # a third-party paper may need tools we lack: its build is reported, not required
+        status = 'OK' if ((ok_build or external) and ok_rt and ok_self and ok_fuzz) else 'FAIL'
         return status, out
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -135,7 +147,7 @@ def check(name, rounds):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument('names', nargs='*')
+    ap.add_argument('names', nargs='*', help='fixture names, or paths to main .tex files of real papers')
     ap.add_argument('--rounds', type=int, default=150)
     args = ap.parse_args()
     names = args.names or sorted(d for d in os.listdir(FIX) if os.path.isdir(os.path.join(FIX, d)))

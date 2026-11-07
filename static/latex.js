@@ -359,8 +359,99 @@
       .replace(/\u2018/g, '`').replace(/\u2019/g, "'").replace(/\u2026/g, '\\dots{}');
   }
 
+  const ARG_CMDS = new Set(['If', 'ElsIf', 'For', 'ForAll', 'While', 'Until', 'Procedure', 'Function']);
+  // algorithmicx blocks: [{start, end, title, lines:[{prefix, content, suffix, kind, raw}]}]
+  function parseGames(src, envs) {
+      envs = envs || ['gameenv', 'algorithmic'];
+    const out = [];
+    const re = new RegExp('\\\\begin\\{(' + envs.join('|') + ')\\}', 'g');
+    let m;
+    while ((m = re.exec(src))) {
+      if (inComment(src, m.index)) continue;
+      const end = envEnd(src, m.index, m[1]);
+      if (end < 0) continue;
+      let bodyStart = m.index + m[0].length, title = null, titleRange = null;
+      while (src[bodyStart] === '[' || (src[bodyStart] === '{' && m[1] === 'gameenv' && title === null)) {
+        const ge = groupEnd(src, bodyStart);
+        if (src[bodyStart] === '{') { title = src.slice(bodyStart + 1, ge - 1); titleRange = [bodyStart + 1, ge - 1]; }
+        bodyStart = ge;
+      }
+      const bodyEnd = end - ('\\end{' + m[1] + '}').length;
+      const body = src.slice(bodyStart, bodyEnd);
+      out.push({ kind: 'algo', env: m[1], bodyStart, bodyEnd, title, titleRange, lines: body.split('\n').map(parseGameLine) });
+      re.lastIndex = end;
+    }
+    // cryptocode: \procedure[opts]{title}{body}
+    const pre = /\\(procedure|pseudocode)\*?\s*(\[[^\]]*\])?\s*\{/g;
+    while ((m = pre.exec(src))) {
+      if (inComment(src, m.index)) continue;
+      let i = m.index + m[0].length - 1;
+      let title = null, titleRange = null;
+      if (m[1] === 'procedure') {
+        const te = groupEnd(src, i);
+        title = src.slice(i + 1, te - 1); titleRange = [i + 1, te - 1];
+        i = te;
+        while (src[i] === ' ' || src[i] === '\n') i++;
+      }
+      if (src[i] !== '{') continue;
+      const be = groupEnd(src, i);
+      const body = src.slice(i + 1, be - 1);
+      // lines end at a top-level \\ (the separator stays with its line)
+      const lines = [];
+      let depth = 0, last = 0;
+      for (let k = 0; k < body.length; k++) {
+        const c = body[k];
+        if (c === '\\' && body[k + 1] === '\\' && depth === 0) {
+          let e = k + 2;
+          while (e < body.length && /[ \t\r\n]/.test(body[e])) e++;
+          lines.push({ content: body.slice(last, k), suffix: body.slice(k, e), prefix: '' });
+          last = e; k = e - 1; continue;
+        }
+        if (c === '\\') { k++; continue; }
+        if (c === '{') depth++; else if (c === '}') depth--;
+      }
+      lines.push({ content: body.slice(last), suffix: '', prefix: '' });
+      out.push({ kind: 'proc', bodyStart: i + 1, bodyEnd: be - 1, title, titleRange, lines });
+      pre.lastIndex = be;
+    }
+    return out.sort((a, b) => a.bodyStart - b.bodyStart);
+  }
+
+  function parseGameLine(line) {
+    const m = /^(\s*)\\(State|Statex|If|ElsIf|Else|EndIf|For|ForAll|EndFor|While|EndWhile|Repeat|Until|Loop|EndLoop|Procedure|EndProcedure|Function|EndFunction|Require|Ensure|Return)(?![A-Za-z])(\s*)/.exec(line);
+    if (!m) return { kind: 'raw', prefix: line, content: '', suffix: '', raw: true };
+    const kind = m[2];
+    let i = m[0].length;
+    let prefix = line.slice(0, i), content, suffix;
+    if (ARG_CMDS.has(kind) && line[i] === '{') {
+      const ge = groupEnd(line, i);
+      prefix += '{';
+      content = line.slice(i + 1, ge - 1);
+      suffix = line.slice(ge - 1);
+      if (kind === 'Procedure' || kind === 'Function') { // \Procedure{name}{args}: edit the args, keep the name
+        const ge2 = line[ge] === '{' ? groupEnd(line, ge) : -1;
+        if (ge2 > 0) { prefix = line.slice(0, ge + 1); content = line.slice(ge + 1, ge2 - 1); suffix = line.slice(ge2 - 1); }
+      }
+    } else {
+      // the statement, up to a trailing \Comment{...}
+      const rest = line.slice(i);
+      const c = rest.search(/\\Comment\s*\{/);
+      content = c >= 0 ? rest.slice(0, c) : rest;
+      suffix = c >= 0 ? rest.slice(c) : '';
+      // keep trailing spaces out of the editable part
+      const tr = /\s*$/.exec(content)[0];
+      if (tr) { content = content.slice(0, content.length - tr.length); suffix = tr + suffix; }
+    }
+    const ret = /^\\Return\b\s*/.exec(content);
+    return { kind: ret ? 'Return' : kind, cmd: kind, prefix: ret ? prefix + ret[0] : prefix,
+      content: ret ? content.slice(ret[0].length) : content, suffix };
+  }
+
+  function gameLineSrc(l) { return l.prefix + l.content + l.suffix; }
+
+
   const api = { tokenize, serializeTokens, segment, serializeSegments, splitCode, documentPieces,
-    decodeText, encodeText, houseRules, headingParts, captionParts, typeset, setCodeEnvs, groupEnd, envEnd, inComment, THM_ENVS, MATH_ENVS };
+    decodeText, encodeText, houseRules, headingParts, captionParts, typeset, setCodeEnvs, parseGames, parseGameLine, gameLineSrc, groupEnd, envEnd, inComment, THM_ENVS, MATH_ENVS };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.LatexDoc = api;
 })(this);

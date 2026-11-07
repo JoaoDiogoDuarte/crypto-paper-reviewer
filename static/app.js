@@ -48,8 +48,8 @@ async function load(keepScroll) {
 // Segments of a file.  Every file is split at its \input/\include/\subfile
 // lines; in the main file, everything up to \begin{document} is one hidden
 // segment (inputs there are not shown).
-function parseFile(name) {
-  const text = FILES[name].text;
+function parseFile(name, textOverride) {
+  const text = textOverride !== undefined ? textOverride : FILES[name].text;
   const segs = [];
   let front = name === DOC.main && text.includes('\\begin{document}');
   for (const piece of L.documentPieces(text)) {
@@ -555,7 +555,7 @@ function segSource(seg, warnings) {
     }
     case 'code': return seg.edit && seg.touched ? seg.parts.pre + seg.edit.value + seg.parts.post : seg.src;
     case 'figure': case 'table':
-      if (!seg.edit || !seg.parts) return seg.src;
+      if (!seg.edit || !seg.parts) return seg.figSrc || seg.src;
       return seg.parts.prefix + fix(ser(seg.edit), seg.parts.caption) + seg.parts.suffix;
     default: return seg.src;
   }
@@ -2048,5 +2048,387 @@ async function fuzzTest(n, seed) {
   const q = new URLSearchParams(location.search);
   if (q.has('fuzz')) {
     const t = setInterval(() => { if (ORDER.length) { clearInterval(t); setTimeout(() => fuzzTest(+q.get('fuzz') || 200, +q.get('seed') || 1), 500); } }, 200);
+  }
+}
+
+
+// ================================================================= diff
+//
+// Compare every file with a baseline (the last git commit, or the text when
+// the editor opened): blocks are matched by their source; a block that
+// changed shows a word diff, a new block is tinted green, a deleted one is
+// shown struck through in red where it was.  Read-only while on.
+
+const DIFF = { on: false, marks: [], cur: -1 };
+
+function diffUnits(src) {
+  // words, spaces and punctuation of the text; every other token whole
+  const out = [];
+  for (const tok of L.tokenize(src)) {
+    if (tok.t === 'text') {
+      for (const w of tok.s.match(/\s+|[\p{L}\p{N}]+|[^\s\p{L}\p{N}]/gu) || []) out.push({ key: 'T' + w, tok: { t: 'text', s: w } });
+    } else if (tok.t === 'nl') out.push({ key: 'T ', tok });
+    else out.push({ key: 'K' + L.serializeTokens([tok]), tok });
+  }
+  return out;
+}
+
+function lcs(a, b, eq) {
+  const n = a.length, m = b.length;
+  if (n * m > 4e6) return null;   // too big: treat as replaced
+  const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) {
+    dp[i][j] = eq(a[i], b[j]) ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  }
+  const ops = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (eq(a[i], b[j])) { ops.push(['=', a[i], b[j]]); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) ops.push(['-', a[i++], null]);
+    else ops.push(['+', null, b[j++]]);
+  }
+  while (i < n) ops.push(['-', a[i++], null]);
+  while (j < m) ops.push(['+', null, b[j++]]);
+  return ops;
+}
+
+function renderWordDiff(oldSrc, newSrc, into) {
+  const ops = lcs(diffUnits(oldSrc), diffUnits(newSrc), (x, y) => x.key === y.key);
+  into.textContent = '';
+  if (!ops) { // too large to diff word by word
+    const d = el('span', 'd-del'); renderTokens(L.tokenize(oldSrc), d, {});
+    const n = el('span', 'd-ins'); renderTokens(L.tokenize(newSrc), n, {});
+    into.append(d, n);
+    return;
+  }
+  for (const [op, a, b] of ops) {
+    const u = op === '-' ? a : b;
+    const target = op === '=' ? into : el('span', op === '-' ? 'd-del' : 'd-ins');
+    renderTokens([u.tok], target, {});
+    if (op !== '=') into.append(target);
+  }
+}
+
+function contentOf(seg, src) {
+  // the editable part of a block, as source: a heading's title, a caption
+  if (seg.kind === 'heading') { const h = L.headingParts(src); return h ? h.title : src; }
+  if (seg.kind === 'figure' || seg.kind === 'table') { const c = L.captionParts(src); return c ? c.caption : src; }
+  return src;
+}
+
+async function diffOn() {
+  commit();
+  const ref = $('#diffbase').value;
+  DIFF.marks = [];
+  document.body.classList.add('diffing');
+  for (const e of document.querySelectorAll('#doc [contenteditable="true"]')) e.contentEditable = 'false';
+  for (const ta of document.querySelectorAll('#doc textarea')) ta.readOnly = true;
+  const names = Object.keys(FILES).filter((n) => FILES[n].segs);
+  let changedFiles = 0;
+  for (const name of names) {
+    const r = await fetch(`/api/baseline?name=${encodeURIComponent(name)}&ref=${ref}`);
+    const base = r.ok ? (await r.json()).text : null;
+    const cur = FILES[name].segs.filter((sg) => sg.el && !sg.removed);
+    if (base === null) { cur.forEach((sg) => { sg.el.classList.add('diff-new'); DIFF.marks.push(sg.el); }); changedFiles++; continue; }
+    if (base === FILES[name].text) continue;
+    changedFiles++;
+    const old = parseFile(name, base).filter((sg) => !['gap', 'hidden', 'input'].includes(sg.kind));
+    const ops = lcs(old, cur, (a, b) => a.src === b.src && a.kind === b.kind) ||
+      [...old.map((o) => ['-', o, null]), ...cur.map((c) => ['+', null, c])];
+    // pair runs of deletions and insertions of the same kind as modified blocks
+    for (let i = 0; i < ops.length; i++) {
+      if (ops[i][0] === '=') continue;
+      let j = i;
+      while (j < ops.length && ops[j][0] !== '=') j++;
+      const dels = ops.slice(i, j).filter((o) => o[0] === '-').map((o) => o[1]);
+      const ins = ops.slice(i, j).filter((o) => o[0] === '+').map((o) => o[2]);
+      const anchor = (ins[0] && ins[0].el) || (ops[j] && ops[j][2] && ops[j][2].el) || null;
+      for (const b of ins) {
+        const k = dels.findIndex((d) => d.kind === b.kind);
+        if (k >= 0) {
+          const d = dels.splice(k, 1)[0];
+          b.el.classList.add('diff-changed');
+          const target = b.edit && b.edit.tagName !== 'TEXTAREA' ? b.edit : null;
+          if (target) renderWordDiff(contentOf(d, d.src), contentOf(b, b.src), target);
+          DIFF.marks.push(b.el);
+        } else { b.el.classList.add('diff-new'); DIFF.marks.push(b.el); }
+      }
+      for (const d of dels) {   // deleted blocks, shown where they were
+        const ghost = renderSeg({ ...d }, {});
+        if (!ghost) continue;
+        ghost.classList.add('diff-gone', 'diff-ghost');
+        for (const e of ghost.querySelectorAll('[contenteditable]')) e.contentEditable = 'false';
+        if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(ghost, anchor);
+        else if (cur.length && cur[cur.length - 1].el) cur[cur.length - 1].el.after(ghost);
+        DIFF.marks.push(ghost);
+      }
+      i = j - 1;
+    }
+  }
+  DIFF.marks.sort((a, b) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
+  DIFF.cur = -1;
+  $('#diffnav').hidden = false;
+  $('#diffcount').textContent = DIFF.marks.length ? `${DIFF.marks.length} changes` : 'no changes';
+  banner(DIFF.marks.length ? `${DIFF.marks.length} changed blocks in ${changedFiles} file(s), compared with ${ref === 'head' ? 'the last commit' : 'when the editor opened'}. The page is read-only until you leave diff mode.`
+    : 'No changes.');
+}
+
+function diffOff() {
+  DIFF.on = false;
+  document.body.classList.remove('diffing');
+  $('#diffnav').hidden = true;
+  $('#diffbase').hidden = true;
+  $('#diffbtn').textContent = 'Diff';
+  const y = window.scrollY;
+  render();
+  window.scrollTo(0, y);
+}
+
+function diffStep(d) {
+  if (!DIFF.marks.length) return;
+  if (DIFF.marks[DIFF.cur]) DIFF.marks[DIFF.cur].classList.remove('diff-current');
+  DIFF.cur = (DIFF.cur + d + DIFF.marks.length) % DIFF.marks.length;
+  const e = DIFF.marks[DIFF.cur];
+  e.classList.add('diff-current');
+  e.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  $('#diffcount').textContent = `${DIFF.cur + 1} of ${DIFF.marks.length}`;
+}
+
+ACTIONS.diff = () => {
+  if (DIFF.on) return diffOff();
+  DIFF.on = true;
+  $('#diffbtn').textContent = 'Leave diff';
+  $('#diffbase').hidden = false;
+  diffOn();
+};
+$('#diffbase').onchange = () => { if (DIFF.on) { const y = scrollY; render(); scrollTo(0, y); DIFF.on = true; diffOn(); } };
+$('#diffprev').onclick = () => diffStep(-1);
+$('#diffnext').onclick = () => diffStep(1);
+// no editing while diffing
+document.addEventListener('beforeinput', (e) => { if (DIFF.on) e.preventDefault(); }, true);
+{
+  const q = new URLSearchParams(location.search);
+  if (q.has('difftest')) {
+    const t = setInterval(async () => {
+      if (!ORDER.length) return;
+      clearInterval(t);
+      DIFF.on = true;
+      await diffOn();
+      const lines = DIFF.marks.map((m) => {
+        const cls = [...m.classList].filter((c) => c.startsWith('diff-')).join(',');
+        const del = [...m.querySelectorAll('.d-del')].map((x) => x.textContent).join(' | ');
+        const ins = [...m.querySelectorAll('.d-ins')].map((x) => x.textContent).join(' | ');
+        return `${cls} ${m.seg ? m.seg.file : ''} DEL[${del.slice(0, 120)}] INS[${ins.slice(0, 120)}]`;
+      });
+      fetch('/api/log', { method: 'POST', headers: { 'X-Token': TOKEN }, body: 'DIFFTEST ' + DIFF.marks.length + ' marks\n' + lines.join('\n') });
+    }, 300);
+  }
+}
+
+// ======================================================= figure viewer
+//
+// Double-click a figure or table: its image, its text (from the typeset
+// figure), its LaTeX, and for pseudocode a structured game editor.
+
+const FV = { seg: null, src: '', tab: 'image', games: null };
+const GAME_ENVS = ['gameenv', 'algorithmic'];
+const BLOCK_OPEN = new Set(['If', 'For', 'ForAll', 'While', 'Repeat', 'Loop', 'Procedure', 'Function']);
+const BLOCK_CLOSE = new Set(['EndIf', 'EndFor', 'EndWhile', 'Until', 'EndLoop', 'EndProcedure', 'EndFunction']);
+const KW = { State: '', Statex: '', If: 'if', ElsIf: 'else if', Else: 'else', EndIf: 'end if', For: 'for', ForAll: 'for all',
+  EndFor: 'end for', While: 'while', EndWhile: 'end while', Repeat: 'repeat', Until: 'until', Loop: 'loop',
+  EndLoop: 'end loop', Procedure: 'procedure', EndProcedure: 'end procedure', Function: 'function',
+  EndFunction: 'end function', Return: 'return', Require: 'require', Ensure: 'ensure' };
+// cryptocode's commands, for previews
+const CRYPTOCODE_MACROS = { '\\pcreturn': '\\mathbf{return}\\ ', '\\pcif': '\\mathbf{if}\\ ', '\\pcthen': '\\ \\mathbf{then}',
+  '\\pcelse': '\\mathbf{else}\\ ', '\\pcelseif': '\\mathbf{else\\ if}\\ ', '\\pcfi': '\\mathbf{fi}', '\\pcendif': '\\mathbf{endif}',
+  '\\pcfor': '\\mathbf{for}\\ ', '\\pcdo': '\\ \\mathbf{do}', '\\pcendfor': '\\mathbf{endfor}', '\\pcwhile': '\\mathbf{while}\\ ',
+  '\\pcendwhile': '\\mathbf{endwhile}', '\\pcind': '\\quad ', '\\sample': '\\xleftarrow{\\$}', '\\gets': '\\leftarrow',
+  '\\pcassert': '\\mathbf{assert}\\ ', '\\pccomment': '\\quad /\\!/\\ \\text{#1}', '\\pclinecomment': '/\\!/\\ \\text{#1}' };
+
+const parseGames = (src) => L.parseGames(src, GAME_ENVS);
+const parseGameLine = (line) => L.parseGameLine(line);
+const gameLineSrc = (l) => L.gameLineSrc(l);
+
+function openFigure(seg) {
+  FV.seg = seg;
+  FV.src = seg.figSrc || seg.src;
+  FV.games = parseGames(FV.src);
+  $('#fv-title').textContent = (seg.kind === 'figure' ? 'Figure ' : 'Table ') + (seg.el.querySelector('.capnum')?.textContent || '');
+  $('#fv-games-tab').hidden = !FV.games.length;
+  $('#figview').hidden = false;
+  showFigTab(FV.games.length ? 'games' : 'image');
+}
+
+function showFigTab(tab) {
+  FV.tab = tab;
+  for (const b of document.querySelectorAll('.fv-tabs button')) b.classList.toggle('on', b.dataset.tab === tab);
+  const body = $('#fv-body');
+  body.textContent = '';
+  const url = DOC.figs[FV.seg.src];
+  if (tab === 'image') {
+    if (url) { const img = el('img'); img.src = url; body.append(img); }
+    else body.append(el('div', 'small', 'No image yet (rendered after the next build).'));
+    const cap = FV.seg.el.querySelector('.caption');
+    if (cap) body.append(el('p', '', cap.textContent));
+  } else if (tab === 'text') {
+    const pre = el('pre', 'figtext', 'Loading…');
+    body.append(pre);
+    if (url) fetch('/figtext/' + url.match(/([0-9a-f]{16})\.png$/)[1]).then((r) => r.json())
+      .then((j) => { pre.textContent = j.text || '(no text in this figure)'; });
+    else pre.textContent = 'No text yet (extracted after the next build).';
+  } else if (tab === 'latex') {
+    const ta = el('textarea', 'fv-src');
+    ta.value = FV.src; ta.spellcheck = false;
+    ta.oninput = () => { FV.latexEdited = true; };
+    body.append(ta);
+  } else if (tab === 'games') {
+    renderGames(body);
+  }
+}
+
+function renderGames(body) {
+  const grid = el('div', 'games-grid');
+  FV.games.forEach((g, gi) => {
+    const box = el('div', 'game' + (g.kind === 'proc' ? ' gproc' : ''));
+    const head = el('div', 'game-title');
+    if (g.title !== null) {
+      const t = el('span'); t.contentEditable = 'true';
+      renderTokens(L.tokenize(g.title), t, {});
+      t.addEventListener('input', () => { g.newTitle = ser(t); });
+      head.append(t);
+    } else head.append(el('span', 'small', g.kind === 'proc' ? 'procedure' : g.env));
+    box.append(head);
+    let depth = 0;
+    g.lines.forEach((l, li) => {
+      if (g.kind === 'proc') { box.append(procLine(g, l, li)); return; }
+      if (BLOCK_CLOSE.has(l.cmd) || l.cmd === 'ElsIf' || l.cmd === 'Else') depth = Math.max(0, depth - 1);
+      box.append(algoLine(g, l, li, depth));
+      if (BLOCK_OPEN.has(l.cmd) || l.cmd === 'ElsIf' || l.cmd === 'Else') depth++;
+    });
+    grid.append(box);
+  });
+  body.append(grid);
+  body.append(el('p', 'small', 'Edit a line in place; ＋ adds a statement below, ⊕ an if-block, ✕ deletes. ' +
+    'Lines you do not touch are kept exactly. Apply, then save, to write the file; the image updates after the build.'));
+}
+
+function algoLine(g, l, li, depth) {
+  const row = el('div', 'gline');
+  row.append(el('span', 'gno', String(li + 1)));
+  const pad = el('span'); pad.style.width = (depth * 1.4) + 'em'; pad.style.flex = 'none';
+  row.append(pad);
+  if (l.raw) {
+    row.append(el('code', 'gcomment', l.prefix.trim() || ' '));
+  } else {
+    if (KW[l.kind]) row.append(el('span', 'gkw', KW[l.kind]));
+    const t = el('span', 'gtext'); t.contentEditable = 'true';
+    renderTokens(L.tokenize(l.content), t, {});
+    t.addEventListener('input', () => { l.content = ser(t); row.classList.add('edited'); });
+    row.append(t);
+    if (/\\Comment/.test(l.suffix)) {
+      const c = /\\Comment\s*\{([^]*)\}/.exec(l.suffix);
+      row.append(el('span', 'gcomment', '▹ ' + (c ? cleanTex(c[1]) : '')));
+    }
+  }
+  const tools = el('span', 'gtools');
+  const indentOf = (x) => /^\s*/.exec(x.prefix)[0];
+  const add = (lines) => { g.lines.splice(li + 1, 0, ...lines.map(parseGameLine)); showFigTab('games'); };
+  const inner = indentOf(l) + (BLOCK_OPEN.has(l.cmd) || l.cmd === 'Else' || l.cmd === 'ElsIf' ? '  ' : '');
+  const b1 = el('button', '', '＋'); b1.title = 'Add a statement below';
+  b1.onclick = () => add([inner + '\\State $x \\gets y$']);
+  const b2 = el('button', '', '⊕'); b2.title = 'Add an if-block below';
+  b2.onclick = () => add([inner + '\\If{$c$}', inner + '  \\State $x \\gets y$', inner + '\\EndIf']);
+  const b3 = el('button', '', '✕'); b3.title = 'Delete this line';
+  b3.onclick = () => { g.lines.splice(li, 1); showFigTab('games'); };
+  tools.append(b1, b2, b3);
+  row.append(tools);
+  return row;
+}
+
+function procLine(g, l, li) {
+  const row = el('div');
+  const ta = el('textarea'); ta.rows = 1; ta.value = l.content; ta.spellcheck = false;
+  const prev = el('div', 'gprev');
+  const show = () => {
+    prev.textContent = '';
+    try { katex.render(l.content.replace(/\\\\\s*$/, ''), prev, { throwOnError: false, macros: { ...DOC.macros, ...CRYPTOCODE_MACROS } }); }
+    catch (e) { prev.textContent = l.content; }
+  };
+  ta.oninput = () => { l.content = ta.value; show(); };
+  show();
+  const tools = el('div', 'gtools'); tools.style.opacity = 1;
+  const b1 = el('button', '', '＋ line'); b1.onclick = () => { g.lines.splice(li + 1, 0, { prefix: '', content: '', suffix: l.suffix || ' \\\\\n' }); if (!l.suffix) l.suffix = ' \\\\\n'; showFigTab('games'); };
+  const b3 = el('button', '', '✕'); b3.onclick = () => { g.lines.splice(li, 1); showFigTab('games'); };
+  tools.append(b1, b3);
+  row.append(ta, prev, tools);
+  return row;
+}
+
+// The figure source with the edited games (or the edited LaTeX).
+function figureWithEdits() {
+  if (FV.tab === 'latex' && FV.latexEdited) return $('#fv-body textarea').value;
+  let src = FV.src;
+  for (const g of [...FV.games].reverse()) {   // last first, so offsets stay valid
+    const body = g.kind === 'proc' ? g.lines.map(gameLineSrc).join('') : g.lines.map(gameLineSrc).join('\n');
+    src = src.slice(0, g.bodyStart) + body + src.slice(g.bodyEnd);
+    if (g.newTitle !== undefined && g.titleRange) src = src.slice(0, g.titleRange[0]) + g.newTitle + src.slice(g.titleRange[1]);
+  }
+  return src;
+}
+
+function applyFigure() {
+  const seg = FV.seg;
+  const src = figureWithEdits();
+  if (src === (seg.figSrc || seg.src)) { closeFigure(); return; }
+  snapshot();
+  seg.figSrc = src;
+  seg.parts = L.captionParts(src) || { prefix: src, caption: '', suffix: '' };
+  seg.touched = true;
+  // the caption shown is the new caption, if it changed in the LaTeX
+  if (seg.edit && seg.parts.caption !== undefined) { seg.edit.textContent = ''; renderTokens(L.tokenize(seg.parts.caption), seg.edit, {}); }
+  markEdited();
+  banner('Figure updated; save to write the file. The image updates after the build.');
+  closeFigure();
+}
+
+function closeFigure() { $('#figview').hidden = true; FV.seg = null; FV.latexEdited = false; }
+
+for (const b of document.querySelectorAll('.fv-tabs button')) b.onclick = () => showFigTab(b.dataset.tab);
+$('#fv-apply').onclick = applyFigure;
+$('#fv-close').onclick = closeFigure;
+doc.addEventListener('dblclick', (e) => {
+  const box = e.target.closest('.seg.figure, .seg.table');
+  if (!box || e.target.closest('.caption')) return;
+  e.preventDefault();
+  openFigure(box.seg);
+});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#figview').hidden) closeFigure(); });
+{
+  const q = new URLSearchParams(location.search);
+  if (q.has('gametest')) {
+    const t = setInterval(() => {
+      if (!ORDER.length) return;
+      clearInterval(t);
+      const log = [];
+      const seg = ORDER.find((x) => (x.kind === 'figure') && L.parseGames(x.src, GAME_ENVS).length);
+      if (!seg) { fetch('/api/log', { method: 'POST', headers: { 'X-Token': TOKEN }, body: 'GAMETEST no games' }); return; }
+      openFigure(seg);
+      log.push('games: ' + FV.games.map((g) => `${g.kind}(${g.lines.length} lines, title ${JSON.stringify((g.title || '').slice(0, 30))})`).join(', '));
+      // edit the first editable line of the first game, add an if-block, edit a line of the second game
+      const g0 = FV.games[0];
+      const l0 = g0.lines.find((l) => !l.raw && l.content);
+      l0.content += g0.kind === 'proc' ? ' + 1' : ' \\land y';
+      if (g0.kind === 'algo') g0.lines.splice(g0.lines.indexOf(l0) + 1, 0, ...['\\If{$z$}', '  \\State $w$', '\\EndIf'].map(L.parseGameLine));
+      if (FV.games[1]) { const l1 = FV.games[1].lines.find((l) => !l.raw && l.content); if (l1) l1.content = l1.content.replace(/\$/, '$\\mathsf{new}\\,'); }
+      FV.tab = 'games';
+      applyFigure();
+      commit();
+      const a = FILES[seg.file].disk, b = FILES[seg.file].text;
+      let i = 0; while (a[i] === b[i]) i++;
+      let j = 0; while (j < a.length - i && a[a.length - 1 - j] === b[b.length - 1 - j]) j++;
+      log.push(`${seg.file}: -${JSON.stringify(a.slice(i, a.length - j))}\n+${JSON.stringify(b.slice(i, b.length - j))}`);
+      log.push('other files changed: ' + Object.keys(FILES).filter((n) => n !== seg.file && FILES[n].text !== FILES[n].disk).length);
+      fetch('/api/log', { method: 'POST', headers: { 'X-Token': TOKEN }, body: 'GAMETEST\n' + log.join('\n') });
+    }, 300);
   }
 }
