@@ -285,7 +285,10 @@ def front_matter(md, target, anonymous):
         kw = ('\n\\keywords{' + ' \\and '.join(kws) + '}') if kws and target == 'llncs' else ''
         post.append(f'\\begin{{abstract}}\n{abstract}{kw}\n\\end{{abstract}}')
     elif target == 'iacrcc':
-        pre.append(f"\\license{{{md.get('license') or 'CC-by'}}}")
+        lic = md.get('license') or 'CC-by'
+        if re.match(r'(?i)cc[- ]?by(?!-?(nc|nd|sa))', lic):
+            lic = 'CC-by'               # the only spelling iacrcc accepts
+        pre.append(f"\\license{{{lic}}}")
         rt = f"[running = {{{md['running_title']}}}]" if md.get('running_title') else ''
         pre.append(f'\\title{rt}{{{title}}}')
         for a in authors:
@@ -369,68 +372,161 @@ def remove_cmds(text, names):
         i = k
 
 
-def convert(main_text, md, target, anonymous, theorems_used):
-    """The new main file, and warnings."""
+CLASS_LOADS_HYPERREF = {'lipics', 'iacrcc', 'iacrtrans', 'acmart'}
+CREF_FALLBACK = r"""\makeatletter
+\newcommand{\pe@crefs}[1]{\def\pe@sep{}\@for\pe@x:=#1\do{\pe@sep\expandafter\autoref\expandafter{\pe@x}\def\pe@sep{, }}}
+\providecommand{\cref}[1]{\pe@crefs{#1}}
+\providecommand{\Cref}[1]{\pe@crefs{#1}}
+\makeatother"""
+# packages a body may rely on because its old class loaded them
+PACKAGE_NEEDS = [
+    ('amsmath', r'\\begin\{(align|gather|multline|alignat|flalign)\*?\}|\\eqref\b|\\text\{|\\tfrac|\\dfrac|\\binom'),
+    ('amssymb', r'\\mathbb\{|\\leqslant|\\geqslant|\\nleq|\\varnothing|\\blacksquare'),
+    ('booktabs', r'\\(toprule|midrule|bottomrule|cmidrule)\b'),
+    ('multirow', r'\\multirow\b'),
+    ('graphicx', r'\\includegraphics\b|\\(rotatebox|scalebox|resizebox)\b'),
+    ('xcolor', r'\\(textcolor|colorbox|color)\{'),
+    ('url', r'\\url\{'),
+]
+THEOREM_GUARD = r"""% paper-editor: \newtheorem skips environments the class already defines
+\makeatletter
+\let\pe@newtheorem\newtheorem
+\def\newtheorem{\@ifstar{\pe@nt{*}}{\pe@nt{}}}
+\def\pe@nt#1#2{\@ifundefined{#2}{\pe@newtheorem#1{#2}}{\pe@skip}}
+\def\pe@skip{\@ifnextchar[{\pe@skipa}{\pe@skipb}}
+\def\pe@skipa[#1]#2{}
+\def\pe@skipb#1{\@ifnextchar[{\pe@skipc}{}}
+\def\pe@skipc[#1]{}
+\makeatother"""
+
+
+def inline_inputs(text, resolve, depth=0):
+    r"""Replace \input{x} by the contents of x, recursively (preamble only)."""
+    if depth > 6 or resolve is None:
+        return text
+
+    def sub(m):
+        if text.rfind('%', text.rfind('\n', 0, m.start()) + 1, m.start()) >= 0:
+            return m.group(0)
+        content = resolve(m.group(1))
+        if content is None:
+            return m.group(0)
+        return f'% --- {m.group(1)} (inlined) ---\n' + inline_inputs(content, resolve, depth + 1).rstrip('\n') + \
+            f'\n% --- end of {m.group(1)} ---'
+    return re.sub(r'\\input\s*\{([^}]*)\}', sub, text)
+
+
+def drop_package(preamble, name):
+    r"""Remove a package from \usepackage lines, also from lists."""
+    def sub(m):
+        pkgs = [p.strip() for p in m.group(2).split(',')]
+        keep = [p for p in pkgs if p != name]
+        if len(keep) == len(pkgs):
+            return m.group(0)
+        return '' if not keep else f'\\usepackage{m.group(1) or ""}{{{",".join(keep)}}}'
+    return re.sub(r'\\usepackage(\[[^\]]*\])?\{([^}]*)\}[ \t]*\n?', sub, preamble)
+
+
+def convert(main_text, md, target, anonymous, theorems_used, resolve=None, all_text=''):
+    r"""The new main file, and warnings.  resolve(name) gives the text of an
+    \input file (or None); all_text is every file of the paper, to scan for
+    the commands the body uses."""
     warnings = []
     _, cls_line, cls_anon, bibstyle = TARGETS[target]
     t = main_text
     begin = t.index('\\begin{document}')
-    preamble = t[:begin]
+    preamble = inline_inputs(t[:begin], resolve)
     body = t[begin + len('\\begin{document}'):]
-    # preamble: drop the class line and the old front matter
+    everything = preamble + body + all_text
+    # the preamble: no class line, no old front matter
     preamble = re.sub(r'^[^%\n]*\\documentclass\s*(\[[^\]]*\])?\s*\{[^}]*\}[^\n]*\n?', '', preamble, count=1, flags=re.M)
     preamble = remove_cmds(preamble, FRONT_CMDS)
-    shims = []
-    if target in NO_CLEVEREF:
-        if re.search(r'\\usepackage(\[[^\]]*\])?\{[^}]*cleveref', preamble):
-            preamble = re.sub(r'\\usepackage(\[[^\]]*\])?\{cleveref\}\n?', '', preamble)
-            preamble = re.sub(r'\\(crefname|Crefname|creflabelformat)\{[^}]*\}(\{[^}]*\}){0,2}\n?', '', preamble)
-        shims.append('% cleveref does not load with this class: \\cref falls back to hyperref\'s \\autoref')
-        shims.append('\\providecommand{\\cref}[1]{\\autoref{#1}}\n\\providecommand{\\Cref}[1]{\\autoref{#1}}')
-        warnings.append('\\cref and \\Cref become \\autoref (one label each): check references to several labels.')
+    pre_shims, shims = [], []
+    # packages the target loads, forbids or replaces
+    if target in CLASS_LOADS_HYPERREF:
+        # iacrcc and iacrtrans load hyperref at \begin{document}: set it up then
+        late = target in ('iacrcc', 'iacrtrans')
+        preamble = re.sub(r'\\usepackage\[([^\]]*)\]\{hyperref\}',
+                          (r'\\AtBeginDocument{\\hypersetup{\1}}' if late else r'\\hypersetup{\1}'), preamble)
+        preamble = drop_package(preamble, 'hyperref')
+        if late:
+            preamble = re.sub(r'(?<!\{)\\hypersetup(\{(?:[^{}]|\{[^{}]*\})*\})', r'\\AtBeginDocument{\\hypersetup\1}', preamble)
+    if target == 'acmart':
+        for p in ('amssymb', 'amsfonts'):
+            preamble = drop_package(preamble, p)
+    if target == 'llncs':
+        preamble = drop_package(preamble, 'amsthm')
+        pre_shims.append('\\providecommand{\\theoremstyle}[1]{}\\providecommand{\\newtheoremstyle}[9]{}'
+                         '\\providecommand{\\qedhere}{}')
     if target in PREDEFINED_THEOREMS:
-        pre_defd = PREDEFINED_THEOREMS[target]
-        for env in sorted(pre_defd):
-            preamble = re.sub(r'\\(?:sp)?newtheorem\*?\{' + env + r'\}(\[[^\]]*\])?\{[^}]*\}(\[[^\]]*\])?\n?', '', preamble)
-        if target != 'llncs':
-            preamble = re.sub(r'\\usepackage(\[[^\]]*\])?\{amsthm\}\n?', '', preamble)
-    if target == 'ieee':
-        defined = set(re.findall(r'\\newtheorem\*?\{([^}]*)\}', preamble))
+        pre_shims.append(THEOREM_GUARD)
+    # cross-references
+    uses_cref = bool(re.search(r'\\[cC]ref\b', everything))
+    preamble = re.sub(r'\\usepackage(\[[^\]]*\])?\{cleveref\}[ \t]*\n?', '', preamble) if target in NO_CLEVEREF else preamble
+    if target in NO_CLEVEREF:
+        preamble = re.sub(r'\\(crefname|Crefname|creflabelformat)\{[^}]*\}(\{[^}]*\}){0,2}[ \t]*\n?', '', preamble)
+        if uses_cref:
+            shims.append("% cleveref does not load with this class: \\cref falls back to hyperref's \\autoref")
+            shims.append(CREF_FALLBACK)
+            warnings.append('\\cref and \\Cref become hyperref\'s \\autoref, label by label ("Theorem 1, Lemma 2").')
+    elif uses_cref and target != 'lipics' and not re.search(r'\\usepackage(\[[^\]]*\])?\{[^}]*cleveref', preamble):
+        shims.append('\\usepackage{cleveref}')
+    # theorems for classes that define none
+    if target in ('ieee', 'article'):
+        defined = set(re.findall(r'\\(?:sp)?newtheorem\*?\{([^}]*)\}', preamble))
         need = [e for e in theorems_used if e not in defined and e != 'proof']
         if need:
-            shims.append('\\usepackage{amsthm}')
-            first = need[0]
-            for e in need:
-                shared = '' if e == first else f'[{first}]'
-                shims.append(f'\\newtheorem{{{e}}}{shared}{{{e.capitalize()}}}')
+            for k, e in enumerate(need):
+                shims.append(f'\\newtheorem{{{e}}}{"" if k == 0 else "[" + need[0] + "]"}{{{e.capitalize()}}}')
     if target == 'llncs':
         defined = set(re.findall(r'\\(?:sp)?newtheorem\*?\{([^}]*)\}', preamble))
         for e in theorems_used:
             if e not in PREDEFINED_THEOREMS['llncs'] and e not in defined:
                 shims.append(f'\\spnewtheorem{{{e}}}{{{e.capitalize()}}}{{\\bfseries}}{{\\itshape}}')
+    # citations from natbib
+    if target != 'acmart' and re.search(r'\\cite[tp]\b', everything) and not re.search(r'\{[^}]*natbib', preamble):
+        shims.append('\\providecommand{\\citet}{\\cite}\\providecommand{\\citep}{\\cite}')
+        warnings.append('\\citet and \\citep (natbib) become \\cite: "Author [1]" reads as "[1]".')
+    # packages the old class loaded and the body relies on
+    loaded = set()
+    for m in re.finditer(r'\\usepackage(?:\[[^\]]*\])?\{([^}]*)\}', preamble):
+        loaded |= {p.strip() for p in m.group(1).split(',')}
+    for pkg, pat in PACKAGE_NEEDS:
+        if pkg in loaded or (pkg == 'amssymb' and target == 'acmart'):
+            continue
+        if re.search(pat, everything):
+            pre_shims.append(f'\\usepackage{{{pkg}}}')
+    if target in ('ieee', 'article') and ('\\begin{proof}' in everything or theorems_used) and 'amsthm' not in loaded:
+        pre_shims.append('\\usepackage{amsthm}')        # before any \\newtheorem
     shims.append('\\providecommand{\\appendices}{\\appendix}')
-    # body: old front matter out, new in
+    # the body: old front matter out
     body = remove_cmds(body, FRONT_CMDS + ['maketitle'])
     body = re.sub(r'\\begin\{(abstract|textabstract)\}.*?\\end\{\1\}\s*', '', body, count=1, flags=re.S)
     body = re.sub(r'\\begin\{IEEEkeywords\}.*?\\end\{IEEEkeywords\}\s*', '', body, count=1, flags=re.S)
+    # bibliography: exactly one style, the target's (none for iacrcc or biblatex)
+    preamble = re.sub(r'\\bibliographystyle\{[^}]*\}[ \t]*\n?', '', preamble)
+    body = re.sub(r'\\bibliographystyle\{[^}]*\}[ \t]*\n?', '', body)
+    biblatex = '\\printbibliography' in everything or re.search(r'\{[^}]*biblatex', preamble)
+    if bibstyle and not biblatex and '\\bibliography{' in body:
+        body = body.replace('\\bibliography{', '\\bibliographystyle{' + bibstyle + '}\n\\bibliography{', 1)
+    if target == 'ieee':
+        body = re.sub(r'\\appendix\b(?!\w)', r'\\appendices', body)
+    # anonymous
     if anonymous:
+        md = dict(md, title=re.sub(r'\\thanks\s*\{[^{}]*\}', '', md.get('title', '')), running_title='',
+                  authors=[{'name': 'Anonymous', 'email': '', 'orcid': '', 'affiliations': [0]}],
+                  affiliations=[{'name': 'Anonymous', 'department': '', 'city': 'Anonymous', 'country': 'Anonymous', 'ror': ''}])
+        shims.append('\\AtBeginDocument{\\ifdefined\\hypersetup\\hypersetup{pdfauthor={}}\\fi}')
         body, n1 = re.subn(r'\\begin\{(acks|acknowledgements?)\}.*?\\end\{\1\}\s*', '', body, flags=re.S)
-        body, n2 = re.subn(r'\\section\*\{Acknowledge?ments?[^}]*\}.*?(?=\\section|\\bibliography|\\printbibliography|\\appendix|\\end\{document\})',
+        body, n2 = re.subn(r'\\section\*?\{Acknowledge?ments?[^}]*\}.*?(?=\\section|\\bibliography|\\printbibliography|\\appendix|\\end\{document\})',
                            '', body, flags=re.S | re.I)
         if n1 + n2:
-            warnings.append('Acknowledgements removed for the anonymous version.')
-        warnings.append('Anonymous: check the text itself for self-citations in the first person, links to your repositories, and funding notes in other files.')
-    if bibstyle:
-        body = re.sub(r'\\bibliographystyle\{[^}]*\}', r'\\bibliographystyle{' + bibstyle + '}', body)
-        if '\\bibliography{' in body and '\\bibliographystyle' not in body:
-            body = body.replace('\\bibliography{', '\\bibliographystyle{' + bibstyle + '}\n\\bibliography{', 1)
-    if target == 'acmart' and '\\bibliographystyle' not in body and '\\printbibliography' not in body:
-        warnings.append('acmart expects \\bibliographystyle{ACM-Reference-Format}.')
-    if target == 'ieee':
-        body = body.replace('\\appendix\n', '\\appendices\n')
+            warnings.append('Acknowledgements removed from the main file.')
+        if re.search(r'acknowledg|\\thanks|funded by|grant', all_text, re.I):
+            warnings.append('Other files mention acknowledgements, \\thanks, funding or grants: check them, they are not changed.')
+        warnings.append('Also check the text for self-citations in the first person and links to your repositories.')
     pre_fm, post_fm = front_matter(md, target, anonymous)
-    out = (('% Converted by paper-editor from ' + md.get('source_class', '?') + ' (anonymous)\n' if anonymous else
-            '% Converted by paper-editor from ' + md.get('source_class', '?') + '\n') +
-           (cls_anon if anonymous else cls_line) + '\n' + preamble.strip('\n') + '\n' +
+    out = ('% Converted by paper-editor from ' + md.get('source_class', '?') + (' (anonymous)' if anonymous else '') + '\n' +
+           (cls_anon if anonymous else cls_line) + '\n' + '\n'.join(pre_shims) + '\n' + preamble.strip('\n') + '\n' +
            '\n'.join(shims) + '\n' + pre_fm + '\n\\begin{document}\n' + post_fm + '\n' + body.lstrip('\n'))
     return out, warnings

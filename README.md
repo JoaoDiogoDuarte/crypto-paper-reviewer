@@ -102,9 +102,35 @@ Online voices send the text being read to Microsoft or Google.
 (not tracked: keep your own papers out of the repository). In the browser,
 `?selftest`, `?edittest` and `?uitest` run the same checks by hand.
 
+## Conversion between venues
+
+*Paper…* opens the metadata (read from the front matter of any class:
+IEEEtran, llncs, iacrcc, iacrtrans, svjour3, acmart, LIPIcs, article;
+your edits are kept in `.paper-editor/metadata.json`) and converts the
+paper to another class: IEEEtran, llncs, iacrcc, iacrtrans, acmart,
+LIPIcs or article, optionally anonymous. The form shows what the target
+needs (an ORCID, a country, a licence, …). The result is a new main file
+beside the old one, built at once; the section files are reused
+unchanged. See `docs/styles.md` for what differs between the classes and
+how the converter handles it, and `tests/convert_matrix.py`, which
+converts the fixtures into every class and compiles the results (all 70
+build, and no anonymous PDF shows an author name).
+
+Anonymous versions use the class's own mechanism where there is one and
+placeholders otherwise, drop acknowledgements from the main file and the
+PDF's author field, and warn about acknowledgements, funding and `\thanks`
+in other files: those, and self-citations in the first person, are yours
+to check.
+
+## Other features
+
+Diff view against the last commit or the editor's start; a figure viewer
+(double-click: image, extracted text, LaTeX) with a game editor for
+algorithmicx and cryptocode pseudocode and a cell editor for tables; a
+shortcut editor (`~/.config/paper-editor/keys.json`); a switcher between
+the documents of a project folder.
+
 ## Not done yet
 
-Format conversion (iacrcc ↔ IEEEtran ↔ llncs) with a metadata editor and an
-anonymous variant; a game (pseudocode) editor; a table cell editor; a
-figure viewer; a diff view; a shortcut editor; switching between several
-documents of a project from the page.
+Springer Nature `sn-jnl` and `iacrj` targets (no class files to test
+with), USENIX; a per-project dictionary.

@@ -1068,7 +1068,11 @@ def run_convert(target, anonymous, name, overwrite):
     if os.path.exists(path) and not overwrite:
         raise FileExistsError(name)
     md = metadata()['metadata']
-    text, warnings = convert.convert(read(MAIN), md, target, anonymous, theorems_used())
+    def resolve_text(name):
+        f = resolve_input(name)
+        return read(f) if f else None
+    everything = '\n'.join(read(f) for f in paper_files() if f != MAIN)
+    text, warnings = convert.convert(read(MAIN), md, target, anonymous, theorems_used(), resolve_text, everything)
     with open(path, 'w', encoding='utf-8', newline='') as f:
         f.write(text)
     r = subprocess.run(['latexmk', '-pdf', '-interaction=nonstopmode', '-halt-on-error', name], cwd=out_dir,
