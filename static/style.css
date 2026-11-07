@@ -204,3 +204,28 @@ table.cells tr.rule td.rulecell { border: 0; padding: 0; font: 11px ui-monospace
 table.cells td.rowtools { border: 0; white-space: nowrap; opacity: .3; }
 table.cells tr:hover td.rowtools { opacity: 1; }
 table.cells td.edited { box-shadow: inset 3px 0 0 var(--dirty); }
+
+#keysbox { position: fixed; z-index: 46; top: 8vh; left: 50%; transform: translateX(-50%); width: min(40em, 94vw);
+  max-height: 80vh; overflow: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: 0 12px 40px rgba(0,0,0,.3); font: 14px system-ui, sans-serif; padding-bottom: .6em; }
+#keys-list { padding: .4em .9em; }
+.keyrow { display: grid; grid-template-columns: 1fr auto auto; gap: .6em; align-items: center; padding: .25em 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 50%, transparent); }
+.keyrow kbd { margin-right: .3em; }
+.keyrow.conflict kbd { border-color: #c33; color: #c33; }
+.keyrow.recording .keys { color: var(--accent); }
+#keysbox .small { padding: 0 .9em; }
+
+#paperbox { position: fixed; z-index: 46; inset: 5vh 50% 5vh auto; transform: translateX(50%); width: min(52em, 96vw);
+  display: flex; flex-direction: column; background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: 0 12px 40px rgba(0,0,0,.3); font: 14px system-ui, sans-serif; }
+#md-body { overflow: auto; padding: .6em 1em 1em; }
+#md-body h4 { margin: 1em 0 .3em; }
+#md-body .row { display: flex; flex-wrap: wrap; gap: .4em; align-items: center; margin: .25em 0; }
+#md-body input[type=text], #md-body textarea, #md-body select { font: 13px system-ui, sans-serif; padding: .25em .4em;
+  background: var(--math); color: var(--fg); border: 1px solid var(--line); border-radius: 4px; }
+#md-body input.need { border-color: #c33; box-shadow: 0 0 0 1px #c33; }
+#md-body .card { border: 1px solid var(--line); border-radius: 6px; padding: .4em .6em; margin: .4em 0; }
+#md-body .missing { color: #c33; }
+#md-body .ok { color: #2a3; }
+#md-body .convert { border-top: 1px solid var(--line); margin-top: 1em; padding-top: .6em; }
