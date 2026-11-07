@@ -1,0 +1,5 @@
+.cache/
+.venv/
+__pycache__/
+tests/papers.local
+.paper-editor/

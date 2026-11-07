@@ -1,0 +1,7 @@
+#!/bin/sh
+# Start the paper editor, with the editor's own Python environment when it
+# exists (it has the speech engines); see README.md.
+d=$(dirname "$0")
+py="$d/.venv/bin/python"
+[ -x "$py" ] || py=python3
+exec "$py" "$d/server.py" "$@"
