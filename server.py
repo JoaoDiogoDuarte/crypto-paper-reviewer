@@ -266,7 +266,45 @@ def load_macros():
     for m in re.finditer(r'\\(?:New|Renew|Provide|Declare)DocumentCommand\s*\{?(\\[A-Za-z]+)\}?\s*\{([^}]*)\}\s*(?=\{)', pre):
         body, _ = group(pre, m.end())
         macros[m.group(1)] = body
-    return {k: v for k, v in macros.items() if '@' not in k}
+    return {k: katexify(v) for k, v in macros.items() if '@' not in k}
+
+
+def katexify(body):
+    """A display-only version of a macro body for KaTeX: unwrap boxes that
+    KaTeX lacks or that switch to text mode around maths (\\rotatebox,
+    \\scalebox, \\raisebox, \\resizebox, \\mbox{...$x$...}), and drop the
+    inner dollars and size commands.  The document is not changed."""
+    if '$' not in body and not re.search(r'\\(rotatebox|scalebox|raisebox|resizebox|reflectbox)', body):
+        return body
+    out, i = [], 0
+    pat = re.compile(r'\\(rotatebox|scalebox|raisebox|resizebox|reflectbox|mbox|hbox|text)\s*(\[[^\]]*\])?\s*(?=\{)')
+    while True:
+        m = pat.search(body, i)
+        if not m:
+            out.append(body[i:])
+            break
+        out.append(body[i:m.start()])
+        k = m.end()
+        args = []
+        nargs = {'rotatebox': 2, 'scalebox': 2, 'raisebox': 2, 'resizebox': 3}.get(m.group(1), 1)
+        try:
+            for _ in range(nargs):
+                while k < len(body) and body[k] in ' \n':
+                    k += 1
+                a, k = group(body, k)
+                args.append(a)
+        except (IndexError, AssertionError):
+            out.append(body[m.start():])
+            break
+        inner = args[-1]
+        if m.group(1) in ('mbox', 'hbox', 'text') and '$' not in inner:
+            out.append(body[m.start():k])          # ordinary text: keep it
+        else:
+            inner = re.sub(r'\\(tiny|scriptsize|footnotesize|small|normalsize|large|Large|displaystyle)\b', '', inner)
+            out.append('{' + katexify(inner).replace('$', '') + '}')
+        i = k
+    return ''.join(out).replace('$', '')
+
 
 
 THEOREM_DEFAULTS = {
