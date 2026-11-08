@@ -3357,8 +3357,11 @@ function editWholeGame(op, index, direction = 0) {
       result = src.slice(0, game.blockStart) + src.slice(next.blockStart);
     } else if (previous && safeGap(previous, game)) {
       result = src.slice(0, previous.blockEnd) + src.slice(game.blockEnd);
-    } else {
+    } else if (!next && !previous) {
       result = src.slice(0, game.blockStart) + src.slice(game.blockEnd);
+    } else {
+      banner('This game has interleaved LaTeX; delete it in the LaTeX tab to keep surrounding commands.');
+      return;
     }
   }
   if (result === null || result === src) return;
@@ -3676,7 +3679,7 @@ document.addEventListener('keydown', (e) => {
     applyFigure();
     if ($('#figview').hidden) save();
   } else if (!mod && e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown') &&
-             e.target.closest('.gline')) {
+             e.target.closest('.gline .gtext')) {
     e.preventDefault(); e.stopImmediatePropagation();
     const row = e.target.closest('.gline');
     const panel = row.closest('.game');
