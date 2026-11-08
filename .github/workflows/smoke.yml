@@ -26,8 +26,15 @@ jobs:
       - name: Backend tests
         run: python -m unittest tests.backend_test tests.test_convert_contract tests.torture_conversion
       - name: LaTeX serialization torture (seeded)
-        run: node tests/torture.js --seeds=1,7,42 --cases=120
+        run: node tests/torture.js --seeds=1,7,42,99 --cases=700
 
+      - name: Round-trip all LaTeX fixtures
+        run: node tests/roundtrip.js tests/fixtures
+      - name: Seeded browser save/edit torture
+        env:
+          E2E_SEEDS: '17'
+          E2E_OPS: '18'
+        run: node tests/e2e.js 'save torture:'
       - name: Browser review smoke tests
         run: |
           command -v google-chrome || command -v chromium || command -v chromium-browser
