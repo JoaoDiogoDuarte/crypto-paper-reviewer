@@ -120,6 +120,22 @@ folder holds only the program and the shared voice models.
 - **History** lets you delete an individual saved snapshot or clear all editor
   snapshots. This deletes only `.paper-editor/history` entries and unused blobs;
   it does not delete source files or Git commits.
+- **Reading layout** constrains figures/tables to their column, including
+  two-column mode. One-column mode retains SyncTeX PDF page positions when
+  available; two-column mode deliberately reflows approximate page groups to
+  avoid long blank columns around indivisible figures. Select *View full size*
+  beneath a float or double-click it to inspect the original image.
+- **Structured games** (the Figure viewer's Games tab) support editing,
+  adding, removing and moving independent `gameenv` blocks when neighboring
+  source can be safely reordered. Insert offers State, If, While, For, Repeat,
+  Return and other algorithmicx constructs; Up/Down move adjacent simple
+  statements, not complete nested blocks. Colored boxes use the **existing**
+  document-provided `\\gamechange{two|three|four}{...}` macro (no preamble
+  changes are inserted). The game editor has its own undo/redo, Ctrl+Enter
+  to Apply, Ctrl+S to Apply and Save, Enter for a new statement, and
+  Alt+Up/Down to move one. Closing with pending edits asks for confirmation.
+  Dragging panels is not implemented, to avoid restructuring complex TeX
+  around games without explicit user confirmation.
 
 
 ## Debugging TeX builds
