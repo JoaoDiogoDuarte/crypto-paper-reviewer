@@ -1,6 +1,6 @@
 """Metadata of a paper and conversion between venue classes.
 
-The converted paper is a new main file next to the old one: the target
+The converted paper is a new main file (by default under converted/<venue>/): the target
 class's front matter written from the metadata, the old preamble with what
 the target cannot take removed or shimmed, and the old body (its \\input
 files unchanged).  See docs/styles.md for the differences handled here.
@@ -418,6 +418,54 @@ THEOREM_GUARD = r"""% paper-editor: \newtheorem skips environments the class alr
 \makeatother"""
 
 
+
+def drop_class_theorems(preamble, names):
+    """Remove theorem/counter declarations already provided by the target class.
+
+    In particular, aliascnt's \newaliascnt defines \c@lemma *before* a
+    subsequent guarded \newtheorem can skip it.  Both commands must go.
+    Only declarations of class-owned environments are removed: user-defined
+    theorem environments remain intact.
+    """
+    if not names:
+        return preamble
+    pattern = '|'.join(re.escape(n) for n in sorted(names, key=len, reverse=True))
+    # \newaliascnt{lemma}{theorem} and \aliascntresetthe{lemma}
+    preamble = re.sub(r'\\newaliascnt\s*\{(?:' + pattern + r')\}\s*\{[^{}]*\}[ \t]*(?:\n|$)',
+                      '', preamble)
+    preamble = re.sub(r'\\aliascntresetthe\s*\{(?:' + pattern + r')\}[ \t]*(?:\n|$)',
+                      '', preamble)
+    # \newtheorem{lemma}[theorem]{Lemma}, \newtheorem*{...}{...},
+    # \spnewtheorem{...}{...}{\bfseries}{\itshape}, and section counters.
+    decl = re.compile(r'\\(?:sp)?newtheorem\*?\s*\{(?:' + pattern + r')\}')
+    out, pos = [], 0
+    for m in decl.finditer(preamble):
+        if m.start() < pos:
+            continue
+        k = m.end()
+        for _ in range(5):
+            while k < len(preamble) and preamble[k] in ' \t\r\n':
+                k += 1
+            if k < len(preamble) and preamble[k] == '[':
+                end = preamble.find(']', k + 1)
+                if end < 0:
+                    break
+                k = end + 1
+            elif k < len(preamble) and preamble[k] == '{':
+                try:
+                    _, k = group(preamble, k)
+                except (IndexError, AssertionError):
+                    break
+            else:
+                break
+        # Only remove when followed by the next command, comment or newline.
+        # Preserve unrelated inline text.
+        out.append(preamble[pos:m.start()])
+        pos = k
+    out.append(preamble[pos:])
+    return ''.join(out)
+
+
 def inline_inputs(text, resolve, depth=0):
     r"""Replace \input{x} by the contents of x, recursively (preamble only)."""
     if depth > 6 or resolve is None:
@@ -472,6 +520,8 @@ def convert(main_text, md, target, anonymous, theorems_used, resolve=None, all_t
     if target == 'acmart':
         for p in ('amssymb', 'amsfonts'):
             preamble = drop_package(preamble, p)
+    if target in PREDEFINED_THEOREMS:
+        preamble = drop_class_theorems(preamble, PREDEFINED_THEOREMS[target])
     if target == 'llncs':
         preamble = drop_package(preamble, 'amsthm')
         pre_shims.append('\\providecommand{\\theoremstyle}[1]{}\\providecommand{\\newtheoremstyle}[9]{}'
