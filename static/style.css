@@ -247,7 +247,15 @@ body.diffing #doc [contenteditable] { cursor: default; }
 #fv-body textarea.fv-src { width: 100%; height: 100%; min-height: 50vh; font: 13px/1.45 ui-monospace, monospace;
   background: var(--math); color: var(--fg); border: 1px solid var(--line); border-radius: 4px; padding: .5em; }
 .game { border: 1px solid var(--line); border-radius: 6px; margin: 0 0 1em; padding: .4em .6em; break-inside: avoid; }
-.game-title { font-weight: 600; padding: .2em 0 .4em; border-bottom: 1px solid var(--line); margin-bottom: .3em; }
+.game-title { font-weight: 600; padding: .2em 0 .4em; border-bottom: 1px solid var(--line); margin-bottom: .3em;
+  display: flex; align-items: center; flex-wrap: wrap; gap: .35em; }
+.game-title > [contenteditable] { flex: 1; min-width: 8em; }
+.game-actions { display: flex; gap: .25em; align-items: center; flex-wrap: wrap; font: 12px system-ui, sans-serif; }
+.game-actions button { font-size: 12px; padding: .1em .4em; }
+.game-drag { cursor: grab; user-select: none; border: 1px dashed var(--line); border-radius: 4px;
+  padding: .12em .4em; background: var(--chip); }
+.game-drag:active { cursor: grabbing; }
+
 .game-title [contenteditable] { outline: none; }
 .gline { display: flex; align-items: baseline; gap: .4em; padding: .05em 0; font: 15px/1.6 Georgia, serif; }
 .gline .gno { width: 2em; text-align: right; color: var(--muted); font: 11px ui-monospace, monospace; flex: none; }
@@ -255,14 +263,22 @@ body.diffing #doc [contenteditable] { cursor: default; }
 .gline .gtext { flex: 1; outline: none; white-space: pre-wrap; min-width: 4em; }
 .gline .gtext:focus { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .gline .gcomment { color: var(--muted); font-style: italic; }
-.gline .gtools { opacity: 0; display: flex; gap: 2px; flex: none; }
-.gline:hover .gtools { opacity: 1; }
-.gline .gtools button { padding: 0 .35em; font-size: 12px; }
+.gline { flex-wrap: wrap; }
+.gline .gtools { display: none; flex: 0 0 100%; justify-content: flex-end; flex-wrap: wrap;
+  align-items: center; gap: .3em; font: 12px system-ui, sans-serif; padding-bottom: .4em; }
+.gline:hover .gtools, .gline:focus-within .gtools { display: flex; }
+.gline .gtools button, .gline .gtools select { padding: .1em .35em; font: 12px system-ui, sans-serif; }
+.gline.game-marked .gtext { border: 1px solid var(--line); border-radius: 3px; padding-inline: .3em; }
+.gline[data-mark="yellow!20"] .gtext { background: color-mix(in srgb, yellow 18%, var(--bg)); }
+.gline[data-mark="cyan!20"] .gtext { background: color-mix(in srgb, cyan 18%, var(--bg)); }
+.gline[data-mark="green!20"] .gtext { background: color-mix(in srgb, green 18%, var(--bg)); }
+.gline[data-mark="magenta!15"] .gtext { background: color-mix(in srgb, magenta 15%, var(--bg)); }
+
 .gline.edited .gno { color: var(--dirty); }
 .gproc textarea { width: 100%; font: 13px ui-monospace, monospace; background: var(--math); color: var(--fg);
   border: 1px solid var(--line); border-radius: 4px; padding: .2em .4em; }
 .gproc .gprev { padding: .1em .4em .5em; }
-.games-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(22em, 1fr)); gap: 1em; }
+.games-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(22em, 100%), 1fr)); gap: 1em; min-width: 0; }
 
 /* table cell editor */
 table.cells { border-collapse: collapse; margin: .5em 0 1em; font: 15px/1.5 Georgia, serif; }
