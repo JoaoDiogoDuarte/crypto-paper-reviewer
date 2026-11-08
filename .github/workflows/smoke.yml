@@ -24,3 +24,7 @@ jobs:
           node --check tests/e2e.js
       - name: Backend tests
         run: python -m unittest tests.backend_test
+      - name: Browser review smoke tests
+        run: |
+          command -v google-chrome || command -v chromium || command -v chromium-browser
+          node tests/e2e.js render diff "Paper dialog"
