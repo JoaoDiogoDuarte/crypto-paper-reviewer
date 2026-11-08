@@ -3447,8 +3447,19 @@ function algoLine(g, l, li, depth) {
   } else {
     if (KW[l.kind]) row.append(el('span', 'gkw', KW[l.kind]));
     const t = el('span', 'gtext'); t.contentEditable = 'true';
-    renderTokens(L.tokenize(l.content), t, {});
-    t.addEventListener('input', () => { l.content = ser(t); row.classList.add('edited'); });
+    const existingMark = colorMarked(l);
+    if (existingMark) {
+      row.classList.add('game-marked');
+      row.dataset.mark = existingMark[1];
+      renderTokens(L.tokenize(existingMark[2]), t, {});
+    } else renderTokens(L.tokenize(l.content), t, {});
+    t.addEventListener('input', () => {
+      gameCheckpoint(t);
+      const newText = ser(t);
+      l.content = existingMark ? '\\colorbox{' + existingMark[1] + '}{' + newText + '}' : newText;
+      row.classList.add('edited');
+    });
+    t.addEventListener('blur', () => { FV.lastEditor = null; });
     row.append(t);
     if (/\\Comment/.test(l.suffix)) {
       const c = /\\Comment\s*\{([^]*)\}/.exec(l.suffix);
@@ -3456,16 +3467,56 @@ function algoLine(g, l, li, depth) {
     }
   }
   const tools = el('span', 'gtools');
-  const indentOf = (x) => /^\s*/.exec(x.prefix)[0];
-  const add = (lines) => { g.lines.splice(li + 1, 0, ...lines.map(parseGameLine)); showFigTab('games'); };
-  const inner = indentOf(l) + (BLOCK_OPEN.has(l.cmd) || l.cmd === 'Else' || l.cmd === 'ElsIf' ? '  ' : '');
-  const b1 = el('button', '', '+'); b1.title = 'Add a statement below';
-  b1.onclick = () => add([inner + '\\State $x \\gets y$']);
-  const b2 = el('button', '', '+ if'); b2.title = 'Add an if-block below';
-  b2.onclick = () => add([inner + '\\If{$c$}', inner + '  \\State $x \\gets y$', inner + '\\EndIf']);
-  const b3 = el('button', '', 'Delete'); b3.title = 'Delete this line';
-  b3.onclick = () => { g.lines.splice(li, 1); showFigTab('games'); };
-  tools.append(b1, b2, b3);
+  const indent = /^\s*/.exec(l.prefix)[0];
+  const inner = indent + (BLOCK_OPEN.has(l.cmd) || l.cmd === 'Else' || l.cmd === 'ElsIf' ? '  ' : '');
+  const choices = {
+    State: [inner + '\\State $x \\gets y$'],
+    If: [inner + '\\If{$c$}', inner + '  \\State $x \\gets y$', inner + '\\EndIf'],
+    While: [inner + '\\While{$c$}', inner + '  \\State $x \\gets y$', inner + '\\EndWhile'],
+    For: [inner + '\\For{$i=0$ to $n$}', inner + '  \\State $x \\gets y$', inner + '\\EndFor'],
+    Repeat: [inner + '\\Repeat', inner + '  \\State $x \\gets y$', inner + '\\Until{$c$}'],
+    Else: [inner + '\\Else', inner + '  \\State $x \\gets y$'],
+    Return: [inner + '\\State \\Return $x$'],
+    Comment: [inner + '\\State \\Comment{explain the change}'],
+    Assert: [inner + '\\State \\textbf{assert} $P$'],
+  };
+  const addChoice = el('select', 'g-insert');
+  addChoice.title = 'Choose a statement or control-flow block to insert after this line';
+  for (const label of Object.keys(choices)) {
+    const option = el('option', '', label); option.value = label; addChoice.append(option);
+  }
+  const add = el('button', '', '+ Add');
+  add.title = 'Insert the selected command after this line';
+  add.onclick = () => {
+    gameCheckpoint();
+    g.lines.splice(li + 1, 0, ...choices[addChoice.value].map(parseGameLine));
+    showFigTab('games');
+  };
+  const moveLine = (offset) => {
+    const other = g.lines[li + offset];
+    if (!other || l.raw || other.raw || BLOCK_OPEN.has(l.cmd) || BLOCK_CLOSE.has(l.cmd) ||
+        BLOCK_OPEN.has(other.cmd) || BLOCK_CLOSE.has(other.cmd) ||
+        ['Else', 'ElsIf'].includes(l.cmd) || ['Else', 'ElsIf'].includes(other.cmd)) return;
+    gameCheckpoint();
+    const [line] = g.lines.splice(li, 1);
+    g.lines.splice(li + offset, 0, line);
+    showFigTab('games');
+  };
+  const up = el('button', '', 'Up'); up.title = 'Move one ordinary statement up';
+  up.disabled = li === 0; up.onclick = () => moveLine(-1);
+  const down = el('button', '', 'Down'); down.title = 'Move one ordinary statement down';
+  down.disabled = li === g.lines.length - 1; down.onclick = () => moveLine(1);
+  const mark = el('select', 'g-mark');
+  mark.title = 'Wrap this line in a reversible coloured LaTeX box (xcolor required)';
+  for (const [color, label] of Object.entries(GAME_COLORS)) {
+    const option = el('option', '', label); option.value = color; mark.append(option);
+  }
+  mark.value = colorMarked(l) ? colorMarked(l)[1] : 'none';
+  mark.disabled = l.raw;
+  mark.onchange = () => gameChangeColor(l, mark.value);
+  const del = el('button', '', 'Delete'); del.title = 'Delete this line; Undo restores it';
+  del.onclick = () => { gameCheckpoint(); g.lines.splice(li, 1); showFigTab('games'); };
+  tools.append(addChoice, add, up, down, mark, del);
   row.append(tools);
   return row;
 }
