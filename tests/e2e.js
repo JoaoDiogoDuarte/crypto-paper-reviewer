@@ -2160,7 +2160,7 @@ async function main() {
     proc.kill();
     if (chrome.cdp) chrome.cdp.ws.close();
     await sleep(200);
-    fs.rmSync(profile, { recursive: true, force: true });
+    fs.rmSync(profile, { recursive: true, force: true, maxRetries: 8, retryDelay: 150 });
   }
 }
 
