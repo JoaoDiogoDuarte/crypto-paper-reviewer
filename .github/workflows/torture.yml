@@ -20,6 +20,19 @@ on:
         required: false
         default: '65'
         type: string
+  # Run the deep campaign whenever its test harness or fixtures change on main.
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/torture.yml'
+      - 'tests/e2e.js'
+      - 'tests/torture.js'
+      - 'tests/torture_conversion.py'
+      - 'tests/backend_test.py'
+      - 'tests/test_convert_contract.py'
+      - 'tests/convert_matrix.py'
+      - 'tests/roundtrip.js'
+      - 'tests/fixtures/**'
 
 permissions:
   contents: read
