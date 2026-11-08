@@ -842,13 +842,14 @@ Object.assign(TESTS, {
   async 'layout: table preview cannot overflow a narrow review column'(env, page) {
     await page.click('#cols');
     eq(await page.eval('document.body.classList.contains("two")'), true, 'two columns active');
-    const bounds = await page.eval('(() => {' +
+    const bounds = await page.eval('(async () => {' +
       ' const host = document.querySelector("#doc .page");' +
       ' const box = document.createElement("div"); box.className = "seg table";' +
       ' const inner = document.createElement("div"); const img = document.createElement("img");' +
       ' img.setAttribute("width", "2400"); img.setAttribute("height", "600");' +
       ' img.src = "data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%222400%22 height=%22600%22/%3E";' +
       ' inner.append(img); box.append(inner); host.append(box);' +
+      ' await img.decode(); await new Promise(requestAnimationFrame);' +
       ' const outer = box.getBoundingClientRect().width;' +
       ' const width = img.getBoundingClientRect().width;' +
       ' const label = host.querySelector(".pagemark").textContent;' +
@@ -856,7 +857,7 @@ Object.assign(TESTS, {
       ' box.remove(); return { outer, width, label, columns }; })()');
     eq(bounds.columns, '2', 'CSS columns applied');
     has(bounds.label, 'review spread', 'two-column view uses reading-flow spreads');
-    eq(bounds.width > 0 && bounds.width <= bounds.outer + 2, true, 'large raster scales inside the column');
+    eq(bounds.width > 0 && bounds.width <= bounds.outer + 2, true, 'large raster scales inside the column: ' + JSON.stringify(bounds));
     await page.click('#cols');
     untouched(env, 'main.tex', 'sections/body.tex');
   },
