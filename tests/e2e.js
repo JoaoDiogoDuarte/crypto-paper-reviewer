@@ -1310,12 +1310,10 @@ Object.assign(TESTS, {
         '<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="400"><rect width="2400" height="400" fill="white"/></svg>');
       render();
       const img = document.querySelector('.seg.table img');
-      return new Promise((done) => {
-        img.onload = () => {
-          const parent = img.parentElement.getBoundingClientRect();
-          const box = img.getBoundingClientRect();
-          done(box.width <= parent.width + 1 && document.documentElement.scrollWidth <= innerWidth + 2);
-        };
+      return img.decode().then(() => {
+        const parent = img.parentElement.getBoundingClientRect();
+        const box = img.getBoundingClientRect();
+        return box.width <= parent.width + 1 && document.documentElement.scrollWidth <= innerWidth + 2;
       });
     })()`);
     eq(await imageOk(), true, 'one-column table has no horizontal overflow');
