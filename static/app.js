@@ -391,6 +391,11 @@ function renderFloat(seg) {
   } else {
     box.append(previewTabular(seg.src) || el('div', 'small', '(table preview is being rendered)'));
   }
+  const zoom = el('button', 'float-open', 'View full size / edit');
+  zoom.type = 'button';
+  zoom.title = 'Open figure or table viewer (the LaTeX source is unchanged until Apply and Save)';
+  zoom.onclick = () => openFigure(seg);
+  box.append(zoom);
   const cap = L.captionParts(seg.src);
   seg.parts = cap;
   if (cap) {
@@ -3186,7 +3191,8 @@ document.addEventListener('beforeinput', (e) => { if (DIFF.on) e.preventDefault(
 // Double-click a figure or table: its image, its text (from the typeset
 // figure), its LaTeX, and for pseudocode a structured game editor.
 
-const FV = { seg: null, src: '', tab: 'image', games: null };
+const FV = { seg: null, src: '', original: '', tab: 'image', games: null, tables: null,
+  undo: [], redo: [], latexDraft: null, latexEdited: false, typingKey: null, typingAt: 0 };
 const GAME_ENVS = ['gameenv', 'algorithmic'];
 const BLOCK_OPEN = new Set(['If', 'For', 'ForAll', 'While', 'Repeat', 'Loop', 'Procedure', 'Function']);
 const BLOCK_CLOSE = new Set(['EndIf', 'EndFor', 'EndWhile', 'Until', 'EndLoop', 'EndProcedure', 'EndFunction']);
@@ -3208,6 +3214,9 @@ const gameLineSrc = (l) => L.gameLineSrc(l);
 function openFigure(seg) {
   FV.seg = seg;
   FV.src = segSource(seg, [], null, false);   // with any caption edit made since
+  FV.original = FV.src;
+  FV.undo = []; FV.redo = []; FV.typingKey = null;
+  FV.latexDraft = null; FV.latexEdited = false;
   FV.games = parseGames(FV.src);
   FV.tables = L.parseTabulars(FV.src);
   $('#fv-title').textContent = (seg.kind === 'figure' ? 'Figure ' : 'Table ') + (seg.el.querySelector('.capnum')?.textContent || '');
@@ -3215,9 +3224,16 @@ function openFigure(seg) {
   $('#fv-cells-tab').hidden = !FV.tables.length;
   $('#figview').hidden = false;
   showFigTab(FV.games.length ? 'games' : FV.tables.length ? 'cells' : 'image');
+  figureEditStatus();
 }
 
 function showFigTab(tab) {
+  if (!FV.seg) return;
+  if (FV.tab === 'latex' && tab !== 'latex' && FV.latexEdited) {
+    figureResetFromSource(FV.latexDraft);
+  } else if (tab === 'latex' && FV.tab !== 'latex') {
+    figureResetFromSource(figureWithEdits());
+  }
   FV.tab = tab;
   for (const b of document.querySelectorAll('.fv-tabs button')) b.classList.toggle('on', b.dataset.tab === tab);
   const body = $('#fv-body');
@@ -3236,8 +3252,8 @@ function showFigTab(tab) {
     else pre.textContent = 'No text yet (extracted after the next build).';
   } else if (tab === 'latex') {
     const ta = el('textarea', 'fv-src');
-    ta.value = FV.src; ta.spellcheck = false;
-    ta.oninput = () => { FV.latexEdited = true; };
+    ta.value = FV.latexDraft === null ? FV.src : FV.latexDraft; ta.spellcheck = false;
+    ta.oninput = () => { FV.latexDraft = ta.value; FV.latexEdited = true; figureEditStatus(); };
     body.append(ta);
   } else if (tab === 'games') {
     renderGames(body);
@@ -3379,7 +3395,7 @@ function renderCells(body) {
 
 // The figure source with the edited games, cells (or the edited LaTeX).
 function figureWithEdits() {
-  if (FV.tab === 'latex' && FV.latexEdited) return $('#fv-body textarea').value;
+  if (FV.latexEdited) return FV.latexDraft === null ? FV.src : FV.latexDraft;
   let src = FV.src;
   for (const t of [...(FV.tables || [])].reverse()) {
     src = src.slice(0, t.bodyStart) + L.tabularBody(t) + src.slice(t.bodyEnd);
@@ -3404,7 +3420,7 @@ function parseGamesKeepingEdits(src) {
 function applyFigure() {
   const seg = FV.seg;
   const src = figureWithEdits();
-  if (src === FV.src) { closeFigure(); return; }
+  if (src === FV.original) { closeFigure(true); return; }
   snapshot();
   seg.figSrc = src;
   seg.parts = L.captionParts(src) || { prefix: src, caption: '', suffix: '' };
@@ -3413,10 +3429,15 @@ function applyFigure() {
   if (seg.edit && seg.parts.caption !== undefined) { seg.edit.textContent = ''; renderTokens(L.tokenize(seg.parts.caption), seg.edit, {}); }
   markEdited();
   banner('Figure updated; save to write the file. The image updates after the build.');
-  closeFigure();
+  closeFigure(true);
 }
 
-function closeFigure() { $('#figview').hidden = true; FV.seg = null; FV.latexEdited = false; }
+function closeFigure(force = false) {
+  if (!force && FV.seg && figureWithEdits() !== FV.original &&
+      !confirm('Discard unapplied game, table, or LaTeX changes?')) return;
+  $('#figview').hidden = true;
+  FV.seg = null; FV.latexEdited = false; FV.latexDraft = null;
+}
 
 for (const b of document.querySelectorAll('.fv-tabs button')) b.onclick = () => showFigTab(b.dataset.tab);
 $('#fv-apply').onclick = applyFigure;
@@ -3427,7 +3448,27 @@ doc.addEventListener('dblclick', (e) => {
   e.preventDefault();
   openFigure(box.seg);
 });
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#figview').hidden) closeFigure(); });
+// Figure keyboard handling is installed in capture phase before the global
+// document shortcuts, so Ctrl+Z never undoes a manuscript edit from the dialog.
+document.addEventListener('keydown', (e) => {
+  if ($('#figview').hidden || !$('#figview').contains(e.target)) return;
+  const mod = e.ctrlKey || e.metaKey;
+  const key = e.key.toLowerCase();
+  if (mod && !e.altKey && (key === 'z' || key === 'y')) {
+    e.preventDefault(); e.stopImmediatePropagation();
+    if (key === 'y' || e.shiftKey) figureRedo(); else figureUndo();
+  } else if (mod && key === 'enter') {
+    e.preventDefault(); e.stopImmediatePropagation(); applyFigure();
+  } else if (e.key === 'Escape') {
+    e.preventDefault(); e.stopImmediatePropagation(); closeFigure();
+  }
+}, true);
+$('#figview').addEventListener('beforeinput', (e) => {
+  if (!FV.seg || !e.target.closest('.gtext, .game-title [contenteditable], .gproc textarea, table.cells td[contenteditable], textarea.fv-src')) return;
+  figureCheckpoint(e.target);
+});
+$('#fv-undo').onclick = figureUndo;
+$('#fv-redo').onclick = figureRedo;
 {
   const q = new URLSearchParams(location.search);
   if (q.has('gametest')) {
