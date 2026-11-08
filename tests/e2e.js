@@ -1170,6 +1170,23 @@ Object.assign(TESTS, {
   },
 
   // ---- diff view
+  async 'Diff: switch between last save and last commit'(env, page) {
+    await page.select('brown');
+    await page.type('red');
+    await page.save();
+    await page.select('second');
+    await page.type('third');
+    await page.click('#diffbtn');
+    await page.waitFor(`DIFF.marks.length === 1`, 8000, 'one change since last save');
+    eq(await page.eval(`$('#diffbase').value`), 'save', 'default diff baseline is last save');
+    await page.eval(`$('#diffbase').value = 'head'; $('#diffbase').dispatchEvent(new Event('change'))`);
+    await page.waitFor(`DIFF.marks.length === 2`, 8000, 'two changes since last commit');
+    await page.click('#diffbtn');
+    await page.save();
+    has(env.read('main.tex'), 'quick red fox', 'saved edit remains');
+    has(env.read('main.tex'), 'A third paragraph', 'unsaved edit saved after leaving diff');
+  },
+
   async 'Diff: saving while it is shown writes the document, not the diff'(env, page) {
     await page.select('brown');
     await page.type('red');
@@ -1524,6 +1541,25 @@ Object.assign(TESTS, {
     eq(log[1].batch, log[2].batch, 'files saved together are one entry');
     eq(blob(env, log[2].after) === env.read(log[2].name), true, 'the last version is the file on disk');
     has(fs.readFileSync(path.join(env.state, '.gitignore'), 'utf8'), 'history/', 'the history is not tracked by git');
+  },
+
+  async 'History UI: delete selected and clear all without touching the manuscript'(env, page) {
+    await typeAt(page, 'lazy dog', ' one');
+    await page.save();
+    await typeAt(page, 'lazy dog one', ' two');
+    await page.save();
+    const paperBefore = env.read('main.tex');
+    await page.click('#historybtn');
+    await page.waitFor(`document.querySelectorAll('#history-list .hist-item').length === 2`);
+    await page.click('#history-list .hist-item:last-child');
+    await page.click('#history-delete');
+    await page.waitFor(`document.querySelectorAll('#history-list .hist-item').length === 1`);
+    eq(historyLog(env).length, 1, 'one snapshot remains');
+    await page.click('#history-clear');
+    await page.waitFor(`document.querySelectorAll('#history-list .hist-item').length === 0`);
+    eq(historyLog(env).length, 0, 'all snapshots removed');
+    eq(env.read('main.tex'), paperBefore, 'paper content was not affected');
+    await page.click('#history-close');
   },
 
   async 'History dialog: shows the saves, restores before a save, and that save is recorded too'(env, page) {
