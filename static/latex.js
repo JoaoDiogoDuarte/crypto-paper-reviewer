@@ -14,6 +14,14 @@
     'tabular', 'tabular*', 'tabularx']);
   const FMT_CMDS = new Set(['emph', 'textbf', 'textit', 'paragraph']);
   const TEXT_ESCAPES = '%&_#${}';
+  // TeX accent commands accept either a braced argument (\\~{a}) or a single
+  // unbraced character (\\~ao means an accented 'a' followed by 'o').
+  // Keep the accent and its argument together so a preview chip retains the
+  // original bytes when neighbouring prose is edited.
+  const SYMBOL_ACCENTS = new Set(["'", '`', '"', '^', '~', '=', '.']);
+  const WORD_ACCENTS = new Set(['c', 'u', 'v', 'H', 'r', 'k']);
+  const ACCENT_LETTER = /[A-Za-zÀ-ÿ]/;
+
 
   // ------------------------------------------------------------------ helpers
 
@@ -125,6 +133,16 @@
             push({ t: 'cmd', name: 'verb', s: s.slice(i, end) });
             i = end; continue;
           }
+          // Control words swallow separating spaces in TeX.  For example,
+          // \\c c has the same result as \\c{c}; do not emit a raw chip.
+          if (WORD_ACCENTS.has(name) && /[ \t]/.test(s[k] || '')) {
+            let j = k;
+            while (s[j] === ' ' || s[j] === '\t') j++;
+            if (ACCENT_LETTER.test(s[j] || '')) {
+              push({ t: 'cmd', name, s: s.slice(i, j + 1), accentBase: s[j] });
+              i = j + 1; continue;
+            }
+          }
           if (FMT_CMDS.has(name)) {
             let k2 = k;
             while (s[k2] === ' ') k2++;
@@ -152,6 +170,10 @@
         }
         // a control symbol: \\, \,, \ , \; ...
         let end = i + 2;
+        if (SYMBOL_ACCENTS.has(n) && ACCENT_LETTER.test(s[end] || '')) {
+          push({ t: 'cmd', name: n, s: s.slice(i, end + 1), accentBase: s[end] });
+          i = end + 1; continue;
+        }
         if (n === '\\' && s[end] === '[') { const ge = groupEnd(s, end); if (ge > 0) end = ge; }
         push({ t: 'cmd', name: n, s: s.slice(i, end) });
         i = end; continue;
