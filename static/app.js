@@ -1018,6 +1018,9 @@ function openDrawer(chipEl, seg, title, fresh = false) {
   if (/^\s*x?\s*$/.test(body)) { // a new formula: put the cursor inside it
     const i = ta.value.indexOf(body) + body.length - (body.endsWith(' ') ? 1 : 0);
     ta.setSelectionRange(i, i);
+  } else if (body !== ta.value) { // an existing one: at the end of the maths, not after the closing $
+    const i = ta.value.lastIndexOf(body) + body.length;
+    ta.setSelectionRange(i, i);
   }
 }
 
@@ -1034,12 +1037,20 @@ function applyDrawer(remove) {
   const src = $('#drawer-src').value;
   if (remove || !src.trim()) {
     if (drawerFresh) closeDrawer(false);      // with its line breaks
-    else { drawerChip.remove(); closeDrawer(true); }
+    else {
+      const host = drawerChip.parentElement && drawerChip.parentElement.closest('#fv-body [contenteditable=true]');
+      drawerChip.remove();
+      if (host) host.dispatchEvent(new Event('input', { bubbles: true }));
+      closeDrawer(true);
+    }
   } else {
     const frag = document.createDocumentFragment();
     renderTokens(L.tokenize(src), frag, {});
     const last = frag.lastChild;
+    const host = drawerChip.parentElement && drawerChip.parentElement.closest('[contenteditable=true]');
     drawerChip.replaceWith(frag);
+    // a formula of a game line, table cell or game title: its editor reads it back
+    if (host && host.closest('#fv-body, .fv-head')) host.dispatchEvent(new Event('input', { bubbles: true }));
     if (last && last.isConnected && editableAt(selRange())) setCaretAfter(last);
     closeDrawer(true);
   }
@@ -1094,6 +1105,14 @@ doc.addEventListener('click', (e) => {
 });
 
 doc.addEventListener('input', () => { lastTyping = Date.now(); markEditedSoon(); });
+// The same in the figure window (game lines, cells, titles): most game lines
+// are one formula, editable only this way.
+$('#fv-body').addEventListener('click', (e) => {
+  const c = e.target.closest('.chip');
+  if (!c || !c.closest('[contenteditable=true]') || c.classList.contains('nl') || c.classList.contains('tie')) return;
+  e.preventDefault();
+  openDrawer(c, null, c.classList.contains('math') ? 'Edit maths' : 'Edit LaTeX');
+});
 let markTimer = null;
 function markEditedSoon() { clearTimeout(markTimer); markTimer = setTimeout(markEdited, 400); }
 
@@ -1804,12 +1823,26 @@ function markPhrase(range) {
   if (window.CSS && CSS.highlights) {
     if (range) CSS.highlights.set('tts', new Highlight(range)); else CSS.highlights.delete('tts');
   }
-  if (range) {
-    const rect = range.getBoundingClientRect();
-    if (rect.top < 80 || rect.bottom > window.innerHeight - 40) {
-      window.scrollBy({ top: rect.top - window.innerHeight / 3, behavior: 'smooth' });
-    }
+  if (range) revealRange(range, true);
+}
+
+// Bring a range into view below the bars, a third of the way down.  Blocks
+// off screen are not laid out (content-visibility) and their size is only
+// estimated: a far range is first brought near by its element, then placed.
+// The first line counts: a range across two columns is as tall as they are.
+function revealRange(range, smooth) {
+  const top = chromeBottom();
+  const first = () => range.getClientRects()[0] || range.getBoundingClientRect();
+  let r = first();
+  if (r.top >= top + 12 && r.bottom <= innerHeight - 40) return;
+  const far = r.bottom < -innerHeight / 2 || r.top > innerHeight * 1.5 || (!r.width && !r.height);
+  if (far) {
+    const n = range.startContainer;
+    const e = n.nodeType === 1 ? n : n.parentElement;
+    if (e) e.scrollIntoView({ block: 'center' });
+    r = first();
   }
+  window.scrollBy({ top: r.top - top - (innerHeight - top) / 3, behavior: smooth && !far ? 'smooth' : 'auto' });
 }
 
 const SPOKEN = { '≤': ' at most ', '≥': ' at least ', '=': ' equals ', '≠': ' is not ', '<': ' less than ',
@@ -2019,13 +2052,18 @@ function snapshot() {
   if (HISTORY.undo.length > 300) HISTORY.undo.shift();
   HISTORY.redo = [];
 }
-let typingSnap = null;
-doc.addEventListener('beforeinput', () => {
-  if (!typingSnap) snapshot();
+// one snapshot per burst of typing in one block: typing elsewhere, or after
+// an undo or redo, starts a new one
+let typingSnap = null, typingIn = null;
+doc.addEventListener('beforeinput', (e) => {
+  const here = e.target.closest ? e.target.closest('[contenteditable=true], textarea') : null;
+  if (!typingSnap || here !== typingIn) snapshot();
+  typingIn = here;
   clearTimeout(typingSnap);
   typingSnap = setTimeout(() => { typingSnap = null; }, 1200);
 });
 function restore(from, to) {
+  clearTimeout(typingSnap); typingSnap = null; typingIn = null;
   leaveDiff();
   commit();
   const cur = Object.fromEntries(Object.entries(FILES).map(([n, f]) => [n, f.text]));
@@ -2311,7 +2349,8 @@ function neighbours(r) {
 
 function insertLatex(src, title) {
   const c = chip('src', src, src);
-  if (insertNodes([c])) openDrawer(c, null, title, true);
+  // the starting text is an example: selected, so typing replaces it
+  if (insertNodes([c])) { openDrawer(c, null, title, true); $('#drawer-src').select(); }
 }
 
 // C-d: delete the current line.  M-w: cut the region, or the line.
@@ -2506,12 +2545,13 @@ function openPalette(opts) {
 }
 
 function closePalette() {
-  $('#palette').hidden = true; PAL.opts = null;
+  $('#palette').hidden = true; PAL.opts = null; PAL.busy = false;
   clearTimeout(PAL.timer);
   if (PAL.abort) { PAL.abort.abort(); PAL.abort = null; }
 }
 
 function refreshPalette() {
+  PAL.busy = true;              // until the results for this query are shown
   clearTimeout(PAL.timer);
   PAL.timer = setTimeout(async () => {
     if (!PAL.opts) return;      // closed before the search ran
@@ -2527,7 +2567,7 @@ function refreshPalette() {
       items = [];
     }
     if (seq !== PAL.seq || !PAL.opts) return;
-    PAL.items = items; PAL.active = 0;
+    PAL.items = items; PAL.active = 0; PAL.busy = false;
     drawPalette();
   }, PAL.opts && PAL.opts.delay !== undefined ? PAL.opts.delay : 120);
 }
@@ -2551,6 +2591,9 @@ function drawPalette() {
 }
 
 async function choose(keepOpen) {
+  // Enter typed right after the query: wait for its results, not the old ones
+  for (let t = 0; PAL.busy && t < 100; t++) await new Promise((r) => setTimeout(r, 50));
+  if (!PAL.opts) return;
   const it = PAL.items[PAL.active];
   if (!it) return;
   await PAL.opts.pick(it, keepOpen);
@@ -2592,14 +2635,23 @@ const cleanTex = (t) => String(t || '').replace(/\\[a-zA-Z]+\s*/g, '').replace(/
 
 function citePalette() {
   let online = false;
+  let noteInput = null;
   const tray = () => {
     const t = $('#pal-tray');
     t.textContent = PAL.picked.length ? 'picked:' : '';
-    PAL.picked.forEach((k) => t.append(el('span', 'key', k)));
+    PAL.picked.forEach((k) => {
+      const chipEl = el('span', 'key', k);
+      const x = el('button', 'unpick', '×'); x.title = 'Remove ' + k; x.setAttribute('aria-label', 'Remove ' + k);
+      x.onmousedown = (e) => { e.preventDefault(); PAL.picked = PAL.picked.filter((y) => y !== k); tray(); };
+      chipEl.append(x); t.append(chipEl);
+    });
   };
   const finish = () => {
     if (!PAL.picked.length) return;
-    const src = '\\cite{' + PAL.picked.join(',') + '}';
+    // \cite[note]{keys}: a note with ] in it is braced
+    const note = noteInput ? noteInput.value.trim() : '';
+    const opt = note ? '[' + (note.includes(']') ? '{' + note + '}' : note) + ']' : '';
+    const src = '\\cite' + opt + '{' + PAL.picked.join(',') + '}';
     const saved = PAL.savedRange;
     closePalette();
     PAL.savedRange = saved;
@@ -2651,7 +2703,21 @@ function citePalette() {
       pickKey(key, keepOpen);
     },
     footer: (f) => {
-      f.append('↑↓ choose · Enter insert · Ctrl+Enter pick several · ');
+      // optional note: \cite[\S 4.2]{key}; Enter here inserts (the highlighted entry if none is picked)
+      const nl = el('label', 'pal-note', 'Note ');
+      noteInput = el('input'); noteInput.id = 'pal-note'; noteInput.spellcheck = false; noteInput.autocomplete = 'off';
+      noteInput.placeholder = 'optional, e.g. \\S 4.2 or p.~7';
+      noteInput.title = 'Goes in \\cite[…]{…}: a section, page or theorem';
+      noteInput.addEventListener('keydown', async (e) => {
+        if (e.key === 'Escape') { e.preventDefault(); closePalette(); return; }
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        for (let t = 0; PAL.busy && t < 100; t++) await new Promise((r) => setTimeout(r, 50));
+        if (!PAL.picked.length && PAL.items[PAL.active]) await PAL.opts.pick(PAL.items[PAL.active], true);
+        finish();
+      });
+      nl.append(noteInput);
+      f.append(nl, '↑↓ choose · Enter insert · Ctrl+Enter add to picked · ');
       const b = el('button', '', 'Search online (Crossref, arXiv)');
       b.onmousedown = (e) => {
         e.preventDefault();
@@ -2788,7 +2854,37 @@ function posAt(map, off, end) {
   return null;
 }
 
+// Measuring matches lays out blocks the browser had skipped (content-visibility:
+// auto); their real heights replace the estimates and the page shifts. Searching
+// must not move what is on screen: note the block at the top, put it back.
+function viewAnchor() {
+  const d = $('#doc').getBoundingClientRect();
+  const hit = document.elementFromPoint(d.left + d.width / 2, chromeBottom() + 24);
+  const e = hit && hit.closest('#doc .seg, #doc h1, #doc .pagemark');
+  return e ? { e, top: e.getBoundingClientRect().top } : null;
+}
+function restoreAnchor(a) {
+  if (!a || !a.e.isConnected) return;
+  const d = a.e.getBoundingClientRect().top - a.top;
+  if (Math.abs(d) > 0.5) window.scrollBy(0, d);
+}
+
+// html's scroll-padding keeps the caret clear of the sticky bars. A field in
+// those bars is always on screen, yet Chrome "reveals" it below the padding
+// on every keystroke, so typing in Find crept the page up to the top. While
+// focus is in the bars, the padding is off.
+{
+  const chrome = document.getElementById('chrome');
+  if (chrome) {
+    chrome.addEventListener('focusin', () => { document.documentElement.style.scrollPaddingTop = '0px'; });
+    chrome.addEventListener('focusout', (e) => {
+      if (!chrome.contains(e.relatedTarget)) document.documentElement.style.scrollPaddingTop = '';
+    });
+  }
+}
+
 function runFind(keepIndex) {
+  const anchor = viewAnchor();
   const re = findRegex();
   FIND.matches = [];
   if (re) {
@@ -2809,6 +2905,7 @@ function runFind(keepIndex) {
   }
   if (!keepIndex || FIND.cur >= FIND.matches.length) FIND.cur = FIND.matches.length ? firstVisibleMatch() : -1;
   paintFind();
+  restoreAnchor(anchor);
 }
 
 function firstVisibleMatch() {
@@ -2824,10 +2921,7 @@ function paintFind(scroll) {
   if (FIND.cur >= 0 && FIND.matches[FIND.cur]) {
     const r = FIND.matches[FIND.cur];
     CSS.highlights.set('findcur', new Highlight(r));
-    if (scroll) {
-      const b = r.getBoundingClientRect();
-      if (b.top < 140 || b.bottom > innerHeight - 40) window.scrollBy({ top: b.top - innerHeight / 3 });
-    }
+    if (scroll) revealRange(r, false);
   } else CSS.highlights.delete('findcur');
 }
 
