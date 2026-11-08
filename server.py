@@ -17,6 +17,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1159,6 +1160,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.send(200, online_search(q))
             except Exception as e:
                 return self.send(503, {'error': f'lookup failed: {e}'})
+        if p == '/api/history':
+            return self.send(200, history_list())
+        if p == '/api/history/text':
+            text = history_get(urllib.parse.parse_qs(url.query).get('id', [''])[0])
+            return self.send(404, {'error': 'no such version'}) if text is None else self.send(200, {'text': text})
         if p == '/api/baseline':
             q = urllib.parse.parse_qs(url.query)
             name, ref = q.get('name', [''])[0], q.get('ref', ['head'])[0]
@@ -1299,12 +1305,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send(400, {'error': 'expected a JSON object'})
         name, base, text = req.get('name'), req.get('base'), req.get('text')
         with PROJECT_LOCK:
-            if name not in paper_files() or not isinstance(text, str):
-                return self.send(400, {'error': 'unknown file'})
+            if not isinstance(name, str) or not isinstance(text, str):
+                return self.send(400, {'error': 'expected a name and a text'})
+            norm = os.path.normpath(name)
+            safe = name.endswith('.tex') and not os.path.isabs(name) and norm != '..' and not norm.startswith('..' + os.sep)
+            if not os.path.isfile(os.path.join(PAPER, name)) and safe:
+                # deleted (or renamed) since the editor read it: only on request
+                # (the Overwrite button) is it written again
+                if not req.get('create'):
+                    return self.send(409, {'error': 'the file is gone from disk', 'hash': None, 'gone': True})
+                os.makedirs(os.path.dirname(os.path.join(PAPER, norm)) or PAPER, exist_ok=True)
+                with open(os.path.join(PAPER, norm), 'x', encoding='utf-8', newline='') as f:
+                    f.write(text)
+                try:
+                    history_record(req.get('batch'), norm, '', text)
+                except OSError as e:
+                    BUILDER.log(f'history: {e}')
+                BUILDER.log(f'saved {norm} (created again)')
+                BUILDER.request()
+                return self.send(200, {'hash': sha(text)})
+            if name not in paper_files():
+                return self.send(400, {'error': 'not a file of this document'})
             current = read(name)
             if sha(current) != base:
                 return self.send(409, {'error': 'changed on disk', 'hash': sha(current)})
             path = os.path.join(PAPER, name)
+            if text == current:
+                return self.send(200, {'hash': sha(text)})
+            try:
+                history_put(current)
+            except OSError as e:
+                # no history, no save: the version on disk must stay recoverable
+                return self.send(500, {'error': f'could not keep the previous version ({e}); nothing was written'})
             tmp = None
             try:
                 with tempfile.NamedTemporaryFile('w', encoding='utf-8', newline='',
@@ -1314,10 +1346,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     f.write(text)
                     f.flush()
                     os.fsync(f.fileno())
+                # the temporary file is private (0600): give it the file's own mode
+                os.chmod(tmp, stat.S_IMODE(os.stat(path).st_mode))
                 os.replace(tmp, path)
+            except OSError as e:
+                return self.send(500, {'error': f'could not write {name}: {e.strerror or e}'})
             finally:
                 if tmp and os.path.exists(tmp):
                     os.unlink(tmp)
+            try:
+                history_record(req.get('batch'), name, current, text)
+            except OSError as e:
+                BUILDER.log(f'history: {e}')
         BUILDER.log(f'saved {name}')
         BUILDER.request()
         self.send(200, {'hash': sha(text)})
@@ -1353,13 +1393,132 @@ def open_paper(path, cwd=None, state=None):
     _bib.update(entries=None, stamp=None)
 
 
+def load_token():
+    """The key a page sends with every write: kept in the project's cache, so
+    that a page left open across a restart of the editor can still save."""
+    global TOKEN
+    p = os.path.join(CACHE, 'token')
+    try:
+        with open(p) as f:
+            t = f.read().strip()
+        if re.fullmatch(r'[0-9a-f]{32}', t):
+            TOKEN = t
+            return
+    except OSError:
+        pass
+    try:
+        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w') as f:
+            f.write(TOKEN)
+    except OSError:
+        pass        # a new key at every start, then
+
+
 def ensure_state():
-    """Create <project>/.paper-editor with a .gitignore for its cache."""
+    """Create <project>/.paper-editor with a .gitignore for its cache and history."""
     os.makedirs(CACHE, exist_ok=True)
     gi = os.path.join(STATE, '.gitignore')
     if not os.path.exists(gi):
         with open(gi, 'w') as f:
-            f.write('# written by paper-editor: the cache is not worth tracking\ncache/\n')
+            f.write('# written by paper-editor: the cache and the save history are not worth tracking\ncache/\nhistory/\n')
+    else:
+        with open(gi) as f:
+            lines = f.read().splitlines()
+        if 'history/' not in lines:
+            with open(gi, 'a') as f:
+                f.write(('' if not lines or lines[-1] == '' else '\n') + 'history/\n')
+
+
+# ------------------------------------------------------------------ save history
+#
+# Every save keeps the text it replaced and the text it wrote, so that any
+# earlier version can be brought back: <state>/history/blobs/<sha1> (each
+# text once) and <state>/history/log.jsonl, one line per file saved:
+# {"batch", "t", "name", "before", "after"}.  A batch is one press of Save.
+
+HISTORY_KEEP = 3000          # log lines kept; texts no line refers to are deleted
+_history_lock = threading.Lock()
+
+
+def history_dir():
+    return os.path.join(STATE, 'history')
+
+
+def history_put(text):
+    h = sha(text)
+    d = os.path.join(history_dir(), 'blobs')
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, h)
+    if not os.path.exists(p):
+        tmp = p + '.tmp'
+        with open(tmp, 'w', encoding='utf-8', newline='') as f:
+            f.write(text)
+        os.replace(tmp, p)
+    return h
+
+
+def history_get(h):
+    if not re.fullmatch(r'[0-9a-f]{40}', h or ''):
+        return None
+    p = os.path.join(history_dir(), 'blobs', h)
+    if not os.path.exists(p):
+        return None
+    with open(p, encoding='utf-8', newline='') as f:
+        return f.read()
+
+
+def history_entries():
+    p = os.path.join(history_dir(), 'log.jsonl')
+    out = []
+    if os.path.exists(p):
+        with open(p, encoding='utf-8') as f:
+            for line in f:
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue          # a line cut short by a crash: skip it
+                if isinstance(e, dict) and e.get('name') and e.get('before') and e.get('after'):
+                    out.append(e)
+    return out
+
+
+def history_record(batch, name, before, after):
+    """Keep both texts of a save; called before the file is written."""
+    with _history_lock:
+        entry = {'batch': str(batch or secrets.token_hex(6))[:40], 't': time.time(), 'name': name,
+                 'before': history_put(before), 'after': history_put(after)}
+        os.makedirs(history_dir(), exist_ok=True)
+        log = os.path.join(history_dir(), 'log.jsonl')
+        with open(log, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(entry) + '\n')
+            f.flush()
+            os.fsync(f.fileno())
+        entries = history_entries()
+        if len(entries) > HISTORY_KEEP:
+            keep = entries[-HISTORY_KEEP:]
+            tmp = log + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                f.writelines(json.dumps(e) + '\n' for e in keep)
+            os.replace(tmp, log)
+            used = {e['before'] for e in keep} | {e['after'] for e in keep}
+            d = os.path.join(history_dir(), 'blobs')
+            for b in os.listdir(d):
+                if b not in used:
+                    os.unlink(os.path.join(d, b))
+
+
+def history_list(limit=300):
+    """The saves, newest first: {batch, t, files: [{name, before, after}]}."""
+    batches = {}
+    order = []
+    for e in history_entries():
+        b = batches.get(e['batch'])
+        if b is None:
+            b = batches[e['batch']] = {'batch': e['batch'], 't': e['t'], 'files': []}
+            order.append(b)
+        b['files'].append({'name': e['name'], 'before': e['before'], 'after': e['after']})
+        b['t'] = max(b['t'], e['t'])
+    return order[::-1][:limit]
 
 
 def open_browser(url, browser):
@@ -1438,7 +1597,9 @@ def main():
         ap.error(f'{args.path}: no such file')
     open_paper(path, args.cwd, args.state)
     ensure_state()
+    load_token()
     BUILDER = Builder()
+    threading.Thread(target=lambda: bib_entries(), daemon=True).start()   # index the .bib files now, not at the first search
     threading.Thread(target=bib_entries, daemon=True).start()
     srv = http.server.ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
     url = f'http://127.0.0.1:{args.port}/'

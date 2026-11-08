@@ -95,6 +95,21 @@ class BackendTest(unittest.TestCase):
         with open(backup) as f:
             self.assertEqual(f.read(), updated)
 
+    def test_save_keeps_file_mode(self):
+        os.chmod(self.main, 0o644)
+        with open(self.main) as f:
+            original = f.read()
+        code, _ = self.post('/api/save', {'name': 'main.tex', 'base': server.sha(original), 'text': original + '%\n'})
+        self.assertEqual(code, 200)
+        self.assertEqual(os.stat(self.main).st_mode & 0o777, 0o644)
+        self.assertEqual([f for f in os.listdir(self.tmp) if f.startswith('.editor-')], [])
+
+    def test_switch_documents_keeps_state_directory(self):
+        code, _ = self.post('/api/open', {'main': 'other.tex'})
+        self.assertEqual(code, 200)
+        self.assertEqual(server.STATE, os.path.abspath(self.state))
+        self.assertEqual(server.PAPER, os.path.abspath(self.tmp))
+
     def test_switch_documents(self):
         code, result = self.post('/api/open', {'main': 'other.tex'})
         self.assertEqual(code, 200)

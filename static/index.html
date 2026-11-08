@@ -16,6 +16,7 @@
     <button id="openbtn" title="Open a paper directory">Open…</button>
     <button id="newfilebtn" title="Create a new TeX section file">New file…</button>
     <button id="save" title="Save edited files (Ctrl+S)">Save</button>
+    <button id="historybtn" title="Earlier versions: every save keeps the text it replaced">History…</button>
     <span id="dirty"></span>
   </span>
   <span class="group">
@@ -135,6 +136,16 @@
   <div class="fv-head"><b>Paper</b><span class="spacer"></span>
     <button id="md-save">Save metadata</button><button id="md-close">Close</button></div>
   <div id="md-body"></div>
+</div>
+<div id="historybox" role="dialog" aria-labelledby="history-title" hidden>
+  <div class="fv-head"><b id="history-title">Save history</b><span class="spacer"></span>
+    <button id="history-close">Close</button></div>
+  <div class="history-cols">
+    <div id="history-list"></div>
+    <div id="history-detail"><p class="small">Every save keeps the text it replaced. Choose a save to see what it changed.
+      Restoring puts that version in the editor as unsaved edits: nothing is written until you save, and that save
+      is in the history too.</p></div>
+  </div>
 </div>
 <div id="keysbox" role="dialog" aria-labelledby="keys-title" hidden>
   <div class="fv-head"><b>Keyboard shortcuts</b><span class="spacer"></span>

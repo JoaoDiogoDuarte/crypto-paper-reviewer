@@ -910,46 +910,93 @@ $('#cols').onclick = () => {
 };
 try { if (localStorage.getItem('cols') === '2') $('#cols').click(); } catch (e) { /* storage unavailable */ }
 $('#help').onclick = () => { $('#helpbox').hidden = false; };
+$('#save').onclick = () => save();
 $('#helpclose').onclick = () => { $('#helpbox').hidden = true; };
 
 // ----------------------------------------------------------------- save
 
+// One save at a time: a save asked for while one runs happens after it (two
+// saves sent together would carry the same base hash, and the second would
+// be refused as a conflict with the first).  The poller stays away while
+// SAVING, so that it never mistakes our own write for an outside change.
+let SAVING = false, SAVE_AGAIN = false;
 async function save() {
-  commit(false);
-  const rawTexts = Object.fromEntries(Object.entries(FILES).map(([name, f]) => [name, f.text]));
-  const warnings = commit(true);
-  if (HOUSE_RULE_CHANGES.length) {
-    const kinds = [...new Set(HOUSE_RULE_CHANGES.map((seg) => seg.kind))].join(', ');
-    const apply = confirm(`House rules will adjust ${HOUSE_RULE_CHANGES.length} edited ${kinds} block${HOUSE_RULE_CHANGES.length === 1 ? '' : 's'} (including spacing${(DOC.config || {}).house_rules?.one_sentence_per_line ? ' and sentence-per-line formatting' : ''}). Apply them before saving?`);
-    if (!apply) for (const [name, text] of Object.entries(rawTexts)) FILES[name].text = text;
-  }
-  const files = Object.keys(FILES).filter((n) => FILES[n].text !== FILES[n].disk);
-  if (!files.length) return setBuild({ state: 'idle', message: 'nothing to save' });
-  for (const name of files) {
-    const r = await fetch('/api/save', {
-      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
-      body: JSON.stringify({ name, base: FILES[name].base, text: FILES[name].text }),
-    });
-    if (r.status === 409) { banner(`${name} changed on disk since it was loaded; your edits to it are kept here but not saved. Copy them, then reload.`); continue; }
-    if (!r.ok) { banner(`Saving ${name} failed: ${(await r.json()).error}`); continue; }
-    const { hash } = await r.json();
-    FILES[name].disk = FILES[name].text;
-    FILES[name].base = hash;
-  }
-  if (warnings.length) banner('Saved. House rules: ' + [...new Set(warnings)].join('; '));
-  setBuild({ state: 'running', message: 'saved; rebuilding PDF' });
-  // re-render only when the saved text has new structure (a paragraph break,
-  // a heading) that the page shows as a chip until it is parsed again
-  if (document.querySelector('#doc .chip.parbreak, #doc .chip.src[data-src^="\\\\section"], #doc .chip.src[data-src^="\\\\subsection"]')) {
-    const y = window.scrollY;
-    render();
-    window.scrollTo(0, y);
-  } else {
-    for (const seg of ORDER) if (seg.touched) { seg.src = segSource(seg, []); seg.touched = false; }
-    for (const name of files) FILES[name].segs.forEach((sg) => { if (!sg.el) return; });
-    markEdited();
+  leaveDiff();
+  if (SAVING) { SAVE_AGAIN = true; return; }
+  SAVING = true;
+  try {
+    do { SAVE_AGAIN = false; await saveOnce(); } while (SAVE_AGAIN);
+  } catch (e) {
+    banner('Saving failed: ' + e.message + '. Your edits are still here.');
+  } finally {
+    SAVING = false;
   }
 }
+
+async function saveOnce() {
+  commit(false);
+  const rawTexts = Object.fromEntries(Object.entries(FILES).map(([name, f]) => [name, f.text]));
+  let warnings = commit(true);
+  let apply = true;
+  if (HOUSE_RULE_CHANGES.length) {
+    const kinds = [...new Set(HOUSE_RULE_CHANGES.map((seg) => seg.kind))].join(', ');
+    apply = confirm(`House rules will adjust ${HOUSE_RULE_CHANGES.length} edited ${kinds} block${HOUSE_RULE_CHANGES.length === 1 ? '' : 's'} (${[...new Set(warnings)].join('; ') || 'ties, dashes, quotes, spacing'}${(DOC.config || {}).house_rules?.one_sentence_per_line ? ', one sentence per line' : ''}). Apply them before saving?`);
+    if (!apply) {
+      for (const [name, text] of Object.entries(rawTexts)) FILES[name].text = text;
+      warnings = [];
+    }
+  }
+  const files = Object.keys(FILES).filter((n) => FILES[n].text !== FILES[n].disk);
+  if (!files.length) { setBuild({ state: 'idle', message: 'nothing to save' }); return; }
+  const conflicts = [];
+  let saved = 0;
+  const batch = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);   // one entry of the history
+  for (const name of files) {
+    const text = FILES[name].text;
+    const r = await fetch('/api/save', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
+      body: JSON.stringify({ name, base: FILES[name].base, text, batch, create: FILES[name].base === null }),
+    });
+    const res = await r.json().catch(() => ({}));
+    if (r.status === 409) { conflicts.push([name, res.hash]); continue; }
+    if (r.status === 403) { banner(`Saving ${name} failed: the editor was restarted and no longer accepts this page. Your edits are still here: copy them out, then reload the page.`); continue; }
+    if (!r.ok) { banner(`Saving ${name} failed: ${res.error || r.status}. Your edits are still here.`); continue; }
+    FILES[name].disk = text;
+    FILES[name].base = res.hash;
+    saved++;
+  }
+  // the blocks take the source just saved (with or without the house rules,
+  // as chosen), so that the page and the file agree; typing that happened
+  // while the save was on its way stays an edit
+  if (document.querySelector('#doc .chip.parbreak, #doc .chip.src[data-src^="\\\\section"], #doc .chip.src[data-src^="\\\\subsection"], #doc .chip.src[data-src^="\\\\paragraph"], #doc .chip.src[data-src^="\\\\input"]')) {
+    // new structure (a paragraph break, a heading) is shown as a chip until
+    // it is parsed again
+    commit(apply);
+    const y = window.scrollY;
+    const caret = captureEditorState();
+    render();
+    restoreEditorState(caret);
+    window.scrollTo(0, y);
+  } else {
+    for (const seg of ORDER) if (seg.touched) { seg.src = segSource(seg, [], null, apply); seg.touched = false; }
+    markEdited();
+  }
+  if (saved) setBuild({ state: 'running', message: 'saved; rebuilding PDF' });
+  if (warnings.length && saved) banner('Saved. House rules: ' + [...new Set(warnings)].join('; '));
+  if (conflicts.length) showExternal(conflicts, true);
+  // a new \input names a file the page has not read yet
+  if (saved && Object.values(FILES).some((f) => (f.segs || []).some((s) => s.kind === 'input' && !s.removed && !s.input))) {
+    await load(true);
+  }
+}
+
+// Leaving the page (closing the tab, reloading) with unsaved edits asks first.
+window.addEventListener('beforeunload', (e) => {
+  if (!DOC) return;
+  let edited = false;
+  try { edited = editedFiles().length > 0; } catch (err) { edited = false; }
+  if (edited || SAVING) { e.preventDefault(); e.returnValue = ''; }
+});
 
 function banner(msg) {
   const b = $('#banner');
@@ -970,74 +1017,90 @@ let AUXVER = 0;
 let PENDING_EXTERNAL = null;
 const IGNORED_EXTERNAL = {};
 
-function showExternal(changed) {
-  if (PENDING_EXTERNAL) return;
-  PENDING_EXTERNAL = changed;
-  $('#external-files').textContent = changed.map((name) => name).join(', ');
+// The dialog for files that changed on disk while they have edits here:
+// changed is [[name, hash on disk]].  `refused`: a save was just refused.
+function showExternal(changed, refused) {
+  if (PENDING_EXTERNAL) {
+    for (const c of changed) if (!PENDING_EXTERNAL.some(([n]) => n === c[0])) PENDING_EXTERNAL.push(c);
+  } else PENDING_EXTERNAL = changed;
+  $('#external-title').textContent = refused
+    ? 'Not saved: these files changed on disk since the editor read them'
+    : 'Files you are editing changed outside the editor';
+  $('#external-files').textContent = PENDING_EXTERNAL.map(([name]) => name).join(', ');
   $('#external').hidden = false;
 }
 
-function discardExternalEdits(names) {
-  for (const name of names) {
-    const f = FILES[name];
-    if (f) f.text = f.disk;
-  }
-}
-
-async function reloadExternal() {
-  if (!PENDING_EXTERNAL) return;
-  const names = PENDING_EXTERNAL.map(([name]) => name);
-  names.forEach((name) => { delete IGNORED_EXTERNAL[name]; });
-  PENDING_EXTERNAL = null; $('#external').hidden = true;
-  discardExternalEdits(names);
-  await load(true);
-}
-
-async function overwriteExternal() {
-  if (!PENDING_EXTERNAL) return;
-  const pending = PENDING_EXTERNAL;
+function closeExternal() {
+  const pending = PENDING_EXTERNAL || [];
   pending.forEach(([name]) => { delete IGNORED_EXTERNAL[name]; });
   PENDING_EXTERNAL = null; $('#external').hidden = true;
-  for (const [name, hash] of pending) if (FILES[name]) FILES[name].base = hash;
+  return pending;
+}
+
+// Reload: take the disk version, dropping the edits made here.
+async function reloadExternal() {
+  if (!PENDING_EXTERNAL) return;
+  const names = closeExternal().map(([name]) => name);
+  await load(true, names);
+}
+
+// Overwrite: save the version made here over the one on disk.
+async function overwriteExternal() {
+  if (!PENDING_EXTERNAL) return;
+  // a file gone from disk has no hash: the save writes it again
+  for (const [name, hash] of closeExternal()) if (FILES[name]) FILES[name].base = hash || null;
   await save();
 }
 
+// Backup: keep the version made here in a new file beside it, then reload.
 async function backupExternal() {
   if (!PENDING_EXTERNAL) return;
   const names = PENDING_EXTERNAL.map(([name]) => name);
-  names.forEach((name) => { delete IGNORED_EXTERNAL[name]; });
-  commit();
+  commit(false);
+  const made = [];
   for (const name of names) {
     const f = FILES[name];
     if (!f) continue;
-    await fetch('/api/backup', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
+    const r = await fetch('/api/backup', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
       body: JSON.stringify({ name, text: f.text }) });
+    if (!r.ok) { banner(`Could not back up ${name}; nothing was reloaded.`); return; }
+    made.push((await r.json()).backup);
   }
-  PENDING_EXTERNAL = null; $('#external').hidden = true;
-  discardExternalEdits(names);
-  await load(true);
-  banner('Local edits were saved as a backup before reloading the external changes.');
+  closeExternal();
+  await load(true, names);
+  banner('Your edits were saved in ' + made.join(', ') + ', and the files were reloaded from disk.');
 }
 
 $('#external-reload').onclick = reloadExternal;
 $('#external-overwrite').onclick = overwriteExternal;
 $('#external-backup').onclick = backupExternal;
 $('#external-later').onclick = () => {
-  if (PENDING_EXTERNAL) for (const [name, hash] of PENDING_EXTERNAL) IGNORED_EXTERNAL[name] = hash;
+  const pending = PENDING_EXTERNAL || [];
   PENDING_EXTERNAL = null; $('#external').hidden = true;
+  for (const [name, hash] of pending) IGNORED_EXTERNAL[name] = hash;
 };
 
+// Every 2 s: the build state, a new build (new numbers), files changed on
+// disk.  A changed file without edits here is reloaded at once; one with
+// edits asks (once per version on disk).  Nothing happens while typing,
+// while a dialog or the LaTeX drawer is open, or while saving.
 async function poll() {
   try {
-    const s = await (await fetch('/api/state')).json();
-    setBuild(s.build);
-    const changed = Object.keys(s.hashes).filter((n) => FILES[n] && s.hashes[n] !== FILES[n].base && IGNORED_EXTERNAL[n] !== s.hashes[n]);
-    const busy = Date.now() - lastTyping < 4000 || !$('#drawer').hidden;
-    if ((changed.length || s.auxver !== AUXVER) && !busy) {
-      commit();
-      const hashes = changed.map((name) => [name, s.hashes[name]]);
-      if (hashes.length) showExternal(hashes);
-      AUXVER = s.auxver;
+    const s = SAVING ? null : await (await fetch('/api/state')).json();
+    if (s && !SAVING) {
+      setBuild(s.build);
+      const busy = Date.now() - lastTyping < 4000 || !$('#drawer').hidden || PENDING_EXTERNAL || !$('#figview').hidden || DIFF_SHOWN || DIFF.on;
+      const changed = Object.keys(s.hashes).filter((n) => FILES[n] && s.hashes[n] !== FILES[n].base);
+      if (!busy && (changed.length || s.auxver !== AUXVER)) {
+        commit();
+        const edited = changed.filter((n) => FILES[n].text !== FILES[n].disk);
+        const quiet = changed.filter((n) => !edited.includes(n));
+        const ask = edited.filter((n) => IGNORED_EXTERNAL[n] !== s.hashes[n]);
+        const newBuild = s.auxver !== AUXVER;
+        AUXVER = s.auxver;
+        if (quiet.length || newBuild) await load(true);
+        if (ask.length) showExternal(ask.map((n) => [n, s.hashes[n]]));
+      }
     }
   } catch (e) { /* server restarting */ }
   setTimeout(poll, 2000);
@@ -1770,6 +1833,7 @@ function keyName(e) {
 function closeCurrentMenu() {
   if (!$('#external').hidden) { $('#external-later').click(); return; }
   if (!$('#openbox').hidden) { $('#open-cancel').click(); return; }
+  if (!$('#historybox').hidden) { $('#historybox').hidden = true; return; }
   if (!$('#newfilebox').hidden) { $('#newfile-cancel').click(); return; }
   if (!$('#palette').hidden) { closePalette(); return; }
   if (!$('#keysbox').hidden) { RECORDING = null; $('#keysbox').hidden = true; return; }
@@ -3034,12 +3098,115 @@ $('#keys-save').onclick = async () => {
   banner('Shortcuts saved.');
 };
 
+// ========================================================== save history
+//
+// The server keeps, for every save, the text each file had before and after
+// it.  The dialog lists the saves (newest first), shows what one changed, and
+// restores the files as they were before or after it: as unsaved edits.
+
+const HIST = { list: [], cur: null };
+
+async function openHistory() {
+  $('#historybox').hidden = false;
+  $('#history-list').textContent = 'Loading…';
+  try { HIST.list = await (await fetch('/api/history')).json(); }
+  catch (e) { HIST.list = []; }
+  drawHistoryList();
+}
+
+function drawHistoryList() {
+  const list = $('#history-list');
+  list.textContent = '';
+  if (!HIST.list.length) { list.append(el('p', 'small', 'No saves yet.')); return; }
+  for (const b of HIST.list) {
+    const row = el('div', 'hist-item' + (HIST.cur === b ? ' active' : ''));
+    const d = new Date(b.t * 1000);
+    row.append(el('div', 'when', d.toLocaleDateString() + ' ' + d.toLocaleTimeString()),
+      el('div', 'what', b.files.map((f) => f.name).join(', ')));
+    row.dataset.batch = b.batch;
+    row.onclick = () => showHistory(b);
+    list.append(row);
+  }
+}
+
+const historyText = async (id) => {
+  const r = await fetch('/api/history/text?id=' + encodeURIComponent(id));
+  if (!r.ok) throw new Error('that version is no longer kept');
+  return (await r.json()).text;
+};
+
+// Lines that changed, with a little context; the rest elided.
+function lineDiff(a, b, into) {
+  const A = a.split('\n'), B = b.split('\n');
+  let p = 0; while (p < A.length && p < B.length && A[p] === B[p]) p++;
+  let q = 0; while (q < A.length - p && q < B.length - p && A[A.length - 1 - q] === B[B.length - 1 - q]) q++;
+  const midA = A.slice(p, A.length - q), midB = B.slice(p, B.length - q);
+  const ops = lcs(midA, midB, (x, y) => x === y) || [...midA.map((x) => ['-', x, null]), ...midB.map((y) => ['+', null, y])];
+  const ctx = 2;
+  if (p > ctx) into.append(el('span', 'skip', `… ${p - ctx} unchanged lines\n`));
+  for (const l of A.slice(Math.max(0, p - ctx), p)) into.append(l + '\n');
+  for (const [op, x, y] of ops) {
+    if (op === '=') into.append(x + '\n');
+    else into.append(el('span', op === '-' ? 'del' : 'ins', (op === '-' ? x : y) + '\n'));
+  }
+  for (const l of A.slice(A.length - q, Math.min(A.length, A.length - q + ctx))) into.append(l + '\n');
+  if (q > ctx) into.append(el('span', 'skip', `… ${q - ctx} unchanged lines`));
+}
+
+async function showHistory(b) {
+  HIST.cur = b;
+  drawHistoryList();
+  const box = $('#history-detail');
+  box.textContent = '';
+  const acts = el('div', 'hist-actions');
+  const before = el('button', '', 'Restore as before this save');
+  before.title = 'Put the files of this save back as they were just before it (as unsaved edits)';
+  before.onclick = () => restoreHistory(b, 'before');
+  const after = el('button', '', 'Restore as after this save');
+  after.title = 'Put the files of this save back as this save wrote them (as unsaved edits)';
+  after.onclick = () => restoreHistory(b, 'after');
+  acts.append(before, after);
+  box.append(acts);
+  for (const f of b.files) {
+    box.append(el('h4', '', f.name));
+    const pre = el('pre', 'hist-diff', '');
+    box.append(pre);
+    try { lineDiff(await historyText(f.before), await historyText(f.after), pre); }
+    catch (e) { pre.textContent = e.message; }
+    if (HIST.cur !== b) return;     // another save was chosen meanwhile
+  }
+}
+
+async function restoreHistory(b, which) {
+  commit();
+  const texts = {};
+  try { for (const f of b.files) texts[f.name] = await historyText(f[which]); }
+  catch (e) { banner('Could not restore: ' + e.message); return; }
+  const missing = Object.keys(texts).filter((n) => !FILES[n]);
+  const edited = Object.keys(texts).filter((n) => FILES[n] && FILES[n].text !== FILES[n].disk && FILES[n].text !== texts[n]);
+  if (edited.length && !confirm(`${edited.join(', ')} ${edited.length === 1 ? 'has' : 'have'} unsaved edits, which the restored version replaces (Undo brings them back). Restore?`)) return;
+  snapshot();
+  for (const [n, t] of Object.entries(texts)) if (FILES[n]) FILES[n].text = t;
+  const y = window.scrollY;
+  render();
+  window.scrollTo(0, y);
+  $('#historybox').hidden = true;
+  const changed = Object.keys(texts).filter((n) => FILES[n] && FILES[n].text !== FILES[n].disk);
+  banner((changed.length ? `Restored ${changed.join(', ')} as ${which} that save: save to keep it, or undo.` : 'The files are already as in that version.') +
+    (missing.length ? ` Not restored (no longer part of the document): ${missing.join(', ')}.` : ''));
+}
+
+$('#historybtn').onclick = openHistory;
+$('#history-close').onclick = () => { $('#historybox').hidden = true; };
+
 // ======================================================= main switcher
 
 let OPEN_PROJECT = null;
 
+let NEWFILE_AT = null;   // where the \input goes: the caret when the dialog opened
 function showNewFile() {
   if (!editableAt(selRange())) { banner('Put the cursor in the paper where the new file should be included.'); return; }
+  NEWFILE_AT = selRange().cloneRange();
   $('#newfilebox').hidden = false;
   $('#newfile-name').focus();
 }
