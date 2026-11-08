@@ -1,6 +1,6 @@
 """Metadata of a paper and conversion between venue classes.
 
-The converted paper is a new main file next to the old one: the target
+The converted paper is a new main file (by default under converted/<venue>/): the target
 class's front matter written from the metadata, the old preamble with what
 the target cannot take removed or shimmed, and the old body (its \\input
 files unchanged).  See docs/styles.md for the differences handled here.
@@ -149,21 +149,29 @@ def extract(text):
         m = re.search(r'\\license\s*\{([^}]*)\}', t)
         md['license'] = m.group(1) if m else ''
     elif cls == 'IEEEtran':
-        # \ifanon often encloses two independent \author blocks.  The first
-        # one is anonymous even when the paper is being prepared for review;
-        # metadata still needs to expose the real author for conversion.
+        # Metadata must use real authors even when the anonymous review branch
+        # is active. Parse all \author blocks, ignoring anonymous placeholders.
         for m in re.finditer(r'\\author\s*\{', t):
             body = group(t, m.end() - 1)[0]
-            names = [name_of(group(body, x.end() - 1)[0]) for x in re.finditer(r'\\IEEEauthorblockN\s*\{', body)]
-            addrs = [group(body, x.end() - 1)[0] for x in re.finditer(r'\\IEEEauthorblockA\s*\{', body)]
+            names = [name_of(group(body, x.end() - 1)[0])
+                     for x in re.finditer(r'\\IEEEauthorblockN\s*\{', body)]
+            addrs = [group(body, x.end() - 1)[0]
+                     for x in re.finditer(r'\\IEEEauthorblockA\s*\{', body)]
+            if not names and clean(body):
+                names = [name_of(body)]
             for i, n in enumerate(names):
-                if n.lower().startswith('anonymous'):
+                if not n or n.lower().startswith(('anonymous', 'blinded')):
                     continue
                 a = addrs[i] if i < len(addrs) else ''
                 email = re.search(r'[\w.+-]+@[\w.-]+', a)
                 lines = [clean(x) for x in re.split(r'\\\\', a) if clean(x) and '@' not in x]
-                md['authors'].append({'name': n, 'email': email.group(0) if email else '', 'orcid': '',
-                                      'affiliations': affiliation_ids})
+                city, country = '', ''
+                if lines and ',' in lines[-1]:
+                    city, country = [v.strip() for v in lines.pop().rsplit(',', 1)]
+                organization = ', '.join(lines)
+                ids = [aff(organization, city=city, country=country)] if organization else []
+                md['authors'].append({'name': n, 'email': email.group(0) if email else '',
+                                      'orcid': '', 'affiliations': ids})
     elif cls == 'acmart':
         for m in re.finditer(r'\\author\s*\{', t):
             name, k = group(t, m.end() - 1)
@@ -177,21 +185,14 @@ def extract(text):
                                                        country=country.group(1) if country else '')] if inst else []})
     elif cls.startswith('lipics'):
         for m in re.finditer(r'\\author\s*\{', t):
-            a, _ = args_after(t, m.end() - 1, 5)
-            if len(a) >= 2:
-            if not names:  # Some papers use simple \author{Name}.
-                names = [name_of(body)]
-                orcid = re.search(r'\d{4}-\d{4}-\d{4}-\d{3}[\dX]', a[3] if len(a) > 3 else '')
-                md['authors'].append({'name': name_of(a[0]), 'email': a[2] if len(a) > 2 else '',
-                                      'orcid': orcid.group(0) if orcid else '', 'affiliations': [aff(a[1])]})
-        m = re.search(r'\\Copyright\s*\{([^}]*)\}', t)
-        md['license'] = 'CC-BY-4.0' if m else ''
+            args, _ = args_after(t, m.end() - 1, 5)
+            if len(args) >= 2:
+                orcid = re.search(r'\d{4}-\d{4}-\d{4}-\d{3}[\dX]', args[3] if len(args) > 3 else '')
+                md['authors'].append({'name': name_of(args[0]), 'email': args[2] if len(args) > 2 else '',
+                                      'orcid': orcid.group(0) if orcid else '',
+                                      'affiliations': [aff(args[1])]})
+        md['license'] = 'CC-BY-4.0' if re.search(r'\\Copyright\s*\{', t) else ''
     else:   # llncs, iacrtrans, svjour3, article: \author{A\inst{1} \and B}, \institute{X \and Y}
-                city, country = '', ''
-                if lines and ',' in lines[-1]:
-                    city, country = [p.strip() for p in lines.pop().rsplit(',', 1)]
-                institution = ', '.join(lines)
-                affiliation_ids = [aff(institution, city=city, country=country)] if institution else []
         m = re.search(r'\\author\s*(\[[^\]]*\])?\s*\{', t)
         inst = re.search(r'\\institute\s*\{', t)
         institutes = []
@@ -215,20 +216,29 @@ def extract(text):
                                       'orcid': orcid.group(1) if orcid else '',
                                       'affiliations': [institutes[i][0] for i in insts if i < len(institutes)]})
     md['affiliations'] = affs
-    m = re.search(r'\\keywords\s*\{', t)
-    if m:
-        kw = group(t, m.end() - 1)[0]
-        md['keywords'] = [clean(k) for k in re.split(r'\\and\b|,', kw) if clean(k)]
-    m = re.search(r'\\begin\{IEEEkeywords\}(.*?)\\end\{IEEEkeywords\}', t, re.S)
-    if m:
-        md['keywords'] = [clean(k) for k in m.group(1).split(',') if clean(k)]
-    m = re.search(r'\\begin\{(abstract|textabstract)\}(.*?)\\end\{\1\}', t, re.S)
-    if m:
-        md['abstract'] = re.sub(r'\\keywords\s*\{[^}]*\}', '', m.group(2)).strip()
-    m = re.search(r'\\begin\{(acks|acknowledgements?)\}(.*?)\\end\{\1\}', t, re.S) or \
-        re.search(r'\\section\*\{Acknowledge?ments?[^}]*\}(.*?)(?=\\section|\\bibliography|\\printbibliography|\\appendix|\\end\{document\})', t, re.S)
-    if m:
-        md['acknowledgements'] = m.group(m.lastindex).strip()
+
+    # Generic fields, including keywords in either preamble or document body.
+    kw = re.search(r'\\keywords\s*\{', t)
+    if kw:
+        body = group(t, kw.end() - 1)[0]
+        md['keywords'] = [clean(v) for v in re.split(r'\\and\b|,', body) if clean(v)]
+    kw = re.search(r'\\begin\{(?:IEEEkeywords|keywords)\}(.*?)\\end\{(?:IEEEkeywords|keywords)\}', t, re.S)
+    if kw:
+        md['keywords'] = [clean(v) for v in kw.group(1).split(',') if clean(v)]
+    abstract = re.search(r'\\begin\{(abstract|textabstract)\}(.*?)\\end\{\1\}', t, re.S)
+    if abstract:
+        md['abstract'] = re.sub(r'\\keywords\s*\{[^}]*\}', '', abstract.group(2)).strip()
+    ack = re.search(r'\\begin\{(acks|acknowledgements?)\}(.*?)\\end\{\1\}', t, re.S) or \
+          re.search(r'\\section\*\{Acknowledge?ments?[^}]*\}(.*?)(?=\\section|\\bibliography|\\printbibliography|\\appendix|\\end\{document\})', t, re.S)
+    if ack:
+        md['acknowledgements'] = re.sub(r'\\(?:fi|else)\s*$', '', ack.group(ack.lastindex).strip()).strip()
+    lic = re.search(r'\\(?:license|licence)\s*\{', t)
+    if lic and not md['license']:
+        md['license'] = group(t, lic.end() - 1)[0].strip()
+    if not md['running_title']:
+        short = re.search(r'\\(?:shorttitle|runningtitle|markboth)\s*\{', t)
+        if short:
+            md['running_title'] = clean(group(t, short.end() - 1)[0])
     return md
 
 
@@ -245,17 +255,6 @@ def missing(md, target):
     if not md['authors']:
         out.append(('paper', 'authors'))
     return out
-    # Generic metadata commands regardless of class, including venues that
-    # provide their keywords in the preamble rather than an IEEE environment.
-    lic = re.search(r'\\(?:license|licence)\s*\{', t)
-    if lic and not md['license']:
-        md['license'] = group(t, lic.end() - 1)[0].strip()
-    if not md['running_title']:
-        short = re.search(r'\\(?:shorttitle|runningtitle|markboth)\s*\{', t)
-        if short:
-            md['running_title'] = clean(group(t, short.end() - 1)[0])
-    md['acknowledgements'] = re.sub(r'\\(?:fi|else)\s*$', '', md['acknowledgements']).strip()
-
 
 # ---------------------------------------------------------------- writing
 
@@ -419,6 +418,54 @@ THEOREM_GUARD = r"""% paper-editor: \newtheorem skips environments the class alr
 \makeatother"""
 
 
+
+def drop_class_theorems(preamble, names):
+    """Remove theorem/counter declarations already provided by the target class.
+
+    In particular, aliascnt's \newaliascnt defines \c@lemma *before* a
+    subsequent guarded \newtheorem can skip it.  Both commands must go.
+    Only declarations of class-owned environments are removed: user-defined
+    theorem environments remain intact.
+    """
+    if not names:
+        return preamble
+    pattern = '|'.join(re.escape(n) for n in sorted(names, key=len, reverse=True))
+    # \newaliascnt{lemma}{theorem} and \aliascntresetthe{lemma}
+    preamble = re.sub(r'\\newaliascnt\s*\{(?:' + pattern + r')\}\s*\{[^{}]*\}[ \t]*(?:\n|$)',
+                      '', preamble)
+    preamble = re.sub(r'\\aliascntresetthe\s*\{(?:' + pattern + r')\}[ \t]*(?:\n|$)',
+                      '', preamble)
+    # \newtheorem{lemma}[theorem]{Lemma}, \newtheorem*{...}{...},
+    # \spnewtheorem{...}{...}{\bfseries}{\itshape}, and section counters.
+    decl = re.compile(r'\\(?:sp)?newtheorem\*?\s*\{(?:' + pattern + r')\}')
+    out, pos = [], 0
+    for m in decl.finditer(preamble):
+        if m.start() < pos:
+            continue
+        k = m.end()
+        for _ in range(5):
+            while k < len(preamble) and preamble[k] in ' \t\r\n':
+                k += 1
+            if k < len(preamble) and preamble[k] == '[':
+                end = preamble.find(']', k + 1)
+                if end < 0:
+                    break
+                k = end + 1
+            elif k < len(preamble) and preamble[k] == '{':
+                try:
+                    _, k = group(preamble, k)
+                except (IndexError, AssertionError):
+                    break
+            else:
+                break
+        # Only remove when followed by the next command, comment or newline.
+        # Preserve unrelated inline text.
+        out.append(preamble[pos:m.start()])
+        pos = k
+    out.append(preamble[pos:])
+    return ''.join(out)
+
+
 def inline_inputs(text, resolve, depth=0):
     r"""Replace \input{x} by the contents of x, recursively (preamble only)."""
     if depth > 6 or resolve is None:
@@ -473,6 +520,8 @@ def convert(main_text, md, target, anonymous, theorems_used, resolve=None, all_t
     if target == 'acmart':
         for p in ('amssymb', 'amsfonts'):
             preamble = drop_package(preamble, p)
+    if target in PREDEFINED_THEOREMS:
+        preamble = drop_class_theorems(preamble, PREDEFINED_THEOREMS[target])
     if target == 'llncs':
         preamble = drop_package(preamble, 'amsthm')
         pre_shims.append('\\providecommand{\\theoremstyle}[1]{}\\providecommand{\\newtheoremstyle}[9]{}'

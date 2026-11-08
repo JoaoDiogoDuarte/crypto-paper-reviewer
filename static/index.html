@@ -23,8 +23,8 @@
   </span>
   <span class="group" id="ttsbar">
     <button id="play" aria-label="Play or resume reading" title="Read aloud from the sentence at the cursor (Alt+R)">Read</button>
-    <button id="tts-prev" aria-label="Previous sentence" title="Previous sentence">←</button>
-    <button id="tts-next" aria-label="Next sentence" title="Next sentence">→</button>
+    <button id="tts-prev" aria-label="Previous sentence" title="Previous sentence">Prev</button>
+    <button id="tts-next" aria-label="Next sentence" title="Next sentence">Next</button>
     <button id="pause" aria-label="Pause or resume reading" title="Pause or resume">Pause</button>
     <button id="stop" aria-label="Stop reading" title="Stop">Stop</button>
     <select id="rate" aria-label="Reading speed" title="Speed">
@@ -48,26 +48,26 @@
   <button data-act="emph" title="Emphasis \emph (Ctrl+I)"><i>I</i></button>
   <span class="sep"></span>
   <button data-act="math" title="Inline maths (Ctrl+M or $)">$x$</button>
-  <button data-act="display" title="Displayed equation (Ctrl+Shift+M)">∑ equation</button>
+  <button data-act="display" title="Displayed equation (Ctrl+Shift+M)">Equation</button>
   <span class="sep"></span>
   <button data-act="cite" title="Cite: search references.bib and cryptobib (Ctrl+Alt+C)">Cite…</button>
   <button data-act="ref" title="Reference a section, theorem, figure, table or equation (Ctrl+Alt+R)">Ref…</button>
-  <button data-act="latex" title="Insert any LaTeX (Ctrl+\)">\…</button>
+  <button data-act="latex" title="Insert any LaTeX (Ctrl+\)">LaTeX</button>
   <span class="sep"></span>
-  <button data-act="section" title="Section heading at the cursor (Ctrl+Alt+1)">§ Section</button>
-  <button data-act="subsection" title="Subsection heading at the cursor (Ctrl+Alt+2)">§§</button>
-  <button data-act="paragraph" title="\paragraph heading at the cursor (Ctrl+Alt+3)">¶ Heading</button>
+  <button data-act="section" title="Section heading at the cursor (Ctrl+Alt+1)">Section</button>
+  <button data-act="subsection" title="Subsection heading at the cursor (Ctrl+Alt+2)">Subsection</button>
+  <button data-act="paragraph" title="\paragraph heading at the cursor (Ctrl+Alt+3)">Para heading</button>
   <button data-act="splitsection" title="Split the current section at the cursor">Split section</button>
-  <button data-act="newpara" title="New paragraph at the cursor (Enter)">¶ New</button>
+  <button data-act="newpara" title="New paragraph at the cursor (Enter)">New para</button>
   <span class="sep"></span>
   <button data-act="find" title="Find (Ctrl+F), find and replace (Ctrl+H)">Find/Replace</button>
   <span class="sep"></span>
   <button data-act="diff" id="diffbtn" title="Show what changed (read-only while on)">Diff</button>
   <select id="diffbase" title="Compare with" hidden>
+    <option value="save">since the last save</option>
     <option value="head">since the last commit</option>
-    <option value="session">since the editor opened</option>
   </select>
-  <span id="diffnav" hidden><button id="diffprev" title="Previous change">‹</button><span id="diffcount"></span><button id="diffnext" title="Next change">›</button></span>
+  <span id="diffnav" hidden><button id="diffprev" title="Previous change">Prev</button><span id="diffcount"></span><button id="diffnext" title="Next change">Next</button></span>
   <button data-act="undo" title="Undo (Ctrl+Z)">Undo</button>
   <button data-act="redo" title="Redo (Ctrl+Shift+Z)">Redo</button>
 </nav>
@@ -78,11 +78,11 @@
   <label title="Match case"><input type="checkbox" id="find-case"> Aa</label>
   <label title="Whole words"><input type="checkbox" id="find-word"> W</label>
   <span id="find-count"></span>
-  <button id="find-prev" title="Previous (Shift+Enter)">↑</button>
-  <button id="find-next" title="Next (Enter)">↓</button>
+  <button id="find-prev" title="Previous (Shift+Enter)">Prev</button>
+  <button id="find-next" title="Next (Enter)">Next</button>
   <button id="find-one" title="Replace this match">Replace</button>
   <button id="find-all" title="Replace every match">All</button>
-  <button id="find-close" title="Close (Esc)">✕</button>
+  <button id="find-close" title="Close (Esc)">Close</button>
   <span class="small">text only: maths and LaTeX chips are not searched</span>
 </div>
 <div id="banner" hidden></div>
@@ -93,7 +93,6 @@
     <button id="external-reload">Reload</button>
     <button id="external-overwrite">Overwrite disk</button>
     <button id="external-backup">Save backup</button>
-<aside id="diffmap" aria-label="Changed blocks in document" hidden><div id="diffmap-viewport"></div></aside>
     <button id="external-later">Later</button>
   </div>
 </div>
@@ -107,6 +106,7 @@
     <button id="open-cancel">Cancel</button>
   </div>
 </div>
+<aside id="diffmap" aria-label="Changed blocks in document" hidden><div id="diffmap-viewport"></div></aside>
 <main id="doc" spellcheck="true"></main>
 <aside id="drawer" role="dialog" aria-labelledby="drawer-title" hidden>
   <div class="drawer-head">
@@ -127,6 +127,8 @@
 </div>
 <div id="historybox" role="dialog" aria-labelledby="history-title" hidden>
   <div class="fv-head"><b id="history-title">Save history</b><span class="spacer"></span>
+    <button id="history-delete" title="Delete only the selected save snapshot" disabled>Delete selected</button>
+    <button id="history-clear" title="Delete all editor save snapshots (not Git commits)">Clear history...</button>
     <button id="history-close">Close</button></div>
   <div class="history-cols">
     <div id="history-list"></div>

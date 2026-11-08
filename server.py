@@ -1128,21 +1128,13 @@ def synctex_pages():
                     page = int(line[1:].strip() or 0)
                 elif line.startswith('Input:'):
                     tag, _, name = line[6:].rstrip('\n').partition(':')
-    os.makedirs(out_dir, exist_ok=True)
                     full = os.path.normpath(os.path.join(PAPER, name))
                     inputs[tag] = os.path.relpath(full, PAPER)
-    # Relative \input, \bibliography, \includegraphics must resolve from the
-    # original source tree even when the converted main is in a subfolder.
-    env = dict(os.environ)
-    for k in ('TEXINPUTS', 'BIBINPUTS', 'BSTINPUTS'):
-        env[k] = base_dir + '//:' + env.get(k, '')
                 elif page and c in 'xhvkg$([':
                     m = re.match(r'.(\d+),(\d+)', line)
                     if m:
                         key = (m.group(1), int(m.group(2)))
                         if key not in best:
-    if r.returncode and not errors:
-        errors = [tex_error(r)]
                             best[key] = page
     except (OSError, EOFError, ValueError):
         return {}
@@ -1220,13 +1212,20 @@ def run_convert(target, anonymous, name, overwrite, root=False):
         return read(f) if f else None
     everything = '\n'.join(read(f) for f in paper_files() if f != MAIN)
     text, warnings = convert.convert(read(MAIN), md, target, anonymous, theorems_used(), resolve_text, everything)
+    os.makedirs(out_dir, exist_ok=True)
     with open(path, 'w', encoding='utf-8', newline='') as f:
         f.write(text)
+    # Resolve source-relative includes, bibliography and styles from the paper root.
+    env = dict(os.environ)
+    for k in ('TEXINPUTS', 'BIBINPUTS', 'BSTINPUTS'):
+        env[k] = base_dir + '//:' + env.get(k, '')
     r = subprocess.run(['latexmk', '-pdf', '-interaction=nonstopmode', '-halt-on-error', name], cwd=out_dir,
                        env=env, capture_output=True, text=True, timeout=600)
     logfile = os.path.join(out_dir, name[:-4] + '.log')
     log = open(logfile, errors='replace').read() if os.path.exists(logfile) else ''
     errors = [l for l in log.splitlines() if l.startswith('!')][:5]
+    if r.returncode and not errors:
+        errors = [tex_error(r)]
     undefined = len(re.findall(r'(Citation|Reference) .* undefined', log))
     return {'file': os.path.relpath(path, PAPER), 'built': r.returncode == 0, 'errors': errors,
             'undefined': undefined, 'warnings': warnings, 'missing': convert.missing(md, target)}
@@ -1238,11 +1237,6 @@ def html_escape(t):
 
 # ------------------------------------------------------------------ HTTP
 
-            # Persist only intentional overrides.  New values discovered in
-            # the source front matter then populate fields automatically.
-            extracted = convert.extract(read(MAIN))
-            overrides = {k: v for k, v in md.items() if k != 'source_class'
-                         and v != extracted.get(k)}
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
@@ -1327,11 +1321,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
             n = int(self.headers.get('Content-Length', 0))
             BUILDER.log('page: ' + self.rfile.read(n).decode(errors='replace')[:200000])
             return self.send(200, {})
+        if urllib.parse.urlparse(self.path).path == '/api/history/delete':
+            req = self.json_body()
+            if not isinstance(req, dict):
+                return self.send(400, {'error': 'expected an object'})
+            if req.get('all') is True and 'batch' not in req:
+                batch = None
+            elif isinstance(req.get('batch'), str) and 0 < len(req['batch']) <= 40 and not req.get('all'):
+                batch = req['batch']
+            else:
+                return self.send(400, {'error': 'specify all:true or an existing save batch'})
+            try:
+                removed = history_delete(batch)
+            except OSError as e:
+                return self.send(500, {'error': str(e)})
+            BUILDER.log(f'history: deleted {removed} snapshot(s)')
+            return self.send(200, {'removed': removed, 'saves': history_list()})
         if urllib.parse.urlparse(self.path).path == '/api/metadata':
             md = self.json_body()
             if not isinstance(md, dict):
                 return self.send(400, {'error': 'expected a JSON object'})
             ensure_state()
+            # Save only explicit differences; new metadata from LaTeX remains discoverable.
+            extracted = convert.extract(read(MAIN))
+            overrides = {k: v for k, v in md.items() if k != 'source_class'
+                         and v != extracted.get(k)}
             with open(os.path.join(STATE, 'metadata.json'), 'w') as f:
                 json.dump(overrides, f, indent=2, ensure_ascii=False)
             return self.send(200, metadata())
@@ -1628,6 +1642,34 @@ def history_record(batch, name, before, after):
             for b in os.listdir(d):
                 if b not in used:
                     os.unlink(os.path.join(d, b))
+
+
+def history_delete(batch=None):
+    """Discard a save batch, or all save snapshots; never touches paper files.
+
+    Retained content blobs are garbage-collected after the log is updated.
+    Serialize with history_record so a concurrent save cannot be lost.
+    """
+    with _history_lock:
+        entries = history_entries()
+        keep = [e for e in entries if e['batch'] != batch] if batch is not None else []
+        removed = len(entries) - len(keep)
+        if not removed:
+            return 0
+        directory = history_dir()
+        os.makedirs(directory, exist_ok=True)
+        log = os.path.join(directory, 'log.jsonl')
+        tmp = log + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as out:
+            out.writelines(json.dumps(e) + '\n' for e in keep)
+        os.replace(tmp, log)
+        used = {e['before'] for e in keep} | {e['after'] for e in keep}
+        blobs = os.path.join(directory, 'blobs')
+        if os.path.isdir(blobs):
+            for name in os.listdir(blobs):
+                if name not in used and re.fullmatch(r'[0-9a-f]{40}', name):
+                    os.unlink(os.path.join(blobs, name))
+        return removed
 
 
 def history_list(limit=300):
