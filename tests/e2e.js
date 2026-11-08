@@ -512,6 +512,38 @@ const TESTS = {
     untouched(env, 'main.tex', 'sections/body.tex');
   },
 
+  async 'render: Portuguese acknowledgments keep accents and exact LaTeX'(env, page) {
+    const source = 'Funda\\c{c}\\~ao para a Ci\\^encia e a Tecnologia (\\protect\\url{https://doi.org/10.54499/UID/50014/2025})';
+    const expression = [
+      '(() => {',
+      'const source = ' + JSON.stringify(source) + ';',
+      'const tokens = L.tokenize(source);',
+      'const host = document.createElement("div");',
+      'host.className = "para"; host.style.width = "240px"; document.body.append(host);',
+      'renderTokens(tokens, host, {});',
+      'const url = host.querySelector(".chip.ec");',
+      'const result = {',
+      ' visible: host.textContent, raw: L.serializeTokens(tokens), source: ser(host),',
+      ' protect: [...host.querySelectorAll(".chip.hidden")].filter((c) => c.dataset.src === "\\\\protect").length,',
+      ' accents: [...host.querySelectorAll(".chip.char")].map((c) => [c.textContent, c.dataset.src]),',
+      ' wrap: url ? getComputedStyle(url).overflowWrap : ""',
+      '};',
+      'host.remove(); return result;',
+      '})()',
+    ].join('\n');
+    const view = await page.eval(expression);
+    has(view.visible, 'Fundação', 'cedilla and unbraced tilde render as Portuguese');
+    has(view.visible, 'Ciência', 'unbraced circumflex renders as Portuguese');
+    eq(view.visible.includes('\\protect'), false, 'protect command must not be visible');
+    eq(view.protect, 1, 'protect must remain in the original source');
+    eq(view.raw, source, 'tokens round-trip exactly');
+    eq(view.source, source, 'DOM round-trips exactly');
+    eq(view.wrap, 'anywhere', 'the DOI should be allowed to wrap');
+    eq(view.accents.some(([shown, raw]) => shown === 'ã' && raw === '\\~a'), true,
+      'the unbraced accent keeps its exact LaTeX in data-src');
+    untouched(env, 'main.tex', 'sections/body.tex');
+  },
+
   async 'wrap: $ around a selection makes it maths and keeps the text'(env, page) {
     await page.select('brown');
     await page.key('$', { shift: true });
