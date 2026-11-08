@@ -643,15 +643,18 @@ def bib_search(q, limit=40):
     if not words:
         return []
     cited = set(load_aux()['cites'])
+    # once per search: bib_target() reads every file of the paper, and a short
+    # query matches tens of thousands of cryptobib entries
+    target = bib_target()
     hits = []
     for key, title, authors, year, typ, src in bib_entries():
         hay = f'{key} {title} {authors} {year}'.lower()
         if all(w in hay for w in words):
-            score = (key in cited) * 4 + (src == bib_target()) * 2 + key.lower().startswith(words[0]) * 3
-            score += sum(w in key.lower() for w in words)
+            k = key.lower()
+            score = (key in cited) * 4 + (src == target) * 2 + k.startswith(words[0]) * 3
+            score += sum(w in k for w in words)
             hits.append((score, year, key, title, authors, src))
     hits.sort(key=lambda h: (-h[0], -(int(h[1]) if str(h[1]).isdigit() else 0)))
-    target = bib_target()
     return [{'key': k, 'title': t, 'authors': a, 'year': y, 'source': s, 'local': s == target, 'cited': k in cited}
             for _, y, k, t, a, s in hits[:limit]]
 

@@ -53,11 +53,13 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
 #tts-state { color: var(--muted); min-width: 4.5em; }
 #ttsbar button:disabled { opacity: .45; cursor: default; }
 
-#doc { max-width: 46em; margin: 1.5em auto 50vh; padding: 0 1.2em; }
-body.two #doc { max-width: 76em; }
+#doc { max-width: 46em; margin: 1.5em auto 50vh; padding: 0 1.2em 0 3em; }   /* left: room for the block tools */
+body.two #doc { max-width: 76em; padding-right: 2.6em; }
 body.two .page { column-count: 2; column-gap: 2.5em; column-rule: 1px solid var(--line); }
+/* content-visibility clips to the page box: the box reaches out to hold the
+   block tools (＋ ✕ ↑ ↓) beside the text, or they could be neither seen nor clicked */
 .page { content-visibility: auto; contain-intrinsic-size: auto 60em; border-top: 1px dashed var(--line);
-  padding-top: .4em; margin-top: 1.2em; }
+  padding: .4em 2.6em 0; margin: 1.2em -2.6em 0; }
 .pagemark { column-span: all; font: 11px system-ui, sans-serif; color: var(--muted); text-align: right;
   letter-spacing: .05em; margin-bottom: .4em; }
 body.two .seg.figure, body.two .seg.code, body.two .seg.table { break-inside: avoid; }
@@ -66,11 +68,20 @@ body.two .seg.wide { column-span: all; }
 h1.doctitle { text-align: center; font-size: 1.7em; font-weight: normal; margin: .5em 0 1em; column-span: all; }
 
 .seg { position: relative; border-radius: 3px; }
-.seg:hover > .tools { opacity: 1; }
-.tools { position: absolute; left: -2.2em; top: .1em; opacity: 0; display: flex; flex-direction: column;
+/* A block's tools take clicks only while the mouse is over the block (hidden
+   ones would catch clicks meant for the text), lie above their neighbours',
+   and their padding bridges the gap to the text, so that the mouse never
+   leaves the block on its way to them. */
+.seg:hover > .tools { opacity: 1; z-index: 6; pointer-events: auto; }
+/* a heading's buttons: in a row at the end of its line, not down the margin
+   beside the text that follows */
+.seg.heading > .tools { left: auto; right: 0; top: 50%; transform: translateY(-50%); flex-direction: row;
+  padding: 0 0 0 .8em; }
+body.two .seg.heading > .tools { right: 0; padding-left: .8em; }
+.tools { position: absolute; z-index: 5; left: -2.2em; padding-right: .8em; top: .1em; opacity: 0; pointer-events: none; display: flex; flex-direction: column;
   gap: 2px; font: 13px system-ui, sans-serif; }
 .tools button { padding: 0 .35em; line-height: 1.5; }
-body.two .tools { left: auto; right: -1.6em; }
+body.two .tools { left: auto; right: -1.6em; padding-right: 0; padding-left: .8em; }
 
 .para { margin: 0 0 .8em; text-align: justify; hyphens: auto; white-space: pre-wrap; outline: none; }
 .para:focus { background: color-mix(in srgb, var(--accent) 5%, transparent); }
@@ -174,8 +185,10 @@ kbd { font: 12px ui-monospace, monospace; border: 1px solid var(--line); border-
 .pal-empty { padding: 1em .9em; color: var(--muted); }
 
 /* Long papers: the browser skips layout and painting of blocks off screen,
-   so typing reflows only what is visible; "auto" remembers each block's size. */
-.seg { content-visibility: auto; contain-intrinsic-size: auto 6em; }
+   so typing reflows only what is visible; "auto" remembers each block's size.
+   On the block's content, not on .seg: containment clips, and the block's
+   tools (＋ ✕ ↑ ↓) stand outside it, beside the text. */
+.seg > :not(.tools) { content-visibility: auto; contain-intrinsic-size: auto 6em; }
 
 /* diff mode */
 .d-del { background: color-mix(in srgb, #d33 22%, transparent); text-decoration: line-through; text-decoration-color: #c33; }

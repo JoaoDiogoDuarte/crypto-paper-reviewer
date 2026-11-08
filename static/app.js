@@ -268,7 +268,7 @@ function wrapSeg(seg, inner, tools) {
   const box = el('div', 'seg ' + seg.kind);
   box.append(inner);
   const t = el('div', 'tools');
-  const plus = el('button', '', '＋');
+  const plus = el('button', '', '+');
   plus.title = 'Add after this block';
   plus.onclick = (e) => { e.stopPropagation(); addMenu(seg, plus); };
   t.append(plus);
@@ -286,7 +286,7 @@ function renderPara(seg, ctx) {
   if (ctx.env.length && L.THM_ENVS.has(ctx.env[ctx.env.length - 1])) p.classList.add('thm');
   renderTokens(toks, p, ctx);
   if (toks.some((t) => t.t === 'env' && t.mode === 'begin' && L.THM_ENVS.has(t.env))) p.classList.add('thm');
-  const visible = [...p.childNodes].some((n) => n.nodeType === 3 ? n.data.trim() : !n.classList.contains('hidden'));
+  const visible = [...p.childNodes].some((n) => n.nodeType === 3 ? n.data.trim() : !(n.classList.contains('hidden') || n.classList.contains('nl')));
   if (!visible) { p.classList.add('quiet'); p.contentEditable = 'false'; }
   seg.edit = p;
   return wrapSeg(seg, p);
@@ -430,7 +430,7 @@ function renderChip(tok, ctx) {
   }
   const name = tok.name;
   const arg = (k = 0) => { const m = [...tok.s.matchAll(/\{([^{}]*)\}/g)]; return m[k] ? m[k][1] : ''; };
-  if (HIDDEN.has(name)) return chip('hidden', tok.s);
+  if (HIDDEN.has(name) || (name !== 'iff' && /^(newif|else|fi|if[a-zA-Z@]*|[a-zA-Z@]+(true|false))$/.test(name))) return chip('hidden', tok.s);
   if (/^[cC]ref$|^ref$|^eqref$|^autoref$/.test(name)) return chip('ref', tok.s, refText(name, arg()));
   if (name === 'cite') {
     const nums = arg().split(',').map((k) => (DOC.aux.cites[k.trim()] || '?'));
@@ -2281,13 +2281,27 @@ function openPalette(opts) {
   refreshPalette();
 }
 
-function closePalette() { $('#palette').hidden = true; PAL.opts = null; }
+function closePalette() {
+  $('#palette').hidden = true; PAL.opts = null;
+  clearTimeout(PAL.timer);
+  if (PAL.abort) { PAL.abort.abort(); PAL.abort = null; }
+}
 
 function refreshPalette() {
   clearTimeout(PAL.timer);
   PAL.timer = setTimeout(async () => {
+    if (!PAL.opts) return;      // closed before the search ran
     const seq = ++PAL.seq;
-    const items = await PAL.opts.search($('#pal-q').value);
+    // a newer search makes the one still on its way useless: drop it
+    if (PAL.abort) PAL.abort.abort();
+    const abort = PAL.abort = new AbortController();
+    let items;
+    try { items = await PAL.opts.search($('#pal-q').value, abort.signal); }
+    catch (e) {
+      if (e.name === 'AbortError') return;
+      if (seq === PAL.seq) banner('Search failed: ' + e.message);
+      items = [];
+    }
     if (seq !== PAL.seq || !PAL.opts) return;
     PAL.items = items; PAL.active = 0;
     drawPalette();
@@ -2377,14 +2391,17 @@ function citePalette() {
     title: 'Cite',
     placeholder: 'Key, title words, authors or year: e.g. "goldwasser micali", "probabilistic encryption 84"',
     empty: 'Nothing in references.bib or cryptobib. Press Search online.',
-    search: async (q) => {
+    search: async (q, signal) => {
       if (!q.trim()) return [];
       if (online) {
-        const r = await fetch('/api/online?q=' + encodeURIComponent(q));
-        if (!r.ok) { banner((await r.json()).error); return []; }
-        return (await r.json()).map((h) => ({ ...h, online: true }));
+        const r = await fetch('/api/online?q=' + encodeURIComponent(q), { signal });
+        const res = await r.json().catch(() => ({ error: 'the online search failed (' + r.status + ')' }));
+        if (!r.ok) { banner(res.error || 'the online search failed'); return []; }
+        return res.map((h) => ({ ...h, online: true }));
       }
-      return (await fetch('/api/bib?q=' + encodeURIComponent(q))).json();
+      const r = await fetch('/api/bib?q=' + encodeURIComponent(q), { signal });
+      if (!r.ok) { banner('The bibliography search failed (' + r.status + '); see the server output.'); return []; }
+      return r.json();
     },
     delay: 150,
     view: (it) => it.online ? {
@@ -3179,7 +3196,7 @@ function algoLine(g, l, li, depth) {
   const indentOf = (x) => /^\s*/.exec(x.prefix)[0];
   const add = (lines) => { g.lines.splice(li + 1, 0, ...lines.map(parseGameLine)); showFigTab('games'); };
   const inner = indentOf(l) + (BLOCK_OPEN.has(l.cmd) || l.cmd === 'Else' || l.cmd === 'ElsIf' ? '  ' : '');
-  const b1 = el('button', '', '＋'); b1.title = 'Add a statement below';
+  const b1 = el('button', '', '+'); b1.title = 'Add a statement below';
   b1.onclick = () => add([inner + '\\State $x \\gets y$']);
   const b2 = el('button', '', '⊕'); b2.title = 'Add an if-block below';
   b2.onclick = () => add([inner + '\\If{$c$}', inner + '  \\State $x \\gets y$', inner + '\\EndIf']);
@@ -3202,7 +3219,7 @@ function procLine(g, l, li) {
   ta.oninput = () => { l.content = ta.value; show(); };
   show();
   const tools = el('div', 'gtools'); tools.style.opacity = 1;
-  const b1 = el('button', '', '＋ line'); b1.onclick = () => { g.lines.splice(li + 1, 0, { prefix: '', content: '', suffix: l.suffix || ' \\\\\n' }); if (!l.suffix) l.suffix = ' \\\\\n'; showFigTab('games'); };
+  const b1 = el('button', '', '+ line'); b1.onclick = () => { g.lines.splice(li + 1, 0, { prefix: '', content: '', suffix: l.suffix || ' \\\\\n' }); if (!l.suffix) l.suffix = ' \\\\\n'; showFigTab('games'); };
   const b3 = el('button', '', '✕'); b3.onclick = () => { g.lines.splice(li, 1); showFigTab('games'); };
   tools.append(b1, b3);
   row.append(ta, prev, tools);
