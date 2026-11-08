@@ -1174,8 +1174,12 @@ Object.assign(TESTS, {
     await page.select('brown');
     await page.type('red');
     await page.save();
-    await page.select('second');
-    await page.type('third');
+    await sleep(650);   // the build may re-render the paper after the save
+    await page.select('A second paragraph');
+    await page.type('A third paragraph');
+    await page.eval(`commit()`);
+    eq(await page.eval(`FILES['main.tex'].text.includes('A third paragraph')`), true,
+      'unsaved second paragraph is retained before opening the diff');
     await page.click('#diffbtn');
     await page.waitFor(`!$('#diffnav').hidden`, 8000, 'diff view opened');
     eq(await page.eval(`DIFF.marks.length`), 1, 'one changed block since last save');
