@@ -194,15 +194,18 @@ function render() {
 // two columns typing rebalances one page, not the whole paper.
 const CHARS_PER_PAGE = { IEEEtran: 6500, llncs: 2700, iacrcc: 3000, acmart: 6000, article: 3300 };
 function layoutPages(doc) {
-  const exact = DOC.pages && Object.keys(DOC.pages).length > 0;
+  // Two-column review mode flows the source naturally, rather than copying
+  // SyncTeX page breaks whose figures and columns can leave blank halves.
+  const flowing = document.body.classList.contains('two');
+  const exact = !flowing && DOC.pages && Object.keys(DOC.pages).length > 0;
   const cls = (DOC.docclass || 'article').split('/')[0];
   const twoCol = cls === 'IEEEtran' || /twocolumn/.test(DOC.docclass || '');
-  const perPage = CHARS_PER_PAGE[cls] || 3300;
+  const perPage = Math.round((CHARS_PER_PAGE[cls] || 3300) * (flowing ? 1.55 : 1));
   let page = 1, chars = 0, last = 0, box = null;
   const startPage = (n) => {
     box = el('section', 'page');
     box.dataset.page = n;
-    box.append(el('div', 'pagemark', (exact ? 'page ' : '≈ page ') + n));
+    box.append(el('div', 'pagemark', flowing ? 'review spread ' + n : (exact ? 'page ' : 'approx. page ') + n));
     doc.append(box);
   };
   for (const seg of ORDER) {
@@ -1122,8 +1125,14 @@ function caretAtStart(editable) {
 }
 
 $('#cols').onclick = () => {
+  commit();
+  const caret = captureEditorState();
+  const y = window.scrollY;
   const two = document.body.classList.toggle('two');
   $('#cols').textContent = two ? 'One column' : 'Two columns';
+  render();
+  restoreEditorState(caret);
+  window.scrollTo(0, y);
   try { localStorage.setItem('cols', two ? '2' : '1'); } catch (e) { /* storage unavailable */ }
 };
 try { if (localStorage.getItem('cols') === '2') $('#cols').click(); } catch (e) { /* storage unavailable */ }
