@@ -1251,6 +1251,78 @@ Object.assign(TESTS, {
   },
 
   // ---- figure viewer
+  async 'Game editor: common steps, color marks, history and independent game panels'(env, page) {
+    const games = String.raw`\begin{gameenv}{First}
+\State $x \gets y$
+\end{gameenv}
+\gamebreak
+\begin{gameenv}{Second}
+\State $x \gets z$
+\end{gameenv}`;
+    const source = MAIN.replace(String.raw`\usepackage{amsmath}`,
+      String.raw`\usepackage{amsmath}
+\newcommand{\gamechange}[2]{#2}`).replace(String.raw`\fbox{box}`, games);
+    env.write('main.tex', source);
+    await page.eval(`load(false, ['main.tex'])`);
+    await page.click(`js:ORDER.find((s) => s.kind === 'figure').el.querySelector('div.small, img')`, { count: 2 });
+    await page.waitFor(`FV.games.length === 2 && !$('#figview').hidden`, 8000, 'two parsed games');
+    eq(await page.eval(`gameColorAvailable()`), true, 'source defines the game change macro');
+    await page.eval(`(() => {
+      const choice = [...document.querySelectorAll('.game:first-child .gline select[aria-label="Insert algorithmic step"]')]
+        .find((x) => x.closest('.gline').querySelector('.gtext'));
+      choice.value = 'while';
+      choice.dispatchEvent(new Event('change'));
+    })()`);
+    has(await page.eval(`figureWithEdits()`), String.raw`\While{$c$}`, 'while loop inserted');
+    await page.click('#fv-undo');
+    eq((await page.eval(`figureWithEdits()`)).includes(String.raw`\While{$c$}`), false, 'Undo removes loop');
+    await page.click('#fv-redo');
+    has(await page.eval(`figureWithEdits()`), String.raw`\While{$c$}`, 'Redo restores loop');
+    await page.eval(`(() => {
+      const color = document.querySelector('.game:first-child .game-mark-input:not(:disabled)');
+      color.value = 'two';
+      color.dispatchEvent(new Event('change'));
+    })()`);
+    has(await page.eval(`figureWithEdits()`), String.raw`\gamechange{two}{`, 'colored change persisted in LaTeX');
+    await page.eval(`document.querySelector('.game:first-child .game-actions button:nth-child(3)').click()`);
+    eq(await page.eval(`FV.games.length`), 3, 'add independent game');
+    await page.click('#fv-undo');
+    eq(await page.eval(`FV.games.length`), 2, 'undo add game');
+    await page.click('#fv-redo');
+    eq(await page.eval(`FV.games.length`), 3, 'redo add game');
+    await page.click('#fv-apply');
+    await page.save();
+    const written = env.read('main.tex');
+    has(written, String.raw`\While{$c$}`, 'saved loop');
+    has(written, String.raw`\gamechange{two}{`, 'saved color macro');
+    has(written, String.raw`\begin{gameenv}{New game}`, 'saved new game');
+    has(written, 'Final words of the paper.', 'source outside figure retained');
+  },
+
+  async 'Layout: large table preview stays inside reading column in both modes'(env, page) {
+    const source = MAIN.replace(String.raw`\begin{figure}[t]`, String.raw`\begin{table}[t]`)
+      .replace(String.raw`\end{figure}`, String.raw`\end{table}`);
+    env.write('main.tex', source);
+    await page.eval(`load(false, ['main.tex'])`);
+    const imageOk = async () => page.eval(`(() => {
+      const table = ORDER.find((s) => s.kind === 'table');
+      DOC.figs[table.src] = 'data:image/svg+xml,' + encodeURIComponent(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="400"><rect width="2400" height="400" fill="white"/></svg>');
+      render();
+      const img = document.querySelector('.seg.table img');
+      return new Promise((done) => {
+        img.onload = () => {
+          const parent = img.parentElement.getBoundingClientRect();
+          const box = img.getBoundingClientRect();
+          done(box.width <= parent.width + 1 && document.documentElement.scrollWidth <= innerWidth + 2);
+        };
+      });
+    })()`);
+    eq(await imageOk(), true, 'one-column table has no horizontal overflow');
+    await page.click('#cols');
+    eq(await imageOk(), true, 'two-column table has no horizontal overflow');
+  },
+
   async 'figure viewer: edit the LaTeX, Apply, save'(env, page) {
     await page.click(`js:ORDER.find((s) => s.kind === 'figure').el.querySelector('div.small, img')`, { count: 2 });
     await page.waitFor(visible('#figview'), 8000, 'the figure viewer');
