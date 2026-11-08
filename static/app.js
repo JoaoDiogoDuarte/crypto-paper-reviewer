@@ -3306,6 +3306,56 @@ function changeGameSource(transform) {
 $('#fv-undo').onclick = undoGame;
 $('#fv-redo').onclick = redoGame;
 
+function gameSpan(g) {
+  return g && Number.isInteger(g.start) && Number.isInteger(g.end) && g.end > g.start;
+}
+function gameMove(from, to) {
+  return changeGameSource((src, games) => {
+    if (from < 0 || to < 0 || from >= games.length || to >= games.length || from === to) return src;
+    const lo = Math.min(from, to), hi = Math.max(from, to);
+    const selected = games.slice(lo, hi + 1);
+    if (selected.some((g) => !gameSpan(g) || g.kind !== 'algo' || g.env !== 'gameenv')) {
+      banner('Game movement requires sibling gameenv blocks.');
+      return src;
+    }
+    const blocks = selected.map((g) => src.slice(g.start, g.end));
+    const gaps = selected.slice(1).map((g, i) => src.slice(selected[i].end, g.start));
+    if (gaps.some((x) => !/^(?:\s|%[^\n]*\n)*$/.test(x))) {
+      banner('A LaTeX layout command separates the games; source order is unchanged.');
+      return src;
+    }
+    const moved = blocks.splice(from - lo, 1)[0];
+    blocks.splice(to - lo, 0, moved);
+    let replacement = blocks[0];
+    for (let i = 0; i < gaps.length; i++) replacement += gaps[i] + blocks[i + 1];
+    return src.slice(0, selected[0].start) + replacement + src.slice(selected[selected.length - 1].end);
+  });
+}
+function gameInsert(after) {
+  return changeGameSource((src, games) => {
+    const g = games[after];
+    if (!gameSpan(g) || g.kind !== 'algo' || g.env !== 'gameenv') return src;
+    const fresh = ['\\begin{gameenv}{New game}', '  \\State $x \\gets y$', '\\end{gameenv}'].join('\n');
+    return src.slice(0, g.end) + '\n' + fresh + src.slice(g.end);
+  });
+}
+function gameDuplicate(index) {
+  return changeGameSource((src, games) => {
+    const g = games[index];
+    if (!gameSpan(g) || g.kind !== 'algo' || g.env !== 'gameenv') return src;
+    return src.slice(0, g.end) + '\n' + src.slice(g.start, g.end) + src.slice(g.end);
+  });
+}
+function gameRemove(index) {
+  if (!confirm('Delete this game block? Undo works until Apply.')) return;
+  return changeGameSource((src, games) => {
+    const g = games[index];
+    if (!gameSpan(g)) return src;
+    return src.slice(0, g.start) + src.slice(g.end);
+  });
+}
+$('#fv-add-game').onclick = () => gameInsert(FV.games.length - 1);
+
 function renderGames(body) {
   const grid = el('div', 'games-grid');
   FV.games.forEach((g, gi) => {
