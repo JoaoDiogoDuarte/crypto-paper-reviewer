@@ -483,7 +483,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
   letter-spacing: .01em;
 }
 #bar #dirty { font-size: 12px; font-weight: 600; padding: 0 .35em; }
-#save.has-changes {
+#bar .group #save.has-changes {
   background: var(--dirty);
   border-color: var(--dirty);
   color: #1c1c1e;
