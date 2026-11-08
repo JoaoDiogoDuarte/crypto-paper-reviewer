@@ -255,17 +255,6 @@ def missing(md, target):
     if not md['authors']:
         out.append(('paper', 'authors'))
     return out
-    # Generic metadata commands regardless of class, including venues that
-    # provide their keywords in the preamble rather than an IEEE environment.
-    lic = re.search(r'\\(?:license|licence)\s*\{', t)
-    if lic and not md['license']:
-        md['license'] = group(t, lic.end() - 1)[0].strip()
-    if not md['running_title']:
-        short = re.search(r'\\(?:shorttitle|runningtitle|markboth)\s*\{', t)
-        if short:
-            md['running_title'] = clean(group(t, short.end() - 1)[0])
-    md['acknowledgements'] = re.sub(r'\\(?:fi|else)\s*$', '', md['acknowledgements']).strip()
-
 
 # ---------------------------------------------------------------- writing
 
