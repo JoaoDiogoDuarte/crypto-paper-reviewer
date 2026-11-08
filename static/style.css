@@ -104,7 +104,7 @@ h4 { font-size: 1em; }
 .chip:hover { outline: 1px solid var(--accent); }
 .chip.src { font: .8em/1.2 ui-monospace, monospace; background: var(--chip); color: var(--muted); padding: 0 .2em; }
 .chip.ref, .chip.cite { color: var(--accent); }
-.chip.ec { font: .85em ui-monospace, monospace; }
+.chip.ec { font: .85em ui-monospace, monospace; overflow-wrap: anywhere; word-break: break-word; white-space: normal; }
 .chip.math.display { display: block; text-align: center; margin: .5em 0; background: var(--math); padding: .2em 0;
   white-space: normal; overflow-x: auto; }
 .chip.hidden { display: none; }
