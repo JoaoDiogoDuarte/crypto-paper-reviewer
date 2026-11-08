@@ -3211,6 +3211,75 @@ const parseGames = (src) => L.parseGames(src, GAME_ENVS);
 const parseGameLine = (line) => L.parseGameLine(line);
 const gameLineSrc = (l) => L.gameLineSrc(l);
 
+
+function figureSnapshotState() {
+  return {src: FV.src, tab: FV.tab, latexDraft: FV.latexDraft, latexEdited: FV.latexEdited,
+    games: JSON.parse(JSON.stringify(FV.games || [])),
+    tables: JSON.parse(JSON.stringify(FV.tables || []))};
+}
+function figureCheckpoint(key = null) {
+  if (!FV.seg) return;
+  const now = Date.now();
+  if (key && FV.typingKey === key && now - FV.typingAt < 650) {
+    FV.typingAt = now; return;
+  }
+  FV.undo.push(figureSnapshotState());
+  if (FV.undo.length > 120) FV.undo.shift();
+  FV.redo = []; FV.typingKey = key; FV.typingAt = now;
+  figureEditStatus();
+}
+function figureEditStatus() {
+  if (!FV.seg) return;
+  $('#fv-undo').disabled = FV.undo.length === 0;
+  $('#fv-redo').disabled = FV.redo.length === 0;
+  $('#fv-status').textContent = figureWithEdits() === FV.original
+    ? 'No pending edits' : 'Pending changes - Apply, then Save';
+}
+function figureResetFromSource(src) {
+  FV.src = src; FV.games = parseGames(src); FV.tables = L.parseTabulars(src);
+  FV.latexDraft = null; FV.latexEdited = false;
+}
+function figureRestoreState(state) {
+  FV.src = state.src; FV.games = state.games; FV.tables = state.tables;
+  FV.latexDraft = state.latexDraft; FV.latexEdited = state.latexEdited;
+  FV.typingKey = null; FV.restoring = true;
+  showFigTab(state.tab); FV.restoring = false;
+  figureEditStatus();
+}
+function figureUndo() {
+  if (!FV.seg || !FV.undo.length) return;
+  FV.redo.push(figureSnapshotState()); figureRestoreState(FV.undo.pop());
+}
+function figureRedo() {
+  if (!FV.seg || !FV.redo.length) return;
+  FV.undo.push(figureSnapshotState()); figureRestoreState(FV.redo.pop());
+}
+
+function gameColorAvailable() {
+  return !!(DOC.macros && DOC.macros['\\gamechange']) ||
+    Object.values(FILES).some((f) =>
+      /\\(?:newcommand|renewcommand|providecommand)\s*\{?\\gamechange\b/.test(f.text));
+}
+function gameColorParts(content) {
+  const m = /^\\gamechange\{(two|three|four)\}\{/.exec(content);
+  if (m && L.groupEnd(content, m[0].length - 1) === content.length)
+    return { color: m[1], inner: content.slice(m[0].length, -1) };
+  return {color: '', inner: content};
+}
+function colorGameLine(g, index, color) {
+  if (color && !gameColorAvailable()) {
+    banner('Colour markings require a \\gamechange{colour}{content} macro in the LaTeX preamble.');
+    return;
+  }
+  const line = g.lines[index];
+  if (!line || line.raw) return;
+  const old = gameColorParts(line.content);
+  if (old.color === color) return;
+  figureCheckpoint();
+  line.content = color ? '\\gamechange{' + color + '}{' + old.inner + '}' : old.inner;
+  showFigTab('games'); figureEditStatus();
+}
+
 function openFigure(seg) {
   FV.seg = seg;
   FV.src = segSource(seg, [], null, false);   // with any caption edit made since
@@ -3229,11 +3298,13 @@ function openFigure(seg) {
 
 function showFigTab(tab) {
   if (!FV.seg) return;
-  if (FV.tab === 'latex' && tab !== 'latex' && FV.latexEdited) {
-    figureResetFromSource(FV.latexDraft);
-  } else if (tab === 'latex' && FV.tab !== 'latex') {
-    figureResetFromSource(figureWithEdits());
-  }
+  if (!FV.restoring) {
+    if (FV.tab === 'latex' && tab !== 'latex' && FV.latexEdited) {
+      figureResetFromSource(FV.latexDraft);
+    } else if (tab === 'latex' && FV.tab !== 'latex') {
+      figureResetFromSource(figureWithEdits());
+    }
+    }
   FV.tab = tab;
   for (const b of document.querySelectorAll('.fv-tabs button')) b.classList.toggle('on', b.dataset.tab === tab);
   const body = $('#fv-body');
