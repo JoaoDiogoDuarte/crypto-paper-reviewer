@@ -694,11 +694,14 @@ function structural(change) {
   if (focus) focusPlaceholder(focus);
 }
 
+// Take a block out with one of the gaps around it: the one after a heading
+// (its text then follows the blank line before it, as a paragraph of its own).
 function removeSeg(seg) {
   const segs = FILES[seg.file].segs;
   const i = segs.indexOf(seg);
   seg.removed = true;
-  if (i > 0 && segs[i - 1].kind === 'gap') segs[i - 1].removed = true;
+  if (seg.kind === 'heading' && segs[i + 1] && segs[i + 1].kind === 'gap' && i > 0 && segs[i - 1].kind === 'gap') segs[i + 1].removed = true;
+  else if (i > 0 && segs[i - 1].kind === 'gap') segs[i - 1].removed = true;
 }
 
 function insertAfter(seg, src) {
@@ -708,8 +711,21 @@ function insertAfter(seg, src) {
 }
 
 const HEADING_RANK = { part: 0, chapter: 1, section: 2, subsection: 3, subsubsection: 4, paragraph: 5 };
-function headingRank(seg) {
-  const h = seg && seg.kind === 'heading' && L.headingParts(seg.src);
+// The rank of a heading; for an \input, the rank of the first heading of
+// the file it reads (it starts a section of the document), if any.
+function headingRank(seg, seen = new Set()) {
+  if (!seg) return null;
+  if (seg.kind === 'input') {
+    const f = seg.input && FILES[seg.input];
+    if (!f || !f.segs || seen.has(seg.input)) return null;
+    seen.add(seg.input);
+    for (const s of f.segs) {
+      const r = s.kind === 'heading' || s.kind === 'input' ? headingRank(s, seen) : null;
+      if (r !== null) return r;
+    }
+    return null;
+  }
+  const h = seg.kind === 'heading' && L.headingParts(seg.src);
   return h ? HEADING_RANK[h.level] : null;
 }
 
@@ -721,12 +737,29 @@ function sectionEnd(segs, start, rank) {
   return segs.length;
 }
 
+// What must stay where it is: the end of the document, the bibliography,
+// the start of the appendices.
+const FIXED_RE = /\\(end\{document\}|bibliography\b|printbibliography|begin\{thebibliography\}|appendix\b|appendices\b|backmatter\b)/;
+const fixedIn = (chunk) => chunk.some((s) => s.kind !== 'gap' && FIXED_RE.test(s.src.replace(/(^|[^\\])%.*$/gm, '$1')));
+
+// Swap the neighbouring chunks segs[i..j) and segs[j..k), keeping the blank
+// lines between and after them where they were.
+function swapChunks(segs, i, j, k) {
+  const split = (lo, hi) => { let m = hi; while (m > lo && segs[m - 1].kind === 'gap') m--; return [segs.slice(lo, m), segs.slice(m, hi)]; };
+  const [aBody, aGap] = split(i, j);
+  const [bBody, bGap] = split(j, k);
+  const file = segs[i].file;
+  const sep = aGap.length ? aGap : [{ kind: 'gap', src: '\n\n', file }];
+  segs.splice(i, k - i, ...bBody, ...sep, ...aBody, ...(bGap.length ? bGap : (k === segs.length ? [] : [{ kind: 'gap', src: '\n\n', file }])));
+}
+
 function moveSection(seg, direction) {
   const segs = FILES[seg.file] && FILES[seg.file].segs;
-  const start = segs && segs.indexOf(seg);
+  const start = segs ? segs.indexOf(seg) : -1;
   const rank = headingRank(seg);
   if (!segs || start < 0 || rank === null) return;
   const end = sectionEnd(segs, start, rank);
+  let lo, mid, hi;
   if (direction < 0) {
     let previous = -1;
     for (let i = start - 1; i >= 0; i--) {
@@ -734,22 +767,24 @@ function moveSection(seg, direction) {
       if (r !== null && r < rank) break;
       if (r === rank) { previous = i; break; }
     }
-    if (previous < 0) { banner('This section is already first among its siblings.'); return; }
-    structural(() => {
-      const before = segs.slice(previous, start);
-      const current = segs.slice(start, end);
-      segs.splice(previous, end - previous, ...current, ...before);
-    });
+    if (previous < 0 || segs[previous].kind !== 'heading') {
+      banner(previous < 0 ? 'This section is already first among its siblings.' : 'The section before this one is in another file (\\input); move it there.');
+      return;
+    }
+    [lo, mid, hi] = [previous, start, end];
+  } else {
+    const next = end < segs.length ? headingRank(segs[end]) : null;
+    if (next !== rank || segs[end].kind !== 'heading') {
+      banner(next === rank ? 'The section after this one is in another file (\\input); move it there.' : 'This section is already last among its siblings.');
+      return;
+    }
+    [lo, mid, hi] = [start, end, sectionEnd(segs, end, rank)];
+  }
+  if (fixedIn(segs.slice(lo, hi))) {
+    banner('One of these sections holds the end of the document, the bibliography or \\appendix, which cannot move with it.');
     return;
   }
-  const next = end < segs.length ? headingRank(segs[end]) : null;
-  if (next !== rank) { banner('This section is already last among its siblings.'); return; }
-  const nextEnd = sectionEnd(segs, end, rank);
-  structural(() => {
-    const current = segs.slice(start, end);
-    const following = segs.slice(end, nextEnd);
-    segs.splice(start, nextEnd - start, ...following, ...current);
-  });
+  structural(() => swapChunks(segs, lo, mid, hi));
 }
 
 const PLACEHOLDER = 'Write here.';
@@ -3555,7 +3590,17 @@ async function createNewFile() {
   if (!r.ok) { banner('Could not create the file: ' + (await r.json()).error); return; }
   const created = (await r.json()).name;
   const input = created.replace(/\.tex$/, '');
-  if (!insertNodes([chip('src', '\\input{' + input + '}', '\\input{' + input + '}')])) return;
+  if (NEWFILE_AT && NEWFILE_AT.startContainer.isConnected) {
+    const sel = getSelection(); sel.removeAllRanges(); sel.addRange(NEWFILE_AT);
+    const host = editableAt(NEWFILE_AT); if (host) host.focus({ preventScroll: true });
+  }
+  const src = '\\input{' + input + '}';
+  // the new file is a block of its own
+  if (!insertNodes([chip('parbreak', '\n\n', ''), chip('src', src, src), chip('parbreak', '\n\n', '')])) {
+    banner(`Created ${created}, but the cursor left the text: insert \\input{${input}} yourself.`);
+    $('#newfilebox').hidden = true;
+    return;
+  }
   $('#newfilebox').hidden = true;
   $('#newfile-name').value = '';
   commit();
