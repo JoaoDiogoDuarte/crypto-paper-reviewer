@@ -1125,14 +1125,18 @@ function caretAtStart(editable) {
 }
 
 $('#cols').onclick = () => {
-  commit();
-  const caret = captureEditorState();
+  // This handler also restores the remembered mode before the first load().
+  // No document exists yet in that case, so defer any rerender.
+  if (DOC) commit();
+  const caret = DOC ? captureEditorState() : null;
   const y = window.scrollY;
   const two = document.body.classList.toggle('two');
   $('#cols').textContent = two ? 'One column' : 'Two columns';
-  render();
-  restoreEditorState(caret);
-  window.scrollTo(0, y);
+  if (DOC) {
+    render();
+    restoreEditorState(caret);
+    window.scrollTo(0, y);
+  }
   try { localStorage.setItem('cols', two ? '2' : '1'); } catch (e) { /* storage unavailable */ }
 };
 try { if (localStorage.getItem('cols') === '2') $('#cols').click(); } catch (e) { /* storage unavailable */ }
