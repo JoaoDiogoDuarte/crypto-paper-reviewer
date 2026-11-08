@@ -830,6 +830,15 @@ Object.assign(TESTS, {
     onlyChange(env, 'main.tex', 'lazy dog.', 'lazy dog saved.');
   },
 
+  async 'layout: remembered two-column mode opens in a fresh tab'(env, page) {
+    await page.click('#cols');
+    const fresh = await env.openPage(CHROME);
+    eq(await fresh.eval('document.body.classList.contains("two")'), true, 'two-column preference restored');
+    eq(await fresh.eval('ORDER.length > 0'), true, 'document loads with stored two-column mode');
+    await fresh.click('#cols');
+    untouched(env, 'main.tex', 'sections/body.tex');
+  },
+
   async 'layout: table preview cannot overflow a narrow review column'(env, page) {
     await page.click('#cols');
     eq(await page.eval('document.body.classList.contains("two")'), true, 'two columns active');
