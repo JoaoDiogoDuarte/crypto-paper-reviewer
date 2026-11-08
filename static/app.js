@@ -3694,7 +3694,9 @@ doc.addEventListener('dblclick', (e) => {
 // Figure keyboard handling is installed in capture phase before the global
 // document shortcuts, so Ctrl+Z never undoes a manuscript edit from the dialog.
 document.addEventListener('keydown', (e) => {
-  if ($('#figview').hidden || !$('#figview').contains(e.target)) return;
+  // The dialog may rerender and temporarily leave focus on document.body.
+  // While visible, all editing shortcuts belong to this modal, not the paper.
+  if ($('#figview').hidden) return;
   const mod = e.ctrlKey || e.metaKey;
   const key = e.key.toLowerCase();
   if (mod && !e.altKey && (key === 'z' || key === 'y')) {
