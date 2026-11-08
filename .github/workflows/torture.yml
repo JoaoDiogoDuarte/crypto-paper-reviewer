@@ -1,0 +1,131 @@
+name: Torture tests (scheduled and manual)
+
+on:
+  schedule:
+    - cron: '17 3 * * 0'
+  workflow_dispatch:
+    inputs:
+      conversion_cases:
+        description: Random source/venue conversion cases per test
+        required: false
+        default: '60'
+        type: string
+      browser_seeds:
+        description: Comma-separated browser save torture seeds
+        required: false
+        default: '1,2,3,4'
+        type: string
+      browser_ops:
+        description: Random editor operations per seed
+        required: false
+        default: '65'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: torture-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  source-and-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    env:
+      TORTURE_CONVERSION_CASES: ${{ inputs.conversion_cases || '60' }}
+      TORTURE_BACKEND_OPS: '120'
+      TORTURE_CONCURRENT_ROUNDS: '25'
+      E2E_SEEDS: ${{ inputs.browser_seeds || '1,2,3,4' }}
+      E2E_OPS: ${{ inputs.browser_ops || '65' }}
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Record tools
+        run: |
+          python --version
+          node --version
+          command -v google-chrome || command -v chromium || command -v chromium-browser
+          mkdir -p torture-logs
+      - name: Check syntax of all Python and JavaScript sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q server.py convert.py tests
+          for file in static/*.js tests/*.js; do node --check "$file"; done
+      - name: Tens of thousands of randomized TeX/token round-trips
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tests/torture.js --seeds=1,7,42,99,2026,8192,65537,123456789 --cases=1500 2>&1 | tee torture-logs/latex-property.log
+      - name: Round-trip every checked-in fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tests/roundtrip.js tests/fixtures 2>&1 | tee torture-logs/fixture-roundtrip.log
+      - name: Seeded metadata extraction and venue-conversion matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m unittest -v tests.test_convert_contract tests.torture_conversion 2>&1 | tee torture-logs/conversion-metadata.log
+      - name: Concurrent writes, save-history, path security and failure recovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m unittest -v tests.backend_test 2>&1 | tee torture-logs/http-saving.log
+      - name: Full headless-Chrome E2E suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          E2E_SEEDS=101 E2E_OPS=1 node tests/e2e.js 2>&1 | tee torture-logs/browser-all.log
+      - name: Deterministic random editing and saving
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tests/e2e.js 'save torture:' 2>&1 | tee torture-logs/browser-fuzz.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: editor-torture-source-browser-${{ github.run_id }}
+          path: torture-logs/
+          if-no-files-found: warn
+          retention-days: 14
+
+  latex-compilation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install TeX packages and PDF validators
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            latexmk texlive-latex-base texlive-latex-recommended \
+            texlive-latex-extra texlive-publishers texlive-science \
+            texlive-bibtex-extra poppler-utils
+          kpsewhich article.cls
+          kpsewhich IEEEtran.cls
+          kpsewhich llncs.cls
+          latexmk --version | head -n 1
+      - name: Build anonymous and named venue conversions on temporary copies
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p torture-logs
+          python3 tests/convert_matrix.py ieee-conf llncs-splncs04 \
+            --targets ieee,llncs,article --anon 2>&1 | tee torture-logs/latex-venue-matrix.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: editor-torture-latex-${{ github.run_id }}
+          path: torture-logs/
+          if-no-files-found: warn
+          retention-days: 14

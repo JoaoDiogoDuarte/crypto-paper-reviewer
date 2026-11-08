@@ -177,6 +177,44 @@ the page, and its plain text has the formulas as `$…$`.
 (not tracked: keep your own papers out of the repository). In the browser,
 `?selftest`, `?edittest` and `?uitest` run the same checks by hand.
 
+## Torture and property testing
+
+All torture tests use in-memory LaTeX, synthetic fixtures or temporary project
+directories; **they never modify your manuscript**.
+
+Quick tests (also run on each PR):
+
+    python3 -m unittest tests.backend_test tests.test_convert_contract tests.torture_conversion
+    node tests/roundtrip.js tests/fixtures
+    node tests/torture.js --seeds=1,7,42,99 --cases=700
+    E2E_SEEDS=17 E2E_OPS=18 node tests/e2e.js 'save torture:'
+
+More intensive runs:
+
+    TORTURE_CONVERSION_CASES=100 TORTURE_BACKEND_OPS=200 python3 -m unittest -v tests.backend_test tests.torture_conversion
+    node tests/torture.js --seeds=1,7,42,99,2026,8192 --cases=2000
+    E2E_SEEDS=1,2,3,4,17,31 E2E_OPS=100 node tests/e2e.js 'save torture:'
+    node tests/e2e.js
+
+The parser fuzzer generates valid and incomplete LaTeX and checks exact
+token and segment round-trips, including accents, equations, tables and
+games. A failure prints the seed, case and reproducing source. The metadata
+fuzzer generates seven kinds of front matter and verifies titles, authors,
+affiliations, keywords, abstract, running title and acknowledgements.
+Conversion is tested for every destination class, normal and anonymous.
+Backend tests use the real HTTP API: concurrent and repeated saves, stale
+hashes, history, invalid paths, metadata JSON overrides, missing class
+preflight, root/subdirectory output and overwrites. Browser fuzzing simulates
+editing, undo, save conflicts and outside changes, printing the seed and
+operation trace on a failure.
+
+GitHub Actions > Torture tests (scheduled and manual) > Run workflow starts
+the deep suite on demand. It also runs weekly (Sunday, 03:17 UTC), records
+reproducible logs for 14 days and installs TeX to attempt real named and
+anonymous IEEEtran/LNCS/article PDF conversions. The faster PR checks do not
+claim to validate every venue PDF. Some less-common proprietary venue classes
+must be installed separately; failures and omissions are reported explicitly.
+
 ## Conversion between venues
 
 *Paper…* opens the metadata (read from the front matter of any class:

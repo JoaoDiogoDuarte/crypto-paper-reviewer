@@ -2,6 +2,8 @@
 """Backend regression tests for save, document switching, builds and launching."""
 import json
 import os
+import random
+from concurrent.futures import ThreadPoolExecutor
 import shutil
 import sys
 import tempfile
@@ -68,6 +70,116 @@ class BackendTest(unittest.TestCase):
                 return error.code, json.loads(error.read())
             finally:
                 error.close()
+
+    def test_torture_repeated_saves_conflicts_and_history(self):
+        """HTTP saves are atomic and history chains never diverge (seed is reproducible)."""
+        seed = int(os.environ.get('TORTURE_BACKEND_SEED', '91731'))
+        rng = random.Random(seed)
+        expected = open(self.main, encoding='utf-8').read()
+        count = int(os.environ.get('TORTURE_BACKEND_OPS', '80'))
+        previous_hash = server.sha(expected)
+        edits = ('João', r'\~ao', r'\protect\url{https://example.org/a?b=2}',
+                 r'\cite{A}', 'A & B', '日本語', ' $\u03b1$ ', '\r\n')
+        before_requests = server.BUILDER.requests
+        for n in range(count):
+            value = rng.choice(edits) + ' seed-' + str(seed) + '-' + str(n)
+            new = expected.replace('\\end{document}', value + '\\end{document}')
+            status, result = self.post('/api/save', {
+                'name': 'main.tex', 'base': previous_hash, 'text': new, 'batch': 'run-' + str(n)})
+            self.assertEqual(status, 200, (seed, n, result))
+            self.assertEqual(result['hash'], server.sha(new), (seed, n))
+            with open(self.main, encoding='utf-8', newline='') as actual:
+                self.assertEqual(actual.read(), new, (seed, n))
+            # An out-of-date editor must never win or create a history entry.
+            stale, _ = self.post('/api/save', {
+                'name': 'main.tex', 'base': previous_hash, 'text': expected})
+            self.assertEqual(stale, 409, (seed, n))
+            expected, previous_hash = new, result['hash']
+        log = [e for e in server.history_entries() if e['name'] == 'main.tex']
+        self.assertEqual(len(log), count)
+        for left, right in zip(log, log[1:]):
+            self.assertEqual(left['after'], right['before'], seed)
+        self.assertEqual(log[-1]['after'], server.sha(expected))
+        self.assertEqual(server.BUILDER.requests, before_requests + count)
+
+    def test_torture_concurrent_saves_one_winner(self):
+        """Two simultaneous saves from one base cannot silently overwrite each other."""
+        count = int(os.environ.get('TORTURE_CONCURRENT_ROUNDS', '12'))
+        rng = random.Random(7254)
+        for n in range(count):
+            source = open(self.main, encoding='utf-8').read()
+            options = [source.replace('\\end{document}', label + '\\end{document}')
+                       for label in (f'Writer A {n}-{rng.randrange(100000)}',
+                                     f'Writer B {n}-{rng.randrange(100000)}')]
+            base = server.sha(source)
+            def write(text):
+                return self.post('/api/save', {
+                    'name': 'main.tex', 'base': base, 'text': text, 'batch': f'parallel-{n}'})
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(write, options))
+            self.assertEqual(sorted(r[0] for r in results), [200, 409], (n, results))
+            winner = options[next(i for i, r in enumerate(results) if r[0] == 200)]
+            with open(self.main, encoding='utf-8') as current:
+                self.assertEqual(current.read(), winner)
+
+    def test_torture_save_rejects_outside_files_and_keeps_source(self):
+        original = open(self.main, encoding='utf-8').read()
+        for path in ('../outside.tex', '../../etc/passwd', '/tmp/outside.tex',
+                     'missing.tex', '.paper-editor/history/evil.tex',
+                     'main.tex/../../outside.tex', 'other.txt'):
+            code, _ = self.post('/api/save', {
+                'name': path, 'base': server.sha(original), 'text': 'LOST'})
+            self.assertIn(code, (400, 409), path)
+        with open(self.main, encoding='utf-8') as current:
+            self.assertEqual(current.read(), original)
+
+    def test_torture_failed_history_write_never_writes_manuscript(self):
+        original = open(self.main, encoding='utf-8').read()
+        # Save is refused if the previous version cannot be backed up safely.
+        with mock.patch('server.history_put', side_effect=OSError('read-only archive')):
+            status, result = self.post('/api/save', {
+                'name': 'main.tex', 'base': server.sha(original), 'text': 'corrupt'})
+        self.assertEqual(status, 500)
+        self.assertIn('nothing was written', result['error'])
+        self.assertEqual(open(self.main, encoding='utf-8').read(), original)
+
+    def test_torture_metadata_saved_overrides_and_source_autodetection(self):
+        tex = (r'\documentclass[conference]{IEEEtran}' + '\n'
+               + r'\title{First version}\ifanon\author{\IEEEauthorblockN{Anonymous authors}}' + '\n'
+               + r'\else\author{\IEEEauthorblockN{João Diogo Duarte}'
+               + r'\IEEEauthorblockA{\textit{University of Porto}\\Porto, Portugal}}\fi' + '\n'
+               + r'\begin{IEEEkeywords}cryptography, proof games\end{IEEEkeywords}' + '\n'
+               + r'\begin{abstract}An initial abstract.\end{abstract}' + '\n'
+               + r'\begin{document}\end{document}')
+        with open(self.main, 'w', encoding='utf-8') as f:
+            f.write(tex)
+        info = server.metadata()['metadata']
+        self.assertEqual(info['authors'][0]['name'], 'João Diogo Duarte')
+        self.assertEqual(info['affiliations'][0]['city'], 'Porto')
+        self.assertEqual(info['keywords'], ['cryptography', 'proof games'])
+        # An unmodified form must store no overrides; the source stays authoritative.
+        status, _ = self.post('/api/metadata', info)
+        self.assertEqual(status, 200)
+        p = os.path.join(server.STATE, 'metadata.json')
+        self.assertEqual(json.load(open(p, encoding='utf-8')), {})
+        changed_source = tex.replace('First version', 'Second version')
+        with open(self.main, 'w', encoding='utf-8') as f:
+            f.write(changed_source)
+        self.assertEqual(server.metadata()['metadata']['title'], 'Second version')
+        override = server.metadata()['metadata']
+        override['running_title'] = 'Manual short title'
+        status, _ = self.post('/api/metadata', override)
+        self.assertEqual(status, 200)
+        saved = json.load(open(p, encoding='utf-8'))
+        self.assertEqual(saved, {'running_title': 'Manual short title'})
+        with open(self.main, encoding='utf-8') as f:
+            self.assertEqual(f.read(), changed_source)
+        newer = changed_source.replace('Second version', 'Third version')
+        with open(self.main, 'w', encoding='utf-8') as f:
+            f.write(newer)
+        fetched = server.metadata()['metadata']
+        self.assertEqual(fetched['title'], 'Third version')
+        self.assertEqual(fetched['running_title'], 'Manual short title')
 
     def test_save_validation_conflict_and_atomic_write(self):
         with open(self.main) as f:
@@ -217,6 +329,50 @@ class BackendTest(unittest.TestCase):
         self.assertEqual(run.call_count, 2)
         self.assertFalse(os.path.exists(p))
         self.assertTrue(os.listdir(os.path.join(server.CACHE, 'bad-aux')))
+
+    def test_torture_conversion_preflight_output_isolation_and_overwrite(self):
+        """A missing class must create no output; conversions go to a subdir."""
+        original = server.read('main.tex')
+        names = {'ieee': 'IEEEtran.cls', 'llncs': 'llncs.cls',
+                 'iacrcc': 'iacrcc.cls', 'iacrtrans': 'iacrtrans.cls',
+                 'acmart': 'acmart.cls', 'lipics': 'lipics-v2021.cls',
+                 'article': 'article.cls'}
+        with mock.patch('server.shutil.which', return_value=None):
+            for target, class_name in names.items():
+                with self.subTest(target=target):
+                    with self.assertRaisesRegex(ValueError, class_name.replace('.', r'\.')):
+                        server.run_convert(target, False, 'output.tex', False)
+                    self.assertFalse(os.path.isdir(os.path.join(self.tmp, 'converted', target)))
+        calls = []
+        def fake_run(args, **kwargs):
+            calls.append((args, kwargs))
+            if args[0] == 'kpsewhich':
+                return server.subprocess.CompletedProcess(args, 0, stdout='/fake/latex/class.cls\n', stderr='')
+            if args[0] == 'latexmk':
+                return server.subprocess.CompletedProcess(args, 0, stdout='Done', stderr='')
+            raise AssertionError('unexpected conversion subprocess: ' + repr(args))
+        with mock.patch('server.shutil.which', return_value='/usr/bin/kpsewhich'):
+            with mock.patch('server.subprocess.run', side_effect=fake_run):
+                for target in names:
+                    with self.subTest(target=target):
+                        name = 'out-' + target + '.tex'
+                        result = server.run_convert(target, False, name, False)
+                        self.assertEqual(result['file'], os.path.join('converted', target, name))
+                        self.assertTrue(result['built'])
+                        converted = os.path.join(self.tmp, result['file'])
+                        self.assertTrue(os.path.isfile(converted))
+                        self.assertIn(r'\begin{document}', open(converted, encoding='utf-8').read())
+                        with self.assertRaises(FileExistsError):
+                            server.run_convert(target, False, name, False)
+                root = server.run_convert('article', True, 'main-article.tex', False, root=True)
+        self.assertEqual(root['file'], 'main-article.tex')
+        self.assertTrue(os.path.isfile(os.path.join(self.tmp, 'main-article.tex')))
+        self.assertEqual(server.read('main.tex'), original)
+        latexmk = [(args, kw) for args, kw in calls if args[0] == 'latexmk']
+        self.assertEqual(len(latexmk), len(names) + 1)
+        for args, kw in latexmk:
+            self.assertTrue(kw['env']['TEXINPUTS'].startswith(self.tmp + '//:'))
+            self.assertTrue(os.path.isdir(kw['cwd']))
 
     def test_missing_class_does_not_write_converted_file(self):
         with mock.patch('server.shutil.which', return_value=None):
