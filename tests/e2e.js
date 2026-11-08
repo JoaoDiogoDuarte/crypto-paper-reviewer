@@ -1264,8 +1264,8 @@ Object.assign(TESTS, {
 \newcommand{\gamechange}[2]{#2}`).replace(String.raw`\fbox{box}`, games);
     env.write('main.tex', source);
     await page.eval(`load(false, ['main.tex'])`);
-    await page.click(`js:ORDER.find((s) => s.kind === 'figure').el.querySelector('div.small, img')`, { count: 2 });
-    await page.waitFor(`FV.games.length === 2 && !$('#figview').hidden`, 8000, 'two parsed games');
+    await page.eval(`openFigure(ORDER.find((s) => s.kind === 'figure'))`);
+    await page.waitFor(`FV.games && FV.games.length === 2 && !$('#figview').hidden`, 8000, 'two parsed games');
     eq(await page.eval(`gameColorAvailable()`), true, 'source defines the game change macro');
     await page.eval(`(() => {
       const choice = [...document.querySelectorAll('.game:first-child .gline select[aria-label="Insert algorithmic step"]')]
