@@ -3280,6 +3280,16 @@ function colorGameLine(g, index, color) {
   showFigTab('games'); figureEditStatus();
 }
 
+function focusGameStep(g, index) {
+  const gi = FV.games.indexOf(g);
+  if (gi < 0) return;
+  requestAnimationFrame(() => {
+    const game = document.querySelectorAll('.games-grid .game')[gi];
+    const row = game && game.querySelectorAll('.gline')[index];
+    const edit = row && row.querySelector('.gtext, textarea');
+    if (edit) edit.focus();
+  });
+}
 function gameInsertStep(g, index, kind, indent) {
   const variants = {
     state: [indent + '\\State $x \\gets y$'],
@@ -3297,7 +3307,7 @@ function gameInsertStep(g, index, kind, indent) {
   if (!variants[kind]) return;
   figureCheckpoint();
   g.lines.splice(index + 1, 0, ...variants[kind].map(parseGameLine));
-  showFigTab('games'); figureEditStatus();
+  showFigTab('games'); figureEditStatus(); focusGameStep(g, index + 1);
 }
 function gameMoveStep(g, index, direction) {
   const other = index + direction;
@@ -3311,7 +3321,7 @@ function gameMoveStep(g, index, direction) {
   }
   figureCheckpoint();
   [g.lines[index], g.lines[other]] = [g.lines[other], g.lines[index]];
-  showFigTab('games'); figureEditStatus();
+  showFigTab('games'); figureEditStatus(); focusGameStep(g, other);
 }
 function editWholeGame(op, index, direction = 0) {
   const src = figureWithEdits();
@@ -3450,7 +3460,8 @@ function renderGames(body) {
   body.append(el('p', 'small',
     'Edit a line in place. The Insert menu offers statements, If/Else, While, For, Repeat, Return, and comments. ' +
     'Up/Down reorder adjacent statements; game-panel Up/Down move independent games when safe. ' +
-    'Box colors use the document-defined gamechange macro. Ctrl+Z/Y undo/redo; Ctrl+Enter applies, then Save writes the file.'));
+    'Box colors use the document-defined gamechange macro. Enter inserts a statement; Alt+Up/Down moves it. ' +
+    'Ctrl+Z/Y undo/redo; Ctrl+Enter applies; Ctrl+S applies and saves.'));
 }
 
 function algoLine(g, l, li, depth) {
@@ -3657,6 +3668,29 @@ document.addEventListener('keydown', (e) => {
     if (key === 'y' || e.shiftKey) figureRedo(); else figureUndo();
   } else if (mod && key === 'enter') {
     e.preventDefault(); e.stopImmediatePropagation(); applyFigure();
+  } else if (mod && !e.altKey && key === 's') {
+    e.preventDefault(); e.stopImmediatePropagation();
+    applyFigure();
+    if ($('#figview').hidden) save();
+  } else if (!mod && e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown') &&
+             e.target.closest('.gline')) {
+    e.preventDefault(); e.stopImmediatePropagation();
+    const row = e.target.closest('.gline');
+    const panel = row.closest('.game');
+    const gi = [...document.querySelectorAll('.games-grid .game')].indexOf(panel);
+    const li = [...panel.querySelectorAll('.gline')].indexOf(row);
+    if (FV.games[gi]) gameMoveStep(FV.games[gi], li, e.key === 'ArrowUp' ? -1 : 1);
+  } else if (!mod && !e.altKey && key === 'enter' && e.target.closest('.gline .gtext')) {
+    e.preventDefault(); e.stopImmediatePropagation();
+    const row = e.target.closest('.gline'), panel = row.closest('.game');
+    const gi = [...document.querySelectorAll('.games-grid .game')].indexOf(panel);
+    const li = [...panel.querySelectorAll('.gline')].indexOf(row);
+    const g = FV.games[gi], l = g && g.lines[li];
+    if (l) {
+      const indent = /^\\s*/.exec(l.prefix)[0] +
+        (BLOCK_OPEN.has(l.cmd) || l.cmd === 'Else' || l.cmd === 'ElsIf' ? '  ' : '');
+      gameInsertStep(g, li, 'state', indent);
+    }
   } else if (e.key === 'Escape') {
     e.preventDefault(); e.stopImmediatePropagation(); closeFigure();
   }
