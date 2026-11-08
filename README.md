@@ -101,14 +101,25 @@ folder holds only the program and the shared voice models.
   blocks can be changed by those rules.
 ## Review workflow notes
 
-- **New file** has been removed. Existing documents remain editable and can be
-  compared through the diff view, which now includes a clickable change minimap.
+- **New file** has been removed. Existing documents remain editable. **Diff**
+  compares against the last save (unsaved edits) or the last Git commit and
+  includes a clickable change minimap.
 - **Metadata** is detected from the LaTeX source; nonmatching values are saved
   as overrides in `.paper-editor/metadata.json`. The dialog can restore the
   extracted values. Metadata edits do **not** rewrite the source `\author`.
 - **Conversion** checks the required `.cls` first. Converted mains default to
   `converted/<venue>/` (the original folder can be chosen explicitly).
-  Missing classes require installing their TeX packages separately.
+  Missing classes require installing their TeX packages separately. For LNCS,
+  use Springer's official [llncs package](https://ctan.org/pkg/llncs), which
+  includes `llncs.cls`, its documentation and the `splncs04.bst` bibliography
+  style. The converter removes counter/theorem aliases for environments that
+  the target class already defines (including LNCS `lemma`).
+- **IACR class note:** the official [IACR LaTeX project](https://github.com/IACR/latex)
+  says `iacrcc.cls` has been replaced by `iacrj.cls`; this editor's `iacrcc`
+  conversion target remains a **legacy** option, not the current IACR template.
+- **History** lets you delete an individual saved snapshot or clear all editor
+  snapshots. This deletes only `.paper-editor/history` entries and unused blobs;
+  it does not delete source files or Git commits.
 
 
 ## Debugging TeX builds
@@ -137,7 +148,7 @@ Online voices send the text being read to Microsoft or Google.
 
     node tests/e2e.js                        # the page in headless Chrome: typing, keys, paste, saving, conflicts
     node tests/roundtrip.js ~/papers         # every .tex parses and re-serializes byte for byte
-    python3 -m unittest tests.backend_test   # save, build, document switching and launcher tests
+    python3 -m unittest tests.backend_test tests.test_convert_contract
     tests/selftest.py ~/papers/a ~/papers/b  # the page itself, in headless Firefox
 
 `tests/e2e.js` (Node 22, Chrome or Chromium; `CHROME=…` to choose) runs a real
@@ -160,12 +171,12 @@ IEEEtran, llncs, iacrcc, iacrtrans, svjour3, acmart, LIPIcs, article;
 your edits are kept in `.paper-editor/metadata.json`) and converts the
 paper to another class: IEEEtran, llncs, iacrcc, iacrtrans, acmart,
 LIPIcs or article, optionally anonymous. The form shows what the target
-needs (an ORCID, a country, a licence, …). The result is a new main file
-beside the old one, built at once; the section files are reused
-unchanged. See `docs/styles.md` for what differs between the classes and
+needs (an ORCID, a country, a licence, …). The result is a new main under `converted/<venue>/` by default (or beside the
+original main if explicitly selected), built at once; the section files are
+reused unchanged. See `docs/styles.md` for what differs between the classes and
 how the converter handles it, and `tests/convert_matrix.py`, which
-converts the fixtures into every class and compiles the results (all 70
-build, and no anonymous PDF shows an author name).
+generates the venue variants for fixture-based testing. Builds still depend
+on installed classes, packages and their versions.
 
 Anonymous versions use the class's own mechanism where there is one and
 placeholders otherwise, drop acknowledgements from the main file and the
@@ -175,7 +186,7 @@ to check.
 
 ## Other features
 
-Diff view against the last commit or the editor's start; a figure viewer
+Diff view against the last save or the last commit; a figure viewer
 (double-click: image, extracted text, LaTeX) with a game editor for
 algorithmicx and cryptocode pseudocode and a cell editor for tables; a
 shortcut editor (`~/.config/paper-editor/keys.json`); a switcher between
