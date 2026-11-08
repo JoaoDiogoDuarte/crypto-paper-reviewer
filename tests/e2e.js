@@ -509,6 +509,13 @@ const TESTS = {
     eq(result.original, src, 'math source must be unchanged');
     eq(result.accent, 'Ç', 'text accent must be typeset');
     eq(result.accentSource, accented, 'accent source must be unchanged');
+    const acknowledgements = 'Funda\\c{c}\\~ao para a Ci\\^encia (\\protect\\url{https://example.org})';
+    const js = '(() => { const original = ' + JSON.stringify(acknowledgements) +
+      '; const node = document.createElement("div"); renderTokens(L.tokenize(original), node, {}); ' +
+      'return { shown: node.textContent, source: ser(node) }; })()';
+    const acks = await page.eval(js);
+    has(acks.shown, 'Fundação para a Ciência', 'unbraced accents are rendered as Unicode');
+    eq(acks.source, acknowledgements, 'mixed accent and protected URL source unchanged');
     untouched(env, 'main.tex', 'sections/body.tex');
   },
 
