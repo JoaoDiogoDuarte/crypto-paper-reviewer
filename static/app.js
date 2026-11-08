@@ -3358,6 +3358,81 @@ function renderWordDiff(oldSrc, newSrc, into) {
   }
 }
 
+// ---- change peek: hover an edited block's change bar (left of the text)
+// to see what changed since the last save, word by word, and revert it;
+// as in VS Code's gutter.
+const PEEK = { seg: null, timer: null };
+function peekBox() {
+  let box = document.getElementById('peek');
+  if (!box) {
+    box = el('div'); box.id = 'peek'; box.hidden = true; box.setAttribute('role', 'tooltip');
+    box.addEventListener('mouseleave', () => hidePeek());
+    document.body.append(box);
+  }
+  return box;
+}
+function hidePeek() { clearTimeout(PEEK.timer); PEEK.seg = null; const b = document.getElementById('peek'); if (b) b.hidden = true; }
+function showPeek(seg) {
+  if (DIFF_SHOWN || !seg.el || !seg.el.classList.contains('edited')) return;
+  const now = segSource(seg, [], null, false);
+  if (now === seg.src) return;
+  const box = peekBox();
+  box.textContent = '';
+  const head = el('div', 'peek-head');
+  head.append(el('span', '', `Changed since the last save · ${seg.file}`));
+  const revert = el('button', '', '↶ Revert block');
+  revert.title = 'Put this block back as it was at the last save (Ctrl+Z undoes)';
+  revert.onclick = () => {
+    const orig = seg.src;
+    hidePeek();
+    snapshot();
+    structural(() => { seg.src = orig; });
+    markEdited();
+    toast('Block reverted to the last save', 'ok');
+  };
+  head.append(revert);
+  const body = el('div', 'peek-body');
+  const a = contentOf(seg, seg.src), b = contentOf(seg, now);
+  if (a === b) body.append(el('div', 'small', 'Changed outside the text shown (LaTeX of the block):'));
+  renderWordDiff(a === b ? seg.src : a, a === b ? now : b, body);
+  box.append(head, body);
+  const r = seg.el.getBoundingClientRect();
+  box.hidden = false;
+  const w = Math.min(560, innerWidth - 24);
+  box.style.width = w + 'px';
+  box.style.left = Math.max(12, Math.min(innerWidth - w - 12, r.left)) + 'px';
+  const h = box.getBoundingClientRect().height;
+  const below = r.bottom + 6, above = r.top - h - 6;
+  box.style.top = (above > chromeBottom() + 4 ? above : Math.min(below, innerHeight - h - 8)) + 'px';
+  PEEK.seg = seg;
+}
+// It opens only once the pointer has rested on the bar (600 ms: passing over
+// it does nothing), or at once on a click; typing or scrolling cancels it, and
+// it waits a moment before closing so that the pointer can reach Revert.
+function barSeg(e) {
+  const segEl = e.target.closest && e.target.closest('#doc .seg.edited');
+  if (!segEl || !segEl.seg) return null;
+  const r = segEl.getBoundingClientRect();
+  return e.clientX < r.left + 2 && e.clientX > r.left - 14 ? segEl.seg : null;   // on the change bar
+}
+document.addEventListener('mousemove', (e) => {
+  if (e.target.closest && e.target.closest('#peek')) { clearTimeout(PEEK.timer); PEEK.wait = null; return; }
+  const hit = barSeg(e);
+  if (hit && hit === PEEK.seg) { clearTimeout(PEEK.timer); return; }   // back on the open one
+  if (hit && hit === PEEK.wait) return;                                // still resting
+  clearTimeout(PEEK.timer);
+  PEEK.wait = hit;
+  if (!hit) { if (PEEK.seg) PEEK.timer = setTimeout(hidePeek, 250); return; }
+  PEEK.timer = setTimeout(() => { PEEK.wait = null; showPeek(hit); }, 600);
+});
+document.addEventListener('mousedown', (e) => {
+  const hit = barSeg(e);
+  if (hit) { e.preventDefault(); clearTimeout(PEEK.timer); PEEK.wait = null; showPeek(hit); }
+}, true);
+const cancelPeek = () => { clearTimeout(PEEK.timer); PEEK.wait = null; if (PEEK.seg) hidePeek(); };
+window.addEventListener('scroll', cancelPeek, { passive: true });
+document.addEventListener('keydown', cancelPeek, true);
+
 function contentOf(seg, src) {
   // the editable part of a block, as source: a heading's title, a caption
   if (seg.kind === 'heading') { const h = L.headingParts(src); return h ? h.title : src; }
@@ -3388,7 +3463,10 @@ async function diffOn() {
     if (base === FILES[name].text) continue;
     changedFiles++;
     const old = parseFile(name, base).filter((sg) => !['gap', 'hidden', 'input'].includes(sg.kind));
-    const ops = lcs(old, cur, (a, b) => a.src === b.src && a.kind === b.kind) ||
+    // a block edited since it was read: its source now, not as it was read
+    const now = new Map(cur.map((sg) => [sg, sg.touched || sg.figSrc ? segSource(sg, [], null, false) : sg.src]));
+    for (const [sg, src] of now) sg.diffSrc = src;   // the page is about to show marks: read nothing back from it
+    const ops = lcs(old, cur, (a, b) => a.src === now.get(b) && a.kind === b.kind) ||
       [...old.map((o) => ['-', o, null]), ...cur.map((c) => ['+', null, c])];
     // pair runs of deletions and insertions of the same kind as modified blocks
     for (let i = 0; i < ops.length; i++) {
@@ -3404,7 +3482,7 @@ async function diffOn() {
           const d = dels.splice(k, 1)[0];
           b.el.classList.add('diff-changed');
           const target = b.edit && b.edit.tagName !== 'TEXTAREA' ? b.edit : null;
-          if (target) renderWordDiff(contentOf(d, d.src), contentOf(b, b.src), target);
+          if (target) renderWordDiff(contentOf(d, d.src), contentOf(b, now.get(b)), target);
           DIFF.marks.push(b.el);
         } else { b.el.classList.add('diff-new'); DIFF.marks.push(b.el); }
       }
@@ -3521,7 +3599,9 @@ const gameLineSrc = (l) => L.gameLineSrc(l);
 
 function openFigure(seg) {
   FV.seg = seg;
-  FV.src = segSource(seg, [], null, false);   // with any caption edit made since
+  // with any caption edit made since; while the diff view shows marks in the
+  // page, the source it was compared with
+  FV.src = DIFF_SHOWN ? (seg.diffSrc !== undefined ? seg.diffSrc : seg.src) : segSource(seg, [], null, false);
   FV.games = parseGames(FV.src);
   FV.tables = L.parseTabulars(FV.src);
   FV.undo = []; FV.redo = []; FV.lastEditor = null; FV.dragIndex = -1;
@@ -3529,7 +3609,8 @@ function openFigure(seg) {
   $('#fv-games-tab').hidden = !FV.games.length;
   $('#fv-cells-tab').hidden = !FV.tables.length;
   $('#figview').hidden = false;
-  showFigTab(FV.games.length ? 'games' : FV.tables.length ? 'cells' : 'image');
+  // the diff view carries on in the window: it opens on what changed
+  showFigTab(DIFF.on ? 'changes' : FV.games.length ? 'games' : FV.tables.length ? 'cells' : 'image');
 }
 
 function showFigTab(tab) {
@@ -3559,13 +3640,49 @@ function showFigTab(tab) {
     renderGames(body);
   } else if (tab === 'cells') {
     renderCells(body);
+  } else if (tab === 'changes') {
+    renderFigureChanges(body);
   }
+}
+
+// The figure's LaTeX now (with the draft edits of this window) against the
+// last save, or the last commit when the diff view compares with it; the
+// figure is found in the old file by its \label, else by its place.
+async function renderFigureChanges(body) {
+  const seg = FV.seg;
+  const now = figureWithEdits();
+  const ref = DIFF.on ? $('#diffbase').value : 'save';
+  let old = seg.src;
+  if (ref === 'head') {
+    old = null;
+    const r = await fetch(`/api/baseline?name=${encodeURIComponent(seg.file)}&ref=head`).catch(() => null);
+    const text = r && r.ok ? (await r.json()).text : null;
+    if (text !== null && text !== undefined) {
+      const floats = parseFile(seg.file, text).filter((s) => s.kind === seg.kind);
+      const lab = (src) => (/\\label\{([^}]*)\}/.exec(src) || [])[1];
+      const mine = lab(seg.src) || lab(now);
+      const same = floats.find((s) => mine && lab(s.src) === mine) ||
+        floats[ORDER.filter((s) => s.file === seg.file && s.kind === seg.kind).indexOf(seg)];
+      old = same ? same.src : '';
+    }
+  }
+  if (FV.tab !== 'changes' || FV.seg !== seg) return;   // another tab was chosen meanwhile
+  body.textContent = '';
+  const what = ref === 'head' ? 'the last commit' : 'the last save';
+  if (old === null) { body.append(el('p', 'small', 'The file is not in the last commit.')); return; }
+  if (old === now) { body.append(el('p', 'small', `No changes in this ${seg.kind} since ${what}.`)); return; }
+  body.append(el('p', 'small', `Changes in this ${seg.kind} since ${what}` + (FV.undo.length ? ', with the edits made here (not applied yet)' : '') + ':'));
+  const pre = el('pre', 'hist-diff', '');
+  lineDiff(old, now, pre);
+  body.append(pre);
 }
 
 // Draft-only undo history: source remains untouched until Apply, then Save.
 function updateGameActions() {
-  const editing = !!FV.seg && FV.tab === 'games';
-  for (const id of ['#fv-undo', '#fv-redo', '#fv-add-game']) $(id).hidden = !editing;
+  // games and table cells share one draft history
+  const editing = !!FV.seg && (FV.tab === 'games' || FV.tab === 'cells');
+  for (const id of ['#fv-undo', '#fv-redo']) $(id).hidden = !editing;
+  $('#fv-add-game').hidden = !FV.seg || FV.tab !== 'games';
   $('#fv-undo').disabled = !editing || !FV.undo.length;
   $('#fv-redo').disabled = !editing || !FV.redo.length;
   $('#fv-add-game').disabled = !editing || !FV.games.some((g) => g.kind === 'algo' && g.env === 'gameenv');
@@ -3936,6 +4053,7 @@ function parseGamesKeepingEdits(src) {
 }
 
 function applyFigure() {
+  if (DIFF.on) { toast('Leave the diff view (± Diff) to apply changes', 'error'); return; }
   const seg = FV.seg;
   const src = figureWithEdits();
   if (src === FV.src) { closeFigure(); return; }
@@ -3945,8 +4063,19 @@ function applyFigure() {
   seg.touched = true;
   // the caption shown is the new caption, if it changed in the LaTeX
   if (seg.edit && seg.parts.caption !== undefined) { seg.edit.textContent = ''; renderTokens(L.tokenize(seg.parts.caption), seg.edit, {}); }
+  // the picture shows the old source until the next build: a table can be
+  // previewed now; a figure is dimmed, with a note, so it does not mislead
+  const img = seg.el && seg.el.querySelector(':scope > div:first-child > img');
+  if (img) {
+    const live = seg.kind === 'table' ? previewTabular(src) : null;
+    if (live) img.replaceWith(live);
+    else if (!img.classList.contains('stale')) {
+      img.classList.add('stale');
+      img.after(el('div', 'small stale-note', 'Changed: the picture updates after the next save'));
+    }
+  }
   markEdited();
-  banner('Figure updated; save to write the file. The image updates after the build.');
+  toast('Figure updated: save (Ctrl+S) to write it', 'ok');
   closeFigure(true);
 }
 
