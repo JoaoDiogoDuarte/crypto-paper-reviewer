@@ -96,6 +96,23 @@ function verify(src) {
     }
   }
 }
+// Exact regressions: partial environment commands used to move the parser's
+// input cursor backwards and eventually exhaust the JavaScript heap.
+const INCOMPLETE = [
+  '\\begin{', '\\end{', '\\begin{equation', '\\begin{figure',
+  '\\begin{tabular}{', '\\newcommand{', '\\c{', '\\protect\\url{',
+  '\\verb|no closing delimiter', '\\begin{align*}a &= b',
+  '\\begin{figure}\n\\caption{unfinished', '% comment never closed',
+];
+for (const src of INCOMPLETE) {
+  try { verify(src); }
+  catch (error) {
+    console.error('TORTURE incomplete-command regression: ' + JSON.stringify(src));
+    throw error;
+  }
+}
+console.log('ok ' + INCOMPLETE.length + ' incomplete-command crash regressions');
+
 let total = 0;
 for (const seed of seeds) {
   const R = rng(seed);
