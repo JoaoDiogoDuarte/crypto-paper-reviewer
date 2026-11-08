@@ -152,8 +152,11 @@
       <button data-tab="games" id="fv-games-tab">Games</button><button data-tab="cells" id="fv-cells-tab">Cells</button><button data-tab="latex">LaTeX</button>
     </span>
     <span class="spacer"></span>
-    <button id="fv-apply" title="Use the edited games or LaTeX (save to write the file)">Apply</button>
-    <button id="fv-close" title="Esc">Close</button>
+    <span id="fv-status" role="status" aria-live="polite"></span>
+    <button id="fv-undo" title="Undo game/table edits (Ctrl+Z)" disabled>Undo</button>
+    <button id="fv-redo" title="Redo game/table edits (Ctrl+Shift+Z)" disabled>Redo</button>
+    <button id="fv-apply" title="Apply edits to the review page (Ctrl+Enter), then Save to write the file">Apply</button>
+    <button id="fv-close" title="Esc - close without applying changes">Close</button>
   </div>
   <div id="fv-body"></div>
 </div>
