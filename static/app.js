@@ -3313,6 +3313,47 @@ function gameMoveStep(g, index, direction) {
   [g.lines[index], g.lines[other]] = [g.lines[other], g.lines[index]];
   showFigTab('games'); figureEditStatus();
 }
+function editWholeGame(op, index, direction = 0) {
+  const src = figureWithEdits();
+  const games = parseGames(src);
+  const game = games[index];
+  if (!game || game.env !== 'gameenv' || !Number.isInteger(game.blockStart)) return;
+  const safeGap = (a, b) => /^\s*(?:\\gamebreak\s*)?$/.test(src.slice(a.blockEnd, b.blockStart));
+  let result = null;
+  if (op === 'move') {
+    const other = games[index + direction];
+    if (!other || other.env !== 'gameenv') return;
+    const first = direction < 0 ? other : game;
+    const second = direction < 0 ? game : other;
+    if (!safeGap(first, second)) {
+      banner('Cannot safely move game across other LaTeX; use the LaTeX tab.');
+      return;
+    }
+    result = src.slice(0, first.blockStart) + src.slice(second.blockStart, second.blockEnd) +
+      src.slice(first.blockEnd, second.blockStart) + src.slice(first.blockStart, first.blockEnd) +
+      src.slice(second.blockEnd);
+  } else if (op === 'add') {
+    const divider = /\\(?:gamebreak|begin\{games\})/.test(src) ? '\n\\gamebreak\n' : '\n\n';
+    const newGame = '\n\\begin{gameenv}{New game}\n  \\State $x \\gets y$\n\\end{gameenv}\n';
+    result = src.slice(0, game.blockEnd) + divider + newGame + src.slice(game.blockEnd);
+  } else if (op === 'delete') {
+    if (!confirm('Delete this complete game? Undo is available until Apply.')) return;
+    const next = games[index + 1];
+    const previous = games[index - 1];
+    if (next && safeGap(game, next)) {
+      result = src.slice(0, game.blockStart) + src.slice(next.blockStart);
+    } else if (previous && safeGap(previous, game)) {
+      result = src.slice(0, previous.blockEnd) + src.slice(game.blockEnd);
+    } else {
+      result = src.slice(0, game.blockStart) + src.slice(game.blockEnd);
+    }
+  }
+  if (result === null || result === src) return;
+  figureCheckpoint();
+  figureResetFromSource(result);
+  showFigTab('games');
+  figureEditStatus();
+}
 function openFigure(seg) {
   FV.seg = seg;
   FV.src = segSource(seg, [], null, false);   // with any caption edit made since
