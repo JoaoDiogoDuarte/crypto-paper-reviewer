@@ -3356,6 +3356,32 @@ function gameRemove(index) {
 }
 $('#fv-add-game').onclick = () => gameInsert(FV.games.length - 1);
 
+const GAME_COLORS = {
+  none: 'No mark',
+  'yellow!20': 'Yellow (change)',
+  'cyan!20': 'Cyan (alternative)',
+  'green!20': 'Green (checked)',
+  'magenta!15': 'Magenta (important)',
+};
+function colorMarked(line) {
+  return /^\\colorbox\{(yellow!20|cyan!20|green!20|magenta!15)\}\{([\s\S]*)\}$/.exec(line.content);
+}
+function gameChangeColor(line, color) {
+  if (!line || line.raw || !Object.prototype.hasOwnProperty.call(GAME_COLORS, color)) return;
+  const match = colorMarked(line);
+  const bare = match ? match[2] : line.content;
+  if (color !== 'none' && !Object.values(FILES).some((f) =>
+    /\\usepackage(?:\[[^\]]*\])?\{[^}]*xcolor[^}]*\}/.test(f.text))) {
+    banner('Colour marking requires \\usepackage{xcolor} in the paper preamble.');
+    return;
+  }
+  const result = color === 'none' ? bare : '\\colorbox{' + color + '}{' + bare + '}';
+  if (result === line.content) return;
+  gameCheckpoint();
+  line.content = result;
+  showFigTab('games');
+}
+
 function renderGames(body) {
   const grid = el('div', 'games-grid');
   FV.games.forEach((g, gi) => {
