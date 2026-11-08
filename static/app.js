@@ -801,8 +801,12 @@ function joinWithPrevious(seg) {
 
 let drawerChip = null, drawerSeg = null;
 
-function openDrawer(chipEl, seg, title) {
-  drawerChip = chipEl; drawerSeg = seg;
+// `fresh`: the chip was just inserted to be written here; closing the
+// drawer without applying takes it out again.
+let drawerFresh = false;
+function openDrawer(chipEl, seg, title, fresh = false) {
+  if (drawerChip && drawerChip !== chipEl) closeDrawer(false);   // a new formula left unwritten
+  drawerChip = chipEl; drawerSeg = seg; drawerFresh = fresh;
   $('#drawer-title').textContent = title || 'Edit LaTeX';
   const ta = $('#drawer-src');
   ta.value = chipEl.dataset.src;
@@ -824,27 +828,43 @@ function preview() {
 }
 
 function applyDrawer(remove) {
-  if (!drawerChip) return closeDrawer();
-  if (remove) drawerChip.remove();
-  else {
+  if (!drawerChip) return closeDrawer(true);
+  if (drawerChip.isConnected) snapshot();
+  const src = $('#drawer-src').value;
+  if (remove || !src.trim()) {
+    if (drawerFresh) closeDrawer(false);      // with its line breaks
+    else { drawerChip.remove(); closeDrawer(true); }
+  } else {
     const frag = document.createDocumentFragment();
-    renderTokens(L.tokenize($('#drawer-src').value), frag, {});
+    renderTokens(L.tokenize(src), frag, {});
+    const last = frag.lastChild;
     drawerChip.replaceWith(frag);
+    if (last && last.isConnected && editableAt(selRange())) setCaretAfter(last);
+    closeDrawer(true);
   }
-  closeDrawer();
   markEdited();
 }
 
-function closeDrawer() { $('#drawer').hidden = true; drawerChip = null; drawerSeg = null; }
+function closeDrawer(applied) {
+  if (!applied && drawerFresh && drawerChip && drawerChip.isConnected) {
+    // the line breaks put around a new displayed formula go with it
+    for (const n of [drawerChip.previousSibling, drawerChip.nextSibling]) {
+      if (n && n.nodeType === 1 && n.classList.contains('nl') && n.dataset.fresh) n.remove();
+    }
+    drawerChip.remove();
+    markEditedSoon();
+  }
+  $('#drawer').hidden = true; drawerChip = null; drawerSeg = null; drawerFresh = false;
+}
 
 $('#drawer-src').addEventListener('input', preview);
 $('#drawer-src').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); applyDrawer(false); }
-  if (e.key === 'Escape') { e.preventDefault(); closeDrawer(); }
+  if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeDrawer(false); }
 });
 $('#drawer-apply').onclick = () => applyDrawer(false);
 $('#drawer-delete').onclick = () => applyDrawer(true);
-$('#drawer-cancel').onclick = closeDrawer;
+$('#drawer-cancel').onclick = () => closeDrawer(false);
 
 // Insert a chip with the given source at the caret, and open it.
 function insertSource(src, title) {
@@ -878,17 +898,104 @@ function markEditedSoon() { clearTimeout(markTimer); markTimer = setTimeout(mark
 
 /* key handling: see the keymap section below */
 
-// Paste plain text only.
+// Copy, cut and paste.  A copy from the page carries its LaTeX (in a type of
+// its own) and a plain text in which formulas are $...$, so that pasting it
+// back, here or from anywhere else, gives formulas again.
+const LATEX_MIME = 'application/x-paper-editor-latex';
+
+// Plain text: formulas between dollars ($...$, $$...$$, \(...\), \[...\])
+// become formulas; everything else is text.  A $ is a dollar sign unless it
+// opens and closes a formula: no space just inside, no digit right after
+// the closing one (so "5$ or 10$" stays text); \$ is a dollar sign.
+function pastedNodes(text) {
+  const nodes = [];
+  let buf = '';
+  const flush = () => { if (buf) nodes.push(document.createTextNode(buf)); buf = ''; };
+  const math = (src, display) => { flush(); nodes.push(mathChip(src, display)); };
+  let i = 0;
+  while (i < text.length) {
+    if (text.startsWith('\\$', i)) { buf += '$'; i += 2; continue; }
+    let close;
+    if (text.startsWith('$$', i) && (close = text.indexOf('$$', i + 2)) > i + 2) {
+      math(text.slice(i, close + 2), true); i = close + 2; continue;
+    }
+    if (text.startsWith('\\[', i) && (close = text.indexOf('\\]', i + 2)) > i + 2) {
+      math(text.slice(i, close + 2), true); i = close + 2; continue;
+    }
+    if (text.startsWith('\\(', i) && (close = text.indexOf('\\)', i + 2)) > i + 2) {
+      math(text.slice(i, close + 2), false); i = close + 2; continue;
+    }
+    if (text[i] === '$' && text[i + 1] !== '$' && text[i + 1] && !/\s/.test(text[i + 1])) {
+      let j = i + 1;
+      for (; j < text.length; j++) {
+        if (text[j] === '\\') { j++; continue; }
+        if (text[j] === '$') break;
+      }
+      if (j < text.length && !/\s/.test(text[j - 1]) && !/[0-9]/.test(text[j + 1] || '')) {
+        math(text.slice(i, j + 1), false); i = j + 1; continue;
+      }
+    }
+    buf += text[i++];
+  }
+  flush();
+  return nodes;
+}
+
 doc.addEventListener('paste', (e) => {
-  if (e.target.tagName === 'TEXTAREA') return;
+  if (/^(TEXTAREA|INPUT)$/.test(e.target.tagName)) return;
   e.preventDefault();
-  const text = e.clipboardData.getData('text/plain').replace(/\r\n?/g, '\n').replace(/\n{2,}/g, ' ').replace(/\n/g, ' ');
-  const display = /^\$\$([^]*)\$\$$/.exec(text.trim());
-  const inline = /^\$([^]*)\$$/.exec(text.trim());
-  if (display && insertNodes([mathChip('$$' + display[1] + '$$', true)])) return;
-  if (inline && insertNodes([mathChip('$' + inline[1] + '$', false)])) return;
-  document.execCommand('insertText', false, text);
+  if (!editableAt(selRange())) return;
+  if (spansEditables()) { banner(ACROSS); return; }
+  const latex = e.clipboardData.getData(LATEX_MIME);
+  let nodes;
+  if (latex) {
+    const frag = document.createDocumentFragment();
+    renderTokens(L.tokenize(latex.replace(/\r\n?/g, '\n').replace(/\n{2,}/g, '\n')), frag, {});
+    nodes = [...frag.childNodes];
+  } else {
+    const text = e.clipboardData.getData('text/plain').replace(/\r\n?/g, '\n').replace(/\s*\n\s*/g, ' ');
+    nodes = pastedNodes(text);
+  }
+  if (!nodes.length) return;
+  insertNodes(nodes);
+  lastTyping = Date.now();
 });
+
+// The plain text of a piece of the page, with formulas as their LaTeX.
+function plainOf(node) {
+  let out = '';
+  for (const n of node.childNodes) {
+    if (n.nodeType === 3) { out += n.data; continue; }
+    if (n.nodeType !== 1 || n.classList.contains('hidden') || n.classList.contains('tools')) continue;
+    if (n.classList.contains('math')) { out += n.dataset.src; continue; }
+    if (n.classList.contains('nl') || n.classList.contains('parbreak')) { out += n.classList.contains('parbreak') ? '\n\n' : ' '; continue; }
+    if (n.classList.contains('chip')) { out += n.textContent; continue; }
+    if (/^(DIV|P|H[1-6])$/.test(n.tagName) && out && !out.endsWith('\n')) out += '\n\n';
+    out += plainOf(n);
+  }
+  return out;
+}
+
+function copySelection(e, cut) {
+  if (/^(TEXTAREA|INPUT)$/.test(e.target.tagName)) return;
+  const r = selectionInOneEditable();
+  if (!r) {              // across blocks: the browser's own copy, and no cut
+    if (cut && spansEditables()) { e.preventDefault(); banner(ACROSS); }
+    return;
+  }
+  const frag = r.cloneContents();
+  KEEP_UNICODE = '';
+  e.clipboardData.setData('text/plain', plainOf(frag));
+  e.clipboardData.setData(LATEX_MIME, ser(frag));
+  e.preventDefault();
+  if (cut) {
+    snapshot();
+    r.deleteContents();
+    markEditedSoon();
+  }
+}
+doc.addEventListener('copy', (e) => copySelection(e, false));
+doc.addEventListener('cut', (e) => copySelection(e, true));
 
 function segOf(node) {
   const box = node.closest && node.closest('.seg');
@@ -1671,9 +1778,42 @@ function selectLine() {
 
 // Wrap the selection (or a placeholder) in \emph, \textbf or \textit.
 function wrap(prefix, tag) {
-  const r = selRange();
+  let r = selRange();
   if (!editableAt(r)) return;
+  if (!r.collapsed) {
+    r = selectionInOneEditable();
+    if (!r) { banner('Select text inside one paragraph to format it.'); return; }
+  }
   snapshot();
+  // already formatted that way: remove the formatting from the selection
+  const sel = tag === 'strong' ? 'strong, b' : 'em, i';
+  const anc = r.commonAncestorContainer;
+  const root = (anc.nodeType === 1 ? anc : anc.parentElement).closest('[contenteditable="true"]');
+  const fmt = (anc.nodeType === 1 ? anc : anc.parentElement).closest(sel);
+  if (fmt && root && root.contains(fmt) && fmt !== root && !fmt.classList.contains('runin')) {
+    if (!r.collapsed) {
+      const cut = (a, b) => {
+        const x = document.createRange();
+        x.setStart(...a); x.setEnd(...b);
+        const f = x.extractContents();
+        if (!f.textContent) return null;
+        const c = fmt.cloneNode(false); c.append(f); return c;
+      };
+      const pre = cut([fmt, 0], [r.startContainer, r.startOffset]);
+      const post = cut([r.endContainer, r.endOffset], [fmt, fmt.childNodes.length]);
+      if (pre) fmt.before(pre);
+      if (post) fmt.after(post);
+    }
+    const kids = [...fmt.childNodes];
+    fmt.replaceWith(...kids);
+    if (kids.length) {
+      const nr = document.createRange();
+      nr.setStartBefore(kids[0]); nr.setEndAfter(kids[kids.length - 1]);
+      const s = getSelection(); s.removeAllRanges(); s.addRange(nr);
+    }
+    markEditedSoon();
+    return;
+  }
   const e = el(tag);
   e.dataset.prefix = prefix;
   if (r.collapsed) e.append(document.createTextNode('text'));
@@ -1684,30 +1824,116 @@ function wrap(prefix, tag) {
   markEditedSoon();
 }
 
-function wrapLiteral(open, close) {
-  const r = selRange();
-  if (!editableAt(r)) return;
-  snapshot();
-  if (r.collapsed) {
-    const text = document.createTextNode(open + close);
-    r.insertNode(text);
-    r.setStart(text, open.length); r.collapse(true);
-  } else {
-    const contents = r.extractContents();
-    const frag = document.createDocumentFragment();
-    frag.append(document.createTextNode(open), contents, document.createTextNode(close));
-    r.insertNode(frag);
-  }
-  markEditedSoon();
+// A range never cuts through a chip (maths, a reference): it is widened to
+// take the whole chip, so that wrapping or copying never splits one.
+function snapOutOfChips(r) {
+  const chipOf = (n) => (n.nodeType === 1 ? n : n.parentElement)?.closest('.chip');
+  const a = chipOf(r.startContainer), b = chipOf(r.endContainer);
+  if (a) r.setStartBefore(a);
+  if (b) r.setEndAfter(b);
+  return r;
 }
 
-function mathAtSelection() {
+// The selection (a copy, widened to whole chips) when it lies inside one
+// editable text, else null.
+function selectionInOneEditable() {
   const r = selRange();
-  if (!r || r.collapsed || !editableAt(r)) return insertMath(false);
+  if (!r || r.collapsed || spansEditables(r)) return null;
+  return snapOutOfChips(r.cloneRange());
+}
+
+// A selection from one block (or heading, caption) into another: the
+// browser would delete across blocks, page structure included, so nothing
+// may edit it.
+function spansEditables(r = selRange()) {
+  if (!r || r.collapsed) return false;
+  const a = editableAt(r);
+  const endNode = r.endContainer.nodeType === 1 ? r.endContainer : r.endContainer.parentElement;
+  return !a || !endNode || endNode.closest('[contenteditable=true]') !== a;
+}
+const ACROSS = 'Select inside one paragraph (or heading) to change it: a selection across blocks is only for copying.';
+document.addEventListener('beforeinput', (e) => {
+  if (e.target.closest && e.target.closest('#doc') && e.target.isContentEditable && spansEditables()) {
+    e.preventDefault();
+    banner(ACROSS);
+  }
+}, true);
+
+// Keys that wrap a selection instead of replacing it; both the opening and
+// the closing key wrap.  Quotes become TeX quotes (`` '' and ` ') on saving.
+const WRAP_PAIRS = {
+  '(': ['(', ')'], ')': ['(', ')'], '[': ['[', ']'], ']': ['[', ']'], '{': ['{', '}'], '}': ['{', '}'],
+  '"': ['“', '”'], "'": ['‘', '’'], '`': ['‘', '’'],
+};
+
+// Wrap the selection in open … close; the selection stays on the wrapped
+// text, so that another key wraps it again.
+function wrapLiteral(open, close) {
+  const r = selectionInOneEditable();
+  if (!r) return false;
   snapshot();
-  const source = '$' + ser(r.cloneContents()) + '$';
-  const math = mathChip(source, false);
-  r.deleteContents(); r.insertNode(math); setCaretAfter(math);
+  const contents = r.extractContents();
+  const a = document.createTextNode(open), b = document.createTextNode(close);
+  const frag = document.createDocumentFragment();
+  frag.append(a, contents, b);
+  r.insertNode(frag);
+  const nr = document.createRange();
+  nr.setStartAfter(a); nr.setEndBefore(b);
+  const s = getSelection(); s.removeAllRanges(); s.addRange(nr);
+  markEditedSoon();
+  return true;
+}
+
+// The LaTeX of a piece of the page taken as maths: typed text as it is (an
+// x^2 typed as text is maths x^2), formulas without their dollars.
+function mathSourceOf(node, top = true) {
+  let out = '';
+  for (const n of node.childNodes) {
+    // in maths too, % starts a comment (it would eat the rest of the line,
+    // closing braces included), # and & mean other things, and $ ends it
+    if (n.nodeType === 3) { out += escapeIn(n.data.replace(/ /g, '~'), '%#&$'); continue; }
+    if (n.nodeType !== 1) continue;
+    if (n.classList.contains('math')) { out += mathBody(n.dataset.src)[0]; continue; }
+    if (n.dataset.src !== undefined) { out += n.classList.contains('nl') ? ' ' : n.dataset.src; continue; }
+    out += mathSourceOf(n, false);
+  }
+  if (top) {
+    // braces typed as text that do not pair up are literal braces
+    let depth = 0, ok = true;
+    for (const c of out.replace(/\\./g, '')) { if (c === '{') depth++; if (c === '}' && --depth < 0) ok = false; }
+    if (!ok || depth) out = escapeIn(out, '{}');
+  }
+  return out;
+}
+
+// Put a backslash before each of `chars` in s that has none yet.
+function escapeIn(s, chars) {
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === '\\') { out += s[i] + (s[i + 1] || ''); i++; continue; }
+    out += (chars.includes(s[i]) ? '\\' : '') + s[i];
+  }
+  return out;
+}
+
+// $ or Ctrl+M: the selection becomes inline maths; with no selection, a new
+// formula opens in the drawer.
+function mathAtSelection() {
+  const sel = getSelection();
+  if (!sel.rangeCount || sel.isCollapsed) return insertMath(false);
+  const r = selectionInOneEditable();
+  if (!r) { banner('Select text inside one paragraph to make it maths.'); return; }
+  snapshot();
+  const body = mathSourceOf(r.cloneContents());
+  const lead = body.match(/^\s*/)[0], trail = body.match(/\s*$/)[0];
+  const math = mathChip('$' + body.trim() + '$', false);
+  r.deleteContents();
+  const frag = document.createDocumentFragment();
+  if (lead) frag.append(document.createTextNode(lead));
+  frag.append(math);
+  if (trail) frag.append(document.createTextNode(trail));
+  r.insertNode(frag);
+  setCaretAfter(math);
   markEditedSoon();
 }
 
@@ -1726,6 +1952,24 @@ function insertNodes(nodes) {
   return true;
 }
 
+// A paragraph break (with anything after it) at the caret.  A line break
+// right beside the caret goes: the paragraph break replaces it, rather than
+// leaving three newlines in the file.
+function insertBreak(nodes = [chip('parbreak', '\n\n', '')]) {
+  const r = selRange();
+  if (!editableAt(r)) return false;
+  if (r.collapsed) {
+    const nb = neighbours(r);
+    const isNl = (n) => n && n.nodeType === 1 && n.classList.contains('nl') && /^\s*\n\s*$/.test(n.dataset.src || '');
+    if (!nb.inText) {
+      snapshot();
+      if (isNl(nb.before)) { const b = nb.before; r.setStartBefore(b); r.collapse(true); b.remove(); }
+      else if (isNl(nb.after)) nb.after.remove();
+    }
+  }
+  return insertNodes(nodes);
+}
+
 // A heading at the caret: the paragraph is split there, and the text after
 // the caret goes under the new heading.
 function headingAtCaret(level) {
@@ -1735,7 +1979,7 @@ function headingAtCaret(level) {
   const nodes = level === 'paragraph'
     ? [chip('parbreak', '\n\n', ''), chip('src', src, src)]
     : [chip('parbreak', '\n\n', ''), chip('src', src, src), chip('parbreak', '\n\n', '')];
-  if (!insertNodes(nodes)) return;
+  if (!insertBreak(nodes)) return;
   structural(() => PLACEHOLDER);
 }
 
@@ -1754,13 +1998,38 @@ function splitSectionAtCaret() {
 
 function insertMath(display) {
   const m = display ? mathChip('\\[\n  \n\\]', true) : mathChip('$ $', false);
-  const nodes = display ? [chip('nl', '\n', ' '), m, chip('nl', '\n', ' ')] : [m];
-  if (insertNodes(nodes)) openDrawer(m, null, display ? 'New displayed equation' : 'New inline maths');
+  let nodes = [m];
+  if (display) {
+    // a displayed formula on its own lines; never a blank line (a new
+    // paragraph) where a line break was already
+    const r = selRange();
+    const around = r && editableAt(r) ? neighbours(r) : {};
+    const isBreak = (n) => n && n.nodeType === 1 && /\n/.test(n.dataset.src || '') && (n.classList.contains('nl') || n.classList.contains('parbreak'));
+    const br = () => { const c = chip('nl', '\n', ' '); c.dataset.fresh = '1'; return c; };
+    nodes = [...(isBreak(around.before) ? [] : [br()]), m, ...(isBreak(around.after) ? [] : [br()])];
+  }
+  if (insertNodes(nodes)) openDrawer(m, null, display ? 'New displayed equation' : 'New inline maths', true);
+}
+
+// The nodes just before and after a collapsed range (empty text skipped).
+function neighbours(r) {
+  const skip = (n, dir) => { while (n && n.nodeType === 3 && !n.data) n = n[dir]; return n; };
+  const c = r.startContainer, o = r.startOffset;
+  let before, after;
+  if (c.nodeType === 3) {
+    before = o > 0 ? c : skip(c.previousSibling, 'previousSibling');
+    after = o < c.data.length ? c : skip(c.nextSibling, 'nextSibling');
+    if (o > 0 && o < c.data.length) return { before: c, after: c, inText: true };
+  } else {
+    before = skip(c.childNodes[o - 1], 'previousSibling');
+    after = skip(c.childNodes[o], 'nextSibling');
+  }
+  return { before, after };
 }
 
 function insertLatex(src, title) {
   const c = chip('src', src, src);
-  if (insertNodes([c])) openDrawer(c, null, title);
+  if (insertNodes([c])) openDrawer(c, null, title, true);
 }
 
 // C-d: delete the current line.  M-w: cut the region, or the line.
@@ -1862,7 +2131,7 @@ const TEXT_KEYS = {
   'C-i': () => wrap('\\emph{', 'em'),
   'C-I': () => wrap('\\textit{', 'em'),
   'C-m': mathAtSelection, 'C-M': () => insertMath(true),
-  '$': mathAtSelection, '"': () => wrapLiteral('"', '"'),
+  '$': mathAtSelection,
   'C-\\': () => insertLatex('\\cref{}', 'Insert LaTeX'),
   'C-M-r': () => insertLatex('\\cref{}', 'Insert a reference'),
   'C-M-c': () => insertLatex('\\cite{}', 'Insert a citation'),
@@ -1887,16 +2156,47 @@ document.addEventListener('keydown', (e) => {
   if (GLOBAL_KEYS[k]) { e.preventDefault(); GLOBAL_KEYS[k](); return; }
   const inText = e.target.isContentEditable && segOf(e.target);
   if (!inText) return;
+  const sel = getSelection();
+  if (spansEditables() && ((e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) ||
+      ['Enter', 'Backspace', 'Delete', 'Tab'].includes(e.key))) {
+    e.preventDefault();
+    banner(ACROSS);
+    return;
+  }
+  // a bracket or quote typed over a selection wraps it instead of replacing it
+  if (WRAP_PAIRS[e.key] && !e.ctrlKey && !e.altKey && !e.metaKey && !getSelection().isCollapsed) {
+    e.preventDefault();
+    if (!wrapLiteral(...WRAP_PAIRS[e.key])) banner('Select text inside one paragraph to wrap it.');
+    return;
+  }
   if (TEXT_KEYS[k]) { e.preventDefault(); TEXT_KEYS[k](); return; }
+  // the browser's own bold, italic, underline would bypass the editor (and
+  // keep working after the shortcut is moved to another key)
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && /^[biu]$/i.test(e.key)) { e.preventDefault(); return; }
   const seg = segOf(e.target);
   if (e.key === 'Enter' && !e.ctrlKey && !e.altKey) {
     e.preventDefault();
-    if (seg.kind === 'para') insertNodes([chip('parbreak', '\n\n', '')]);
+    if (seg.kind === 'para') insertBreak();
     return;
   }
   if (e.key === 'Backspace' && !e.ctrlKey && seg.kind === 'para' && caretAtStart(seg.edit)) {
     snapshot();
-    if (joinWithPrevious(seg)) e.preventDefault();
+    if (joinWithPrevious(seg)) { e.preventDefault(); return; }
+  }
+  // Backspace or Delete next to a paragraph or line break takes the break
+  // (the browser does not delete these empty, non-editable marks)
+  if ((e.key === 'Backspace' || e.key === 'Delete') && !e.ctrlKey && !e.altKey && sel.rangeCount && sel.isCollapsed) {
+    const nb = neighbours(sel.getRangeAt(0));
+    const n = e.key === 'Backspace' ? nb.before : nb.after;
+    if (!nb.inText && n && n.nodeType === 1 && n.classList.contains('chip') &&
+        (n.classList.contains('parbreak') || n.classList.contains('nl') || n.classList.contains('tie'))) {
+      e.preventDefault();
+      snapshot();
+      const r = document.createRange(); r.setStartBefore(n); r.collapse(true);
+      n.remove();
+      sel.removeAllRanges(); sel.addRange(r);
+      markEditedSoon();
+    }
   }
 });
 
@@ -2331,7 +2631,7 @@ const ACTIONS = {
   subsection: () => headingAtCaret('subsection'),
   paragraph: () => headingAtCaret('paragraph'),
   splitsection: splitSectionAtCaret,
-  newpara: () => insertNodes([chip('parbreak', '\n\n', '')]),
+  newpara: () => insertBreak(),
   find: () => openFind(false),
   undo, redo,
 };
@@ -3019,7 +3319,7 @@ const ACTION_DEFS = [
   ['bold', 'Bold (\\textbf)', 'text', ['C-b'], () => wrap('\\textbf{', 'strong')],
   ['emph', 'Emphasis (\\emph)', 'text', ['C-i'], () => wrap('\\emph{', 'em')],
   ['italic', 'Italic (\\textit)', 'text', ['C-I'], () => wrap('\\textit{', 'em')],
-  ['math', 'Inline maths', 'text', ['C-m', '$'], () => insertMath(false)],
+  ['math', 'Inline maths (the selection, or a new formula)', 'text', ['C-m', '$'], () => mathAtSelection()],
   ['display', 'Displayed equation', 'text', ['C-M'], () => insertMath(true)],
   ['cite', 'Cite (search)', 'text', ['C-M-c'], () => citePalette()],
   ['ref', 'Reference (search)', 'text', ['C-M-r'], () => refPalette()],

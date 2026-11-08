@@ -62,7 +62,8 @@ main file. The same project can contain several main documents.
 | `Ctrl+S` | save |
 | `Ctrl+Z`, `Ctrl+Shift+Z` / `Ctrl+Y` | undo, redo (structure edits included) |
 | `Ctrl+B`, `Ctrl+I`, `Ctrl+Shift+I` | `\textbf`, `\emph`, `\textit` |
-| `$`, `Ctrl+M` | inline maths |
+| `$`, `Ctrl+M` | inline maths: the selection becomes a formula; with no selection, a new one |
+| `(` `)` `[` `]` `{` `}` `"` `'` over a selection | wrap the selection (quotes become ` `` '' `) instead of replacing it |
 | `Ctrl+Shift+M` | displayed equation at the cursor |
 | `Enter` / `Backspace` at a paragraph's start | new paragraph / join with the one before |
 | `Ctrl+Alt+1`, `2`, `3` | section, subsection, `\paragraph` heading at the cursor |
