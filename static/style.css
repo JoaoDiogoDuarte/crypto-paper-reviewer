@@ -190,6 +190,27 @@ kbd { font: 12px ui-monospace, monospace; border: 1px solid var(--line); border-
    tools (＋ ✕ ↑ ↓) stand outside it, beside the text. */
 .seg > :not(.tools) { content-visibility: auto; contain-intrinsic-size: auto 6em; }
 
+/* A narrow clickable change overview, shown only while reviewing a diff. */
+#diffmap { position: fixed; right: 3px; top: calc(var(--bar-height, 58px) + var(--toolbar-height, 40px) + 10px);
+  bottom: 12px; width: 20px; z-index: 25; background: var(--chip);
+  border: 1px solid var(--line); border-radius: 5px; opacity: .95; }
+#diffmap-viewport { position: absolute; left: 1px; right: 1px; border: 1px solid var(--accent);
+  border-radius: 3px; pointer-events: none; }
+.diffmap-mark { position: absolute; left: 2px; right: 2px; width: 14px; height: 5px;
+  min-height: 5px; padding: 0; border-radius: 2px; border: 0; z-index: 1; }
+.diffmap-mark.added { background: #2a3; }
+.diffmap-mark.removed { background: #d33; }
+.diffmap-mark.modified { background: #e0a030; }
+.diffmap-mark.active { outline: 2px solid var(--accent); }
+/* Two narrow columns should never conceal the margin tools or table previews. */
+.tabular-preview { max-width: 100%; overflow-x: auto; margin: .5em auto; }
+.tabular-render { border-collapse: collapse; width: max-content; min-width: 60%; max-width: 100%; margin: auto;
+  font-size: .9em; }
+.tabular-render td { padding: .16em .55em; border-bottom: 1px solid var(--line); text-align: left; }
+.tabular-render tr.rule-above td { border-top: 1.5px solid var(--fg); }
+.chip.tabular-inline { display: block; max-width: 100%; cursor: pointer; }
+#toolbar, #bar, #findbar { background: var(--bg); }
+#toolbar button, #bar button { font-family: system-ui, 'DejaVu Sans', 'Noto Sans Symbols 2', sans-serif; }
 /* diff mode */
 .d-del { background: color-mix(in srgb, #d33 22%, transparent); text-decoration: line-through; text-decoration-color: #c33; }
 .d-ins { background: color-mix(in srgb, #2a3 22%, transparent); text-decoration: underline; text-decoration-color: #2a3; }

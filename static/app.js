@@ -2938,6 +2938,44 @@ async function fuzzTest(n, seed) {
 }
 {
   const q = new URLSearchParams(location.search);
+function updateDiffMap() {
+  if (!DIFF.on || !DIFF.marks.length) return;
+  const map = $('#diffmap');
+  const height = Math.max(1, document.documentElement.scrollHeight - innerHeight);
+  map.querySelectorAll('.diffmap-mark').forEach((mark) => {
+    const target = DIFF.marks[+mark.dataset.index];
+    if (!target || !target.isConnected) return;
+    const y = Math.max(0, target.getBoundingClientRect().top + scrollY) / height;
+    mark.style.top = `${Math.min(98, y * 98)}%`;
+    mark.classList.toggle('active', target.classList.contains('diff-current'));
+  });
+  const view = $('#diffmap-viewport');
+  view.style.top = `${Math.max(0, Math.min(98, 98 * scrollY / height))}%`;
+  view.style.height = `${Math.max(2, Math.min(100, innerHeight * 100 / document.documentElement.scrollHeight))}%`;
+}
+function fillDiffMap() {
+  const map = $('#diffmap');
+  map.querySelectorAll('.diffmap-mark').forEach((node) => node.remove());
+  map.hidden = !DIFF.on || !DIFF.marks.length;
+  DIFF.marks.forEach((target, i) => {
+    const mark = el('button', 'diffmap-mark');
+    mark.type = 'button';
+    mark.dataset.index = i;
+    mark.setAttribute('aria-label', `Go to change ${i + 1}`);
+    mark.title = `Change ${i + 1} of ${DIFF.marks.length}`;
+    mark.classList.add(target.classList.contains('diff-gone') ? 'removed' :
+      target.classList.contains('diff-new') ? 'added' : 'modified');
+    mark.onclick = () => {
+      if (DIFF.marks[DIFF.cur]) DIFF.marks[DIFF.cur].classList.remove('diff-current');
+      DIFF.cur = i - 1;
+      diffStep(1);
+    };
+    map.append(mark);
+  });
+  requestAnimationFrame(updateDiffMap);
+}
+addEventListener('scroll', updateDiffMap, { passive: true });
+addEventListener('resize', updateDiffMap);
   if (q.has('fuzz')) {
     const t = setInterval(() => { if (ORDER.length) { clearInterval(t); setTimeout(() => fuzzTest(+q.get('fuzz') || 200, +q.get('seed') || 1), 500); } }, 200);
   }
@@ -3046,6 +3084,7 @@ async function diffOn() {
           DIFF.marks.push(b.el);
         } else { b.el.classList.add('diff-new'); DIFF.marks.push(b.el); }
       }
+  fillDiffMap();
       for (const d of dels) {   // deleted blocks, shown where they were
         const ghost = renderSeg({ ...d }, {});
         if (!ghost) continue;
@@ -3054,6 +3093,7 @@ async function diffOn() {
         if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(ghost, anchor);
         else if (cur.length && cur[cur.length - 1].el) cur[cur.length - 1].el.after(ghost);
         DIFF.marks.push(ghost);
+  $('#diffmap').hidden = true;
       }
       i = j - 1;
     }
@@ -3081,6 +3121,7 @@ function diffOff() {
 // texts).  Returns true when a structure edit should not go on: its block
 // was one of the diff view's.
 function leaveDiff() {
+  updateDiffMap();
   if (!DIFF.on && !DIFF_SHOWN) return false;
   diffOff();
   banner('Left the diff view.');
