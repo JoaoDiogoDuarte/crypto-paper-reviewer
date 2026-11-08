@@ -3405,6 +3405,7 @@ function showFigTab(tab) {
   } else if (tab === 'cells') {
     renderCells(body);
   }
+  figureEditStatus();
 }
 
 function renderGames(body) {
@@ -3525,11 +3526,11 @@ function procLine(g, l, li) {
     try { katex.render(l.content.replace(/\\\\\s*$/, ''), prev, { throwOnError: false, macros: { ...katexMacros(), ...CRYPTOCODE_MACROS } }); }
     catch (e) { prev.textContent = l.content; }
   };
-  ta.oninput = () => { l.content = ta.value; show(); };
+  ta.oninput = () => { l.content = ta.value; show(); figureEditStatus(); };
   show();
   const tools = el('div', 'gtools'); tools.style.opacity = 1;
-  const b1 = el('button', '', '+ line'); b1.onclick = () => { g.lines.splice(li + 1, 0, { prefix: '', content: '', suffix: l.suffix || ' \\\\\n' }); if (!l.suffix) l.suffix = ' \\\\\n'; showFigTab('games'); };
-  const b3 = el('button', '', 'Delete'); b3.onclick = () => { g.lines.splice(li, 1); showFigTab('games'); };
+  const b1 = el('button', '', '+ line'); b1.onclick = () => { figureCheckpoint(); g.lines.splice(li + 1, 0, { prefix: '', content: '', suffix: l.suffix || ' \\\\\n' }); if (!l.suffix) l.suffix = ' \\\\\n'; showFigTab('games'); };
+  const b3 = el('button', '', 'Delete'); b3.onclick = () => { figureCheckpoint(); g.lines.splice(li, 1); showFigTab('games'); figureEditStatus(); };
   tools.append(b1, b3);
   row.append(ta, prev, tools);
   return row;
@@ -3551,20 +3552,21 @@ function renderCells(body) {
       r.cells.forEach((c) => {
         const td = el('td'); td.contentEditable = 'true';
         renderTokens(L.tokenize(c.content), td, {});
-        td.addEventListener('input', () => { c.content = ser(td); td.classList.add('edited'); });
+        td.addEventListener('input', () => { c.content = ser(td); td.classList.add('edited'); figureEditStatus(); });
         tr.append(td);
       });
       for (let k = r.cells.length; k < ncols; k++) tr.append(el('td'));
       const tools = el('td', 'rowtools');
       const add = el('button', '', '+ row'); add.title = 'Add an empty row below';
       add.onclick = () => {
+        figureCheckpoint();
         const nr = { lead: '', empty: false, rawRest: '', sep: r.sep || ' \\\\\n',
           cells: Array.from({ length: ncols }, (_, k) => ({ lead: k ? ' ' : '', content: '', trail: ' ' })) };
         if (!r.sep) r.sep = ' \\\\\n';
         t.rows.splice(ri + 1, 0, nr); showFigTab('cells');
       };
       const del = el('button', '', 'Delete'); del.title = 'Delete this row';
-      del.onclick = () => { t.rows.splice(ri, 1); showFigTab('cells'); };
+      del.onclick = () => { figureCheckpoint(); t.rows.splice(ri, 1); showFigTab('cells'); figureEditStatus(); };
       tools.append(add, del);
       tr.append(tools);
       tbl.append(tr);
@@ -3572,6 +3574,7 @@ function renderCells(body) {
     const col = el('button', '', '+ column');
     col.title = 'Add a column at the right (the column spec gets the same type as the last column)';
     col.onclick = () => {
+      figureCheckpoint();
       for (const r of t.rows) if (!r.empty && r.cells.length) {
         const lastCell = r.cells[r.cells.length - 1];
         lastCell.trail = lastCell.trail || ' ';
