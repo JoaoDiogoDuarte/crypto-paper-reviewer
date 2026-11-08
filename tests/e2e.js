@@ -373,6 +373,31 @@ const dirty = (page) => page.eval(`editedFiles().length`);
 
 // ------------------------------------------------------------ tests
 
+
+// A speech engine that never talks: phrases are recorded, and finish() ends
+// the one being spoken.  Installed before the page loads, which is reloaded.
+async function fakeSpeech(page) {
+  await page.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+    const fake = { spoken: [], cur: null, paused: false, onvoiceschanged: null };
+    fake.voices = [];   // a real SpeechSynthesisVoice cannot be made up
+    const synth = {
+      getVoices: () => fake.voices,
+      speak: (u) => { fake.spoken.push(u.text); fake.cur = u; },
+      cancel: () => { fake.cur = null; },
+      pause: () => { fake.paused = true; }, resume: () => { fake.paused = false; },
+    };
+    fake.finish = () => { const u = fake.cur; fake.cur = null; if (u && u.onend) u.onend({}); };
+    window.__fake = fake;
+    Object.defineProperty(window, 'speechSynthesis', { value: synth, configurable: true });
+  })()` });
+  await page.eval(`window.__old = true`);
+  await page.send('Page.reload');
+  await page.waitFor(`!window.__old`, 15000, 'the old page to go');
+  await page.waitFor(`typeof TTS !== 'undefined' && typeof ORDER !== 'undefined' && ORDER.length > 0 && typeof AUXVER !== 'undefined' && AUXVER > 0`, 15000, 'the page to reload');
+  await page.eval(`TTS.fillVoices(); $('#voice').append(new Option('Fake', 'browser|Fake')); $('#voice').value = 'browser|Fake'`);
+  eq(await page.eval(`$('#voice').value`), 'browser|Fake', 'fake voice selected');
+}
+
 const TESTS = {
   async 'load: nothing edited, save writes nothing'(env, page) {
     eq(await dirty(page), 0, 'edited files after load');
@@ -934,6 +959,104 @@ Object.assign(TESTS, {
     await page.key('s', { alt: true });
     await sleep(300);
     eq(await unsaved(page), 0, 'reading edits nothing');
+  },
+
+  // ---- reader, driven by a fake speech engine that finishes phrases on demand
+  async 'reader: pause and stop are enabled whenever reading, after play, prev, next and a re-render'(env, page) {
+    await fakeSpeech(page);
+    await page.select('lazy dog', 'start');
+    const st = () => page.eval(`({ pause: !$('#pause').disabled, stop: !$('#stop').disabled, state: $('#tts-state').textContent })`);
+    const idle = await st();
+    eq(idle.pause || idle.stop, false, 'idle: pause and stop disabled');
+    await page.click('#play');
+    let s = await st();
+    eq(s.pause && s.stop && s.state, 'Reading', 'after play');
+    await page.click('#tts-next');
+    s = await st(); eq(s.pause && s.stop, true, 'after next');
+    await page.click('#tts-prev');
+    s = await st(); eq(s.pause && s.stop, true, 'after prev');
+    await page.click('#pause');
+    eq((await st()).state, 'Paused', 'paused');
+    eq(await page.eval(`$('#pause').getAttribute('aria-pressed')`), 'true', 'pause pressed');
+    await page.click('#play');   // play while paused resumes, it does not restart
+    eq((await st()).state, 'Reading', 'play resumes');
+    eq(await page.eval(`__fake.spoken.length`), 3, 'resuming did not speak again');
+    // the page re-renders (a save, a rebuild) while reading: still controllable
+    await page.eval(`render()`);
+    s = await st(); eq(s.pause && s.stop, true, 'after a re-render');
+    await page.click('#stop');
+    s = await st(); eq(s.pause || s.stop, false, 'stopped: disabled again');
+    eq(s.state, 'Stopped', 'state after stop');
+  },
+
+  async 'reader: starts at the phrase with the caret, not the top of the paragraph'(env, page) {
+    await fakeSpeech(page);
+    await page.select('We study', 'start');
+    await page.click('#play');
+    has(await page.eval(`__fake.spoken[0]`), 'We study', 'second sentence first');
+    await page.click('#stop');
+    // caret at the end of the first sentence: that sentence
+    await page.select('lazy dog', 'end');
+    await page.click('#play');
+    has(await page.eval(`__fake.spoken[1]`), 'The quick brown fox', 'first sentence');
+    await page.click('#stop');
+    // caret in another paragraph wins over the remembered position
+    await page.select('encryption schemes', 'end');
+    await page.click('#play');
+    has(await page.eval(`__fake.spoken[2]`), 'A second paragraph', 'other paragraph');
+  },
+
+  async 'reader: with no caret it resumes where it stopped, in any block of the file'(env, page) {
+    await fakeSpeech(page);
+    await page.select('Final words', 'start');
+    await page.click('#play');
+    await page.click('#stop');
+    const n = await page.eval(`__fake.spoken.length`);
+    await page.eval(`TTS.reset()`);
+    await page.eval(`getSelection().removeAllRanges()`);
+    await page.click('#play');
+    const spoken = await page.eval(`__fake.spoken`);
+    eq(spoken.length, n + 1, 'spoke one phrase');
+    has(spoken[n], 'Final words', 'resumed in the last block');
+  },
+
+  async 'reader: reading keeps going to the end, then stops by itself'(env, page) {
+    await fakeSpeech(page);
+    await page.select('Final words', 'start');
+    await page.click('#play');
+    for (let i = 0; i < 5 && await page.eval(`!$('#stop').disabled`); i++) await page.eval(`__fake.finish()`);
+    eq(await page.eval(`$('#tts-state').textContent`), 'Stopped', 'stopped at the end');
+    eq(await page.eval(`$('#stop').disabled`), true, 'controls idle at the end');
+  },
+
+  async 'css: dark chrome, compact bars, nothing overflows, bars do not overlap'(env, page) {
+    const lum = (c) => { const m = c.match(/\d+/g).map(Number); return (0.2126 * m[0] + 0.7152 * m[1] + 0.0722 * m[2]) / 255; };
+    for (const theme of ['light', 'dark']) {
+      await page.eval(`document.documentElement.dataset.theme = ${JSON.stringify(theme)}`);
+      const m = await page.eval(`(() => {
+        const cs = (q, p) => getComputedStyle(document.querySelector(q))[p];
+        return { bg: cs('body', 'backgroundColor'), fg: cs('body', 'color'), bar: cs('#title', 'fontSize'),
+          tool: cs('#toolbar', 'fontSize'), body: cs('body', 'fontSize') };
+      })()`);
+      const dark = theme === 'dark';
+      if (dark && lum(m.bg) > 0.06) throw new Error('dark background not dark enough: ' + m.bg);
+      if (!dark && lum(m.bg) > 0.9) throw new Error('light background too bright: ' + m.bg);
+      if (Math.abs(lum(m.fg) - lum(m.bg)) < 0.6) throw new Error(`${theme}: text/background contrast too low (${m.fg} on ${m.bg})`);
+      eq(m.bar, '13px', 'bar font'); eq(m.tool, '12px', 'toolbar font'); eq(m.body, '16px', 'body font');
+    }
+    const g = await page.eval(`(() => {
+      const r = (q) => document.querySelector(q).getBoundingClientRect();
+      return { barBottom: r('#bar').bottom, toolTop: r('#toolbar').top, barH: r('#bar').height,
+        toolH: r('#toolbar').height, overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth };
+    })()`);
+    if (g.barH > 76) throw new Error('top bar too tall: ' + g.barH);
+    if (g.toolH > 30) throw new Error('toolbar too tall: ' + g.toolH);
+    if (Math.abs(g.barBottom - g.toolTop) > 1.5) throw new Error(`bars overlap or gap: ${g.barBottom} vs ${g.toolTop}`);
+    if (g.overflow > 0) throw new Error('page scrolls horizontally by ' + g.overflow);
+    await page.eval(`window.scrollTo(0, 400)`);
+    const sticky = await page.eval(`(() => { const r = (q) => document.querySelector(q).getBoundingClientRect();
+      return [r('#bar').top, r('#toolbar').top - r('#bar').bottom]; })()`);
+    if (Math.abs(sticky[0]) > 1 || Math.abs(sticky[1]) > 1.5) throw new Error('bars not stuck together when scrolled: ' + sticky);
   },
 
   async 'render: tabular preview keeps LaTeX source'(env, page) {

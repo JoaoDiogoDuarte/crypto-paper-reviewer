@@ -17,7 +17,7 @@
   --mark: #7a6418; --find: #24476b; --findcur: #a8561b; color-scheme: dark; }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg);
-  font: 17px/1.55 "Latin Modern Roman", "CMU Serif", Georgia, serif; }
+  font: 16px/1.5 "Latin Modern Roman", "CMU Serif", Georgia, serif; }
 
 #bar { position: sticky; top: 0; z-index: 30; isolation: isolate; display: flex; flex-wrap: wrap; gap: .4em 1em;
   box-shadow: 0 4px 0 var(--bg);
@@ -336,74 +336,74 @@ pre.hist-diff .skip { color: var(--muted); }
 
 /* macOS-inspired application chrome: keep paper typography independent. */
 :root {
-  --bg: #f5f5f7;
+  --bg: #e4e4e8;
   --fg: #1c1c1e;
-  --muted: #6e6e73;
-  --line: #d1d1d6;
-  --chip: #e5e5ea;
+  --muted: #66666b;
+  --line: #c0c0c6;
+  --chip: #d3d3d8;
   --accent: #007aff;
   --dirty: #ff9500;
   --speak: #fff0c2;
-  --math: #f0f0f5;
+  --math: #dadae1;
   --mark: #ffcc00;
   --find: #b5d9ff;
   --findcur: #ff9500;
-  --mac-chrome: #f2f2f7;
-  --mac-raised: #ffffff;
-  --mac-control: #e5e5ea;
-  --mac-control-border: #d1d1d6;
-  --mac-hover: #dcdce1;
-  --mac-pressed: #cfe2ff;
+  --mac-chrome: #d9d9de;
+  --mac-raised: #efeff2;
+  --mac-control: #d0d0d6;
+  --mac-control-border: #b8b8bf;
+  --mac-hover: #c6c6cd;
+  --mac-pressed: #bcd4f5;
   --mac-shadow: rgba(0, 0, 0, .12);
-  --mac-window: rgba(255, 255, 255, .96);
+  --mac-window: rgba(228, 228, 232, .96);
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #1c1c1e;
+    --bg: #0a0a0b;
     --fg: #f5f5f7;
     --muted: #98989d;
-    --line: #38383a;
-    --chip: #2c2c2e;
+    --line: #222224;
+    --chip: #151517;
     --accent: #0a84ff;
     --dirty: #ff9f0a;
-    --speak: #3a3320;
-    --math: #242426;
+    --speak: #2e2815;
+    --math: #101012;
     --mark: #665400;
     --find: #244b74;
     --findcur: #ff9f0a;
-    --mac-chrome: #2c2c2e;
-    --mac-raised: #3a3a3c;
-    --mac-control: #3a3a3c;
-    --mac-control-border: #48484a;
-    --mac-hover: #48484a;
-    --mac-pressed: #264b78;
+    --mac-chrome: #111113;
+    --mac-raised: #1b1b1d;
+    --mac-control: #1b1b1d;
+    --mac-control-border: #2a2a2d;
+    --mac-hover: #27272a;
+    --mac-pressed: #1d3a5e;
     --mac-shadow: rgba(0, 0, 0, .35);
-    --mac-window: rgba(44, 44, 46, .96);
+    --mac-window: rgba(17, 17, 19, .96);
     color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
-  --bg: #1c1c1e;
+  --bg: #0a0a0b;
   --fg: #f5f5f7;
   --muted: #98989d;
-  --line: #38383a;
-  --chip: #2c2c2e;
+  --line: #222224;
+  --chip: #151517;
   --accent: #0a84ff;
   --dirty: #ff9f0a;
-  --speak: #3a3320;
-  --math: #242426;
+  --speak: #2e2815;
+  --math: #101012;
   --mark: #665400;
   --find: #244b74;
   --findcur: #ff9f0a;
-  --mac-chrome: #2c2c2e;
-  --mac-raised: #3a3a3c;
-  --mac-control: #3a3a3c;
-  --mac-control-border: #48484a;
-  --mac-hover: #48484a;
-  --mac-pressed: #264b78;
+  --mac-chrome: #111113;
+  --mac-raised: #1b1b1d;
+  --mac-control: #1b1b1d;
+  --mac-control-border: #2a2a2d;
+  --mac-hover: #27272a;
+  --mac-pressed: #1d3a5e;
   --mac-shadow: rgba(0, 0, 0, .35);
-  --mac-window: rgba(44, 44, 46, .96);
+  --mac-window: rgba(17, 17, 19, .96);
   color-scheme: dark;
 }
 
@@ -414,7 +414,7 @@ button, select {
   transition: background-color .12s ease, border-color .12s ease, color .12s ease;
 }
 button {
-  padding: .28em .7em;
+  padding: .16em .55em;
   border-color: var(--mac-control-border);
   background: var(--mac-control);
 }
@@ -446,16 +446,16 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
   border-color: var(--line);
 }
 #bar {
-  padding: .55em .9em;
-  gap: .45em .8em;
+  padding: .3em .75em;
+  gap: .25em .6em;
 }
 #title {
-  font: 600 14px/1.3 -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", system-ui, sans-serif;
+  font: 600 13px/1.25 -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", system-ui, sans-serif;
   letter-spacing: -.015em;
 }
 #bar .group {
-  gap: .16em;
-  padding: .18em;
+  gap: .1em;
+  padding: .1em;
   border: 1px solid color-mix(in srgb, var(--mac-control-border) 76%, transparent);
   border-radius: 10px;
   background: color-mix(in srgb, var(--mac-control) 72%, var(--mac-chrome));
@@ -463,7 +463,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 #bar .group button {
   border: 1px solid transparent;
   border-radius: 7px;
-  padding: .28em .55em;
+  padding: .14em .45em;
   background: transparent;
 }
 #bar .group button:hover:not(:disabled) {
@@ -472,7 +472,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 }
 #bar .group button:active:not(:disabled) { background: var(--mac-pressed); }
 #bar .group select {
-  padding: .24em .45em;
+  padding: .12em .4em;
   border: 1px solid var(--mac-control-border);
   border-radius: 7px;
   background: var(--mac-raised);
@@ -498,15 +498,15 @@ body.two #cols {
 /* Flat, grouped-feeling macOS toolbar items with a quiet hover affordance. */
 #toolbar {
   gap: .16em;
-  padding: .25em .75em;
+  padding: .15em .65em;
   border-bottom: 1px solid var(--line);
-  font: 13px/1.35 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
+  font: 12px/1.3 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
 }
 #toolbar button {
   border: 1px solid transparent;
   border-radius: 7px;
   background: transparent;
-  padding: .32em .58em;
+  padding: .16em .45em;
 }
 #toolbar button:hover:not(:disabled) {
   background: var(--mac-hover);
@@ -525,13 +525,13 @@ body.diffing #diffbtn {
 }
 #diffbase {
   border-radius: 7px;
-  padding: .28em .5em;
+  padding: .14em .4em;
   font-size: 12px;
 }
 #findbar {
-  padding: .35em .8em;
-  gap: .35em;
-  font: 13px/1.35 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
+  padding: .2em .65em;
+  gap: .3em;
+  font: 12px/1.3 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
   border-bottom: 1px solid var(--line);
 }
 #findbar input[type=text], #findbar input:not([type]) {
@@ -539,7 +539,7 @@ body.diffing #diffbtn {
   color: var(--fg);
   border-color: var(--mac-control-border);
   border-radius: 7px;
-  padding: .3em .55em;
+  padding: .15em .45em;
 }
 #findbar label { display: inline-flex; align-items: center; gap: .25em; }
 

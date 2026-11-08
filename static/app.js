@@ -1417,31 +1417,73 @@ const TTS = (() => {
     return q;
   }
 
+  // Index of the phrase holding the caret; the last phrase that starts at or
+  // before it, never blindly the first of the paragraph.
+  function caretIndex(queue, seg, caret) {
+    let best = -1;
+    for (let i = 0; i < queue.length; i++) {
+      const item = queue[i];
+      if (item.seg !== seg) { if (best >= 0) break; continue; }
+      let r;
+      try { r = item.range(); } catch (e) { continue; }
+      if (!r) continue;
+      try {
+        if (caret.compareBoundaryPoints(Range.START_TO_START, r) >= 0) best = i;
+        else break;
+      } catch (e) { /* detached range */ }
+    }
+    return best;
+  }
+
+  // Find a remembered phrase anywhere in its file, by source, then by text.
+  function locate(state) {
+    const segs = ORDER.filter((s) => s.file === state.file && !s.removed);
+    const fragment = (state.text || '').trim().slice(0, 60);
+    const passes = [
+      (s) => s.src === state.src,
+      (s) => true,
+    ];
+    for (const ok of passes) {
+      for (const seg of segs) {
+        if (!ok(seg)) continue;
+        const queue = build(ORDER.indexOf(seg));
+        let index = queue.findIndex((item) => item.seg === seg && item.text === state.text);
+        if (index < 0 && fragment.length >= 20) index = queue.findIndex((item) => item.seg === seg && item.text.includes(fragment));
+        if (index >= 0) return { queue, index };
+      }
+    }
+    return null;
+  }
+
+  function currentCaret() {
+    const sel = getSelection();
+    if (!sel.rangeCount || !sel.isCollapsed) return null;
+    const range = sel.getRangeAt(0);
+    const node = range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement;
+    if (!node || !$('#doc').contains(node)) return null;
+    const seg = segOf(node);
+    if (!seg || !seg.edit || (seg.kind !== 'para' && seg.kind !== 'heading') || !seg.edit.contains(node)) return null;
+    return { seg, range: range.cloneRange() };
+  }
+
   function prepareQueue() {
-    if (anchor) {
-      const queue = build(ORDER.indexOf(anchor.seg));
-      let index = queue.findIndex((item) => item.seg === anchor.seg && rangeContainsCaret(item.range(), anchor.range));
-      if (index < 0) index = 0;
-      return { queue, index };
+    for (const c of [currentCaret(), anchor]) {
+      if (!c || !c.seg.el || c.seg.removed || !ORDER.includes(c.seg)) continue;
+      const queue = build(ORDER.indexOf(c.seg));
+      const index = caretIndex(queue, c.seg, c.range);
+      if (index >= 0) return { queue, index };
     }
     const saved = savedPosition();
     if (saved) {
-      const candidates = ORDER.filter((item) => item.file === saved.file && !item.removed);
-      for (const seg of candidates) {
-        const queue = build(ORDER.indexOf(seg));
-        const index = queue.findIndex((item) => item.seg === seg && item.text === saved.text);
-        if (index >= 0) return { queue, index };
-        const fragment = saved.text.trim().slice(0, 60);
-        if (fragment.length >= 20) {
-          const fuzzy = queue.findIndex((item) => item.seg === seg && item.text.includes(fragment));
-          if (fuzzy >= 0) return { queue, index: fuzzy };
-        }
-      }
+      const found = locate(saved);
+      if (found) return found;
     }
     return { queue: build(startSeg()), index: 0 };
   }
 
   function play() {
+    if (speaking && paused) { pause(); return; }
+    if (speaking) return;
     stop();
     if (!voiceSel.value) { banner('No text-to-speech voice is available. See the README of the editor for how to install one.'); return; }
     ({ queue, index: idx } = prepareQueue());
@@ -1472,7 +1514,8 @@ const TTS = (() => {
     if (!speaking || idx >= queue.length) { stop(); return; }
     const item = queue[idx++];
     savePosition(item);
-    setState('Reading');
+    setState(paused ? 'Paused' : 'Reading');
+    updateControls();
     highlight(item.seg);
     markPhrase(item.range());
     const rate = parseFloat($('#rate').value);
@@ -1515,6 +1558,7 @@ const TTS = (() => {
     if (!speaking) return;
     paused = !paused;
     setState(paused ? 'Paused' : 'Reading');
+    updateControls();
     if (audio) { if (paused) audio.pause(); else audio.play(); return; }
     if (paused) synth.pause(); else synth.resume();
   }
@@ -1530,13 +1574,11 @@ const TTS = (() => {
 
   function restore(state) {
     if (!state) return;
-    const seg = ORDER.find((item) => item.file === state.file && !item.removed);
-    if (!seg) return;
-    queue = build(ORDER.indexOf(seg));
-    idx = queue.findIndex((item) => item.seg === seg && item.text === state.text);
-    if (idx < 0) idx = queue.findIndex((item) => item.seg === seg && item.text.includes(state.text.trim().slice(0, 60)));
-    if (idx < 0) return;
+    const found = locate(state);
+    if (!found) return;
+    ({ queue, index: idx } = found);
     speaking = true; paused = false;
+    updateControls();
     next();
     if (state.paused) pause();
   }
