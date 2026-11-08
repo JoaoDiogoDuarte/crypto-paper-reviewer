@@ -27,4 +27,4 @@ jobs:
       - name: Browser review smoke tests
         run: |
           command -v google-chrome || command -v chromium || command -v chromium-browser
-          node tests/e2e.js render diff "Paper dialog" "two columns" "History UI: delete"
+          node tests/e2e.js render diff "Paper dialog" "two columns" "History UI: delete" "Game editor:" "Layout:"
