@@ -395,9 +395,10 @@ def remove_cmds(text, names):
 CLASS_LOADS_HYPERREF = {'lipics', 'iacrcc', 'iacrtrans', 'acmart'}
 CREF_FALLBACK = r"""\makeatletter
 \newcommand{\pe@crefs}[1]{\def\pe@sep{}\@for\pe@x:=#1\do{\pe@sep\expandafter\autoref\expandafter{\pe@x}\def\pe@sep{, }}}
-\providecommand{\cref}[1]{\pe@crefs{#1}}
-\providecommand{\Cref}[1]{\pe@crefs{#1}}
+\@ifundefined{cref}{\DeclareRobustCommand{\cref}[1]{\pe@crefs{#1}}}{}
+\@ifundefined{Cref}{\DeclareRobustCommand{\Cref}[1]{\pe@crefs{#1}}}{}
 \makeatother"""
+# robust: \cref in a \caption (written to the .aux) must not expand there
 # packages a body may rely on because its old class loaded them
 PACKAGE_NEEDS = [
     ('amsmath', r'\\begin\{(align|gather|multline|alignat|flalign)\*?\}|\\eqref\b|\\text\{|\\tfrac|\\dfrac|\\binom'),
@@ -484,6 +485,27 @@ def inline_inputs(text, resolve, depth=0):
     return re.sub(r'\\input\s*\{([^}]*)\}', sub, text)
 
 
+ACMART_FONTS = ('inconsolata', 'zi4', 'libertine', 'libertinus', 'libertinust1math', 'newtxtext', 'newtxmath',
+                'mathptmx', 'times', 'txfonts', 'pxfonts', 'lmodern', 'charter', 'mathpazo', 'palatino')
+
+
+def relocate_bibliography(text, rel):
+    r"""\bibliography and \addbibresource entries relative to a folder rel
+    (for a file written into converted/<venue>/: '../..').  BibTeX looks a
+    name with a folder (cryptobib/crypto) up only from where it runs, never
+    along BIBINPUTS."""
+    if not rel or rel == '.':
+        return text
+    def fix(name):
+        name = name.strip()
+        if not name or os.path.isabs(name) or name.startswith('~'):
+            return name
+        return rel.rstrip('/') + '/' + name
+    text = re.sub(r'(?m)^([^%\n]*\\bibliography\{)([^}]*)\}',
+                  lambda m: m.group(1) + ','.join(fix(n) for n in m.group(2).split(',')) + '}', text)
+    return re.sub(r'(?m)^([^%\n]*\\addbibresource(?:\[[^\]]*\])?\{)([^}]*)\}', lambda m: m.group(1) + fix(m.group(2)) + '}', text)
+
+
 def drop_package(preamble, name):
     r"""Remove a package from \usepackage lines, also from lists."""
     def sub(m):
@@ -519,9 +541,23 @@ def _convert(main_text, md, target, anonymous, theorems_used, resolve=None, all_
         preamble = drop_package(preamble, 'hyperref')
         if late:
             preamble = re.sub(r'(?<!\{)\\hypersetup(\{(?:[^{}]|\{[^{}]*\})*\})', r'\\AtBeginDocument{\\hypersetup\1}', preamble)
+            # other hyperref commands of the preamble wait for it too
+            preamble = re.sub(r'(?<!\{)\\pdfstringdefDisableCommands(\{(?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*\})',
+                              lambda m: '\\AtBeginDocument{\\pdfstringdefDisableCommands' + m.group(1) + '}', preamble)
+    pre_class = []
     if target == 'acmart':
-        for p in ('amssymb', 'amsfonts'):
+        # acmart sets its fonts (libertine, inconsolata, newtx maths): a second
+        # font package redefines them ("\\zifour@default already defined")
+        for p in ('amssymb', 'amsfonts') + ACMART_FONTS:
+            if p not in ('amssymb', 'amsfonts') and re.search(r'\\usepackage(\[[^\]]*\])?\{[^}]*\b' + re.escape(p) + r'\b', preamble):
+                warnings.append(f'{p} dropped: acmart sets its own fonts.')
             preamble = drop_package(preamble, p)
+    if target == 'lipics':
+        # the class loads cleveref itself (class option cleveref): its options go first
+        m = re.search(r'\\usepackage\[([^\]]*)\]\{cleveref\}', preamble)
+        if m:
+            pre_class.append('\\PassOptionsToPackage{' + m.group(1) + '}{cleveref}')
+        preamble = drop_package(re.sub(r'\\usepackage\[[^\]]*\]\{cleveref\}[ \t]*\n?', '', preamble), 'cleveref')
     if target in PREDEFINED_THEOREMS:
         preamble = drop_class_theorems(preamble, PREDEFINED_THEOREMS[target])
     if target == 'llncs':
