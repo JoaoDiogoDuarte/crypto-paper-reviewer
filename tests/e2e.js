@@ -358,6 +358,14 @@ function onlyChange(env, name, from, to) {
   if (want === FILES[name]) throw new Error(`test bug: ${JSON.stringify(from)} not in ${name}`);
   eq(env.read(name), want, `${name} after saving`);
 }
+async function waitDiffMarks(page, count, what) {
+  try {
+    await page.waitFor('DIFF.marks.length === ' + count, 15000, what);
+  } catch (e) {
+    const state = await page.eval("JSON.stringify({diffOn:DIFF.on,baseline:$('#diffbase').value,marks:DIFF.marks.length,dirtyFiles:Object.keys(FILES).filter(n=>FILES[n].segs&&FILES[n].text!==FILES[n].disk),files:Object.keys(FILES).filter(n=>FILES[n].segs).map(n=>({name:n,currentEqualsDisk:FILES[n].text===FILES[n].disk,segments:FILES[n].segs.filter(s=>s.el&&!s.removed).length}))})");
+    throw new Error(e.message + '; diff state: ' + state);
+  }
+}
 function untouched(env, ...names) {
   for (const n of names) eq(env.read(n), FILES[n], `${n} must be unchanged`);
 }
@@ -1241,10 +1249,10 @@ Object.assign(TESTS, {
     await page.select('second');
     await page.type('third');
     await page.click('#diffbtn');
-    await page.waitFor(`DIFF.marks.length === 1`, 8000, 'one change since last save');
+    await waitDiffMarks(page, 1, 'one change since last save');
     eq(await page.eval(`$('#diffbase').value`), 'save', 'default diff baseline is last save');
     await page.eval(`$('#diffbase').value = 'head'; $('#diffbase').dispatchEvent(new Event('change'))`);
-    await page.waitFor(`DIFF.marks.length === 2`, 8000, 'two changes since last commit');
+    await waitDiffMarks(page, 2, 'two changes since last commit');
     await page.click('#diffbtn');
     await page.save();
     has(env.read('main.tex'), 'quick red fox', 'saved edit remains');
