@@ -396,7 +396,7 @@
       }
       const bodyEnd = end - ('\\end{' + m[1] + '}').length;
       const body = src.slice(bodyStart, bodyEnd);
-      out.push({ kind: 'algo', env: m[1], bodyStart, bodyEnd, title, titleRange, lines: body.split('\n').map(parseGameLine) });
+      out.push({ kind: 'algo', env: m[1], start: m.index, end, bodyStart, bodyEnd, title, titleRange, lines: body.split('\n').map(parseGameLine) });
       re.lastIndex = end;
     }
     // cryptocode: \procedure[opts]{title}{body}
@@ -429,7 +429,7 @@
         if (c === '{') depth++; else if (c === '}') depth--;
       }
       lines.push({ content: body.slice(last), suffix: '', prefix: '' });
-      out.push({ kind: 'proc', bodyStart: i + 1, bodyEnd: be - 1, title, titleRange, lines });
+      out.push({ kind: 'proc', start: m.index, end: be, bodyStart: i + 1, bodyEnd: be - 1, title, titleRange, lines });
       pre.lastIndex = be;
     }
     return out.sort((a, b) => a.bodyStart - b.bodyStart);
