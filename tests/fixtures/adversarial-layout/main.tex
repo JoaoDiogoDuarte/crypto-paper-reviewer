@@ -1,0 +1,28 @@
+\documentclass[11pt]{article}
+\title{Layout Pressure}
+\author{Edge Case}
+\begin{document}
+\maketitle
+\section{Long lines}
+\noindent\texttt{ThisIsAnIntentionallyUnbreakableIdentifierThatShouldProduceAnOverfullBoxWithoutBreakingTheBuildOrTheEditor}
+
+\begin{quote}
+This is a very long quoted sentence with many clauses, commas, parentheses, and words that should wrap differently in the PDF than in the editor while remaining valid source text.
+\end{quote}
+
+\section{Many paragraphs}
+First paragraph.
+
+Second paragraph.
+
+Third paragraph.
+
+Fourth paragraph.
+
+Fifth paragraph.
+
+\begin{center}
+Centered text should remain a single editable block.
+\end{center}
+
+\end{document}

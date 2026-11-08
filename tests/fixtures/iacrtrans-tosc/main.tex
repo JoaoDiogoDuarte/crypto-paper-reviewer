@@ -1,0 +1,24 @@
+\documentclass[journal=tosc,submission]{iacrtrans}
+\usepackage{booktabs}
+\author{Quinn Author\inst{1} \and Ray Writer\inst{2}}
+\institute{Fake University, Nowhere, \email{q@example.org} \and Another Lab, Elsewhere}
+\title[Fake ToSC]{A Fake ToSC Paper}
+\begin{document}
+\maketitle
+\keywords{fakes \and symmetric \and tests}
+\begin{abstract}
+A ToSC abstract with $\mathsf{AES}$ and a citation~\cite{TosA}.
+\end{abstract}
+\section{Introduction}\label{sec:intro}
+We prove Theorem~\ref{thm:t}, cite~\cite{TosA,TosB}, and use Table~\ref{tab:t}.
+\begin{theorem}\label{thm:t}
+Rounds are imaginary.
+\end{theorem}
+\begin{table}[h]
+\centering
+\caption{A ToSC table.}\label{tab:t}
+\begin{tabular}{cc} \toprule Rounds & Bias \\ \midrule 4 & $2^{-8}$ \\ \bottomrule \end{tabular}
+\end{table}
+\bibliographystyle{alpha}
+\bibliography{tosc}
+\end{document}

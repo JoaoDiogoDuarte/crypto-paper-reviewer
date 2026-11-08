@@ -1,0 +1,27 @@
+\documentclass{report}
+\usepackage{amsmath,amsthm,cleveref}
+\numberwithin{equation}{section}
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\begin{document}
+\chapter{First chapter}\label{ch:one}
+\section{A section}\label{sec:a}
+\begin{theorem}\label{thm:x}
+Numbered within the section.
+\end{theorem}
+\begin{equation}\label{eq:x}
+  x = y
+\end{equation}
+\begin{lemma}
+Shares the theorem counter.
+\end{lemma}
+\section*{Starred section}
+Not numbered.
+\chapter{Second chapter}
+\section{Another}
+See \cref{thm:x}, \eqref{eq:x} and Chapter~\ref{ch:one}.
+\appendix
+\chapter{An appendix chapter}
+\section{Appendix section}
+Text in the appendix.
+\end{document}

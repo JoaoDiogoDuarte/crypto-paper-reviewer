@@ -1,0 +1,30 @@
+name: Syntax and backend regression tests
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Compile Python
+        run: python -m py_compile server.py convert.py tests/backend_test.py tests/test_convert_contract.py
+      - name: Parse JavaScript
+        run: |
+          node --check static/app.js
+          node --check static/latex.js
+          node --check tests/e2e.js
+      - name: Backend tests
+        run: python -m unittest tests.backend_test tests.test_convert_contract
+      - name: Browser review smoke tests
+        run: |
+          command -v google-chrome || command -v chromium || command -v chromium-browser
+          node tests/e2e.js render diff "Paper dialog" "two columns" "History UI: delete"

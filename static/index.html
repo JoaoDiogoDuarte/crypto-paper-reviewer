@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="token" content="__TOKEN__">
+<title>Paper editor</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header id="bar">
+  <span id="title">Paper editor</span>
+  <span class="group">
+    <button id="openbtn" title="Open a paper directory">Open…</button>
+    <button id="save" title="Save edited files (Ctrl+S)">Save</button>
+    <button id="historybtn" title="Earlier versions: every save keeps the text it replaced">History…</button>
+    <span id="dirty"></span>
+  </span>
+  <span class="group">
+    <button id="cols" title="Switch between one and two columns">Two columns</button>
+  </span>
+  <span class="group" id="ttsbar">
+    <button id="play" aria-label="Play or resume reading" title="Read aloud from the sentence at the cursor (Alt+R)">Read</button>
+    <button id="tts-prev" aria-label="Previous sentence" title="Previous sentence">Prev</button>
+    <button id="tts-next" aria-label="Next sentence" title="Next sentence">Next</button>
+    <button id="pause" aria-label="Pause or resume reading" title="Pause or resume">Pause</button>
+    <button id="stop" aria-label="Stop reading" title="Stop">Stop</button>
+    <select id="rate" aria-label="Reading speed" title="Speed">
+      <option value="0.8">0.8×</option><option value="1" selected>1×</option>
+      <option value="1.2">1.2×</option><option value="1.4">1.4×</option><option value="1.7">1.7×</option>
+    </select>
+    <select id="voice" aria-label="Reading voice" title="Voice"></select>
+    <span id="tts-state" aria-live="polite">Ready</span>
+  </span>
+  <span class="group">
+    <select id="mainsel" title="Document of this project" hidden></select>
+    <button id="paperbtn" title="Metadata and conversion (source fields are detected automatically)">Paper…</button>
+    <button id="keysbtn" title="Keyboard shortcuts: see and change them">Keys</button>
+    <button id="theme" title="Colour scheme: follow the system, light or dark">Auto</button>
+    <button id="help" title="Keyboard shortcuts">?</button>
+  </span>
+  <span id="build"></span>
+</header>
+<nav id="toolbar" aria-label="Editing">
+  <button data-act="bold" title="Bold \textbf (Ctrl+B)"><b>B</b></button>
+  <button data-act="emph" title="Emphasis \emph (Ctrl+I)"><i>I</i></button>
+  <span class="sep"></span>
+  <button data-act="math" title="Inline maths (Ctrl+M or $)">$x$</button>
+  <button data-act="display" title="Displayed equation (Ctrl+Shift+M)">Equation</button>
+  <span class="sep"></span>
+  <button data-act="cite" title="Cite: search references.bib and cryptobib (Ctrl+Alt+C)">Cite…</button>
+  <button data-act="ref" title="Reference a section, theorem, figure, table or equation (Ctrl+Alt+R)">Ref…</button>
+  <button data-act="latex" title="Insert any LaTeX (Ctrl+\)">LaTeX</button>
+  <span class="sep"></span>
+  <button data-act="section" title="Section heading at the cursor (Ctrl+Alt+1)">Section</button>
+  <button data-act="subsection" title="Subsection heading at the cursor (Ctrl+Alt+2)">Subsection</button>
+  <button data-act="paragraph" title="\paragraph heading at the cursor (Ctrl+Alt+3)">Para heading</button>
+  <button data-act="splitsection" title="Split the current section at the cursor">Split section</button>
+  <button data-act="newpara" title="New paragraph at the cursor (Enter)">New para</button>
+  <span class="sep"></span>
+  <button data-act="find" title="Find (Ctrl+F), find and replace (Ctrl+H)">Find/Replace</button>
+  <span class="sep"></span>
+  <button data-act="diff" id="diffbtn" title="Show what changed (read-only while on)">Diff</button>
+  <select id="diffbase" title="Compare with" hidden>
+    <option value="save">since the last save</option>
+    <option value="head">since the last commit</option>
+  </select>
+  <span id="diffnav" hidden><button id="diffprev" title="Previous change">Prev</button><span id="diffcount"></span><button id="diffnext" title="Next change">Next</button></span>
+  <button data-act="undo" title="Undo (Ctrl+Z)">Undo</button>
+  <button data-act="redo" title="Redo (Ctrl+Shift+Z)">Redo</button>
+</nav>
+<div id="findbar" hidden>
+  <input id="find-q" placeholder="Find" spellcheck="false">
+  <input id="find-r" placeholder="Replace with" spellcheck="false">
+  <label title="Regular expression"><input type="checkbox" id="find-re"> .*</label>
+  <label title="Match case"><input type="checkbox" id="find-case"> Aa</label>
+  <label title="Whole words"><input type="checkbox" id="find-word"> W</label>
+  <span id="find-count"></span>
+  <button id="find-prev" title="Previous (Shift+Enter)">Prev</button>
+  <button id="find-next" title="Next (Enter)">Next</button>
+  <button id="find-one" title="Replace this match">Replace</button>
+  <button id="find-all" title="Replace every match">All</button>
+  <button id="find-close" title="Close (Esc)">Close</button>
+  <span class="small">text only: maths and LaTeX chips are not searched</span>
+</div>
+<div id="banner" hidden></div>
+<div id="external" hidden role="dialog" aria-labelledby="external-title">
+  <b id="external-title">Files changed outside the editor</b>
+  <div id="external-files"></div>
+  <div class="external-actions">
+    <button id="external-reload">Reload</button>
+    <button id="external-overwrite">Overwrite disk</button>
+    <button id="external-backup">Save backup</button>
+    <button id="external-later">Later</button>
+  </div>
+</div>
+<div id="openbox" role="dialog" aria-modal="true" aria-labelledby="open-title" hidden>
+  <b id="open-title">Choose the main document</b>
+  <div id="open-path"></div>
+  <label for="open-main">Main file</label>
+  <select id="open-main"></select>
+  <div class="external-actions">
+    <button id="open-confirm">Open</button>
+    <button id="open-cancel">Cancel</button>
+  </div>
+</div>
+<aside id="diffmap" aria-label="Changed blocks in document" hidden><div id="diffmap-viewport"></div></aside>
+<main id="doc" spellcheck="true"></main>
+<aside id="drawer" role="dialog" aria-labelledby="drawer-title" hidden>
+  <div class="drawer-head">
+    <span id="drawer-title">Edit LaTeX</span>
+    <span class="spacer"></span>
+    <button id="drawer-apply" title="Ctrl+Enter">Apply</button>
+    <button id="drawer-delete">Delete</button>
+    <button id="drawer-cancel" title="Esc">Cancel</button>
+  </div>
+  <textarea id="drawer-src" spellcheck="false"></textarea>
+  <div id="drawer-preview"></div>
+</aside>
+<div id="menu" hidden></div>
+<div id="paperbox" role="dialog" aria-labelledby="paper-title" hidden>
+  <div class="fv-head"><b>Paper</b><span class="spacer"></span>
+    <button id="md-save">Save metadata</button><button id="md-close">Close</button></div>
+  <div id="md-body"></div>
+</div>
+<div id="historybox" role="dialog" aria-labelledby="history-title" hidden>
+  <div class="fv-head"><b id="history-title">Save history</b><span class="spacer"></span>
+    <button id="history-delete" title="Delete only the selected save snapshot" disabled>Delete selected</button>
+    <button id="history-clear" title="Delete all editor save snapshots (not Git commits)">Clear history...</button>
+    <button id="history-close">Close</button></div>
+  <div class="history-cols">
+    <div id="history-list"></div>
+    <div id="history-detail"><p class="small">Every save keeps the text it replaced. Choose a save to see what it changed.
+      Restoring puts that version in the editor as unsaved edits: nothing is written until you save, and that save
+      is in the history too.</p></div>
+  </div>
+</div>
+<div id="keysbox" role="dialog" aria-labelledby="keys-title" hidden>
+  <div class="fv-head"><b>Keyboard shortcuts</b><span class="spacer"></span>
+    <button id="keys-reset">Reset to defaults</button><button id="keys-save">Save</button><button id="keys-close">Close</button></div>
+  <div id="keys-list"></div>
+  <p class="small">Click Change, then press the new combination (Esc cancels). Shortcuts are saved for you, for every paper.
+  Firefox keeps Ctrl+W, Ctrl+Q, Ctrl+T, Ctrl+N and Ctrl+Shift+R for itself.</p>
+</div>
+<div id="figview" role="dialog" aria-labelledby="fv-title" hidden>
+  <div class="fv-head">
+    <span id="fv-title">Figure</span>
+    <span class="fv-tabs">
+      <button data-tab="image">Image</button><button data-tab="text">Text</button>
+      <button data-tab="games" id="fv-games-tab">Games</button><button data-tab="cells" id="fv-cells-tab">Cells</button><button data-tab="latex">LaTeX</button>
+    </span>
+    <span class="spacer"></span>
+    <button id="fv-undo" title="Undo game change (Ctrl+Z)" hidden disabled>Undo</button>
+    <button id="fv-redo" title="Redo game change (Ctrl+Shift+Z)" hidden disabled>Redo</button>
+    <button id="fv-add-game" title="Add a gameenv block next to the existing games" hidden>+ Game</button>
+    <button id="fv-apply" title="Use the edited games or LaTeX (save to write the file)">Apply</button>
+    <button id="fv-close" title="Esc">Close</button>
+  </div>
+  <div id="fv-body"></div>
+</div>
+<div id="palette" hidden>
+  <div class="pal-head"><span id="pal-title"></span><span class="spacer"></span><span id="pal-tray"></span></div>
+  <input id="pal-q" spellcheck="false" autocomplete="off">
+  <div id="pal-list"></div>
+  <div id="pal-foot"></div>
+</div>
+<div id="helpbox" role="dialog" aria-labelledby="help-title" hidden>
+  <h3 id="help-title">Editing</h3>
+  <ul>
+    <li>Type anywhere in the text. <kbd>Enter</kbd> starts a new paragraph; <kbd>Backspace</kbd> at the start of a paragraph joins it to the one before.</li>
+    <li><kbd>$</kbd> or <kbd>Ctrl</kbd>+<kbd>M</kbd>: inline maths (of the selection, if any). <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd>: displayed maths.</li>
+    <li>A bracket, brace or quote typed over a selection wraps it. Pasted <code>$…$</code> becomes maths.</li>
+    <li><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd>: cite (search by key, title, author or year; Ctrl+Enter picks several; not found? search online and add it to references.bib).</li>
+    <li><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>R</kbd>: reference a section, theorem, figure, table or equation.</li>
+    <li><kbd>Ctrl</kbd>+<kbd>F</kbd>: find and replace. <kbd>Ctrl</kbd>+<kbd>\</kbd>: insert any LaTeX.</li>
+    <li><kbd>Ctrl</kbd>+<kbd>I</kbd> / <kbd>Ctrl</kbd>+<kbd>B</kbd>: <code>\emph</code> / <code>\textbf</code>.</li>
+    <li>Click maths, a reference or any grey chip to edit its LaTeX; <kbd>Ctrl</kbd>+<kbd>Enter</kbd> applies.</li>
+    <li>Hover a block and use <b>＋</b> to add a paragraph, heading or displayed maths after it, or <b>✕</b> to delete a heading.</li>
+    <li>Heading tools move sections up or down and combine a section with the one before it; put the cursor in a section and use <b>Split section</b> to divide it.</li>
+    <li>Headings, figure and table captions are edited in place; listings in their box.</li>
+    <li><kbd>Ctrl</kbd>+<kbd>S</kbd> saves. Saving writes only the files you changed, applies the house rules, and rebuilds the PDF.</li>
+  </ul>
+  <h3>Reading aloud</h3>
+  <ul><li>Click in a sentence and press ▶ (or <kbd>Alt</kbd>+<kbd>R</kbd>); use ‹ and › to move between sentences. Maths is read as words.</li></ul>
+  <button id="helpclose">Close</button>
+</div>
+<script src="/static/latex.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
