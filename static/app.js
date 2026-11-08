@@ -3280,6 +3280,39 @@ function colorGameLine(g, index, color) {
   showFigTab('games'); figureEditStatus();
 }
 
+function gameInsertStep(g, index, kind, indent) {
+  const variants = {
+    state: [indent + '\\State $x \\gets y$'],
+    if: [indent + '\\If{$c$}', indent + '  \\State $x \\gets y$', indent + '\\EndIf'],
+    while: [indent + '\\While{$c$}', indent + '  \\State $x \\gets y$', indent + '\\EndWhile'],
+    for: [indent + '\\For{$i \\gets 1$ to $n$}', indent + '  \\State $x \\gets y$', indent + '\\EndFor'],
+    repeat: [indent + '\\Repeat', indent + '  \\State $x \\gets y$', indent + '\\Until{$c$}'],
+    else: [indent + '\\Else'],
+    elseif: [indent + '\\ElsIf{$c$}'],
+    return: [indent + '\\State \\Return $x$'],
+    require: [indent + '\\Require $x$'],
+    ensure: [indent + '\\Ensure $y$'],
+    comment: [indent + '\\State \\Comment{Review note}'],
+  };
+  if (!variants[kind]) return;
+  figureCheckpoint();
+  g.lines.splice(index + 1, 0, ...variants[kind].map(parseGameLine));
+  showFigTab('games'); figureEditStatus();
+}
+function gameMoveStep(g, index, direction) {
+  const other = index + direction;
+  if (other < 0 || other >= g.lines.length) return;
+  const movable = (line) => !line.raw && !BLOCK_OPEN.has(line.cmd) &&
+    !BLOCK_CLOSE.has(line.cmd) && line.cmd !== 'Else' && line.cmd !== 'ElsIf';
+  if (!movable(g.lines[index]) || !movable(g.lines[other]) ||
+      /^\s*/.exec(g.lines[index].prefix)[0] !== /^\s*/.exec(g.lines[other].prefix)[0]) {
+    banner('Move complete loops and conditionals in the LaTeX tab to preserve nesting.');
+    return;
+  }
+  figureCheckpoint();
+  [g.lines[index], g.lines[other]] = [g.lines[other], g.lines[index]];
+  showFigTab('games'); figureEditStatus();
+}
 function openFigure(seg) {
   FV.seg = seg;
   FV.src = segSource(seg, [], null, false);   // with any caption edit made since
