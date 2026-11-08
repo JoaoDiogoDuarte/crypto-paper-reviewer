@@ -3264,6 +3264,7 @@ function updateGameActions() {
   $('#fv-undo').disabled = !editing || !FV.undo.length;
   $('#fv-redo').disabled = !editing || !FV.redo.length;
   $('#fv-add-game').disabled = !editing || !FV.games.some((g) => g.kind === 'algo' && g.env === 'gameenv');
+  $('#fv-status').textContent = editing && FV.undo.length ? 'Draft changed - Apply to use edits' : '';
 }
 function gameCheckpoint(editor = null) {
   if (editor && FV.lastEditor === editor) return;
@@ -3432,9 +3433,9 @@ function renderGames(body) {
     grid.append(box);
   });
   body.append(grid);
-  body.append(el('p', 'small', 'Edit a line in place. Use Add to insert statements, conditions and loops; Up/Down to move lines; Mark to highlight changes. ' +
-    'Undo/Redo affect only this viewer. Drag game headers to reorder compatible sibling gameenv blocks; unsafe layout boundaries are protected. ' +
-    'Apply, then Save, to write LaTeX and rebuild its image.'));
+  body.append(el('p', 'small', 'Add: insert common statements, conditions and loops. Up/Down or Alt+Up/Down: reorder safe statements. ' +
+    'Mark: coloured xcolor boxes. Ctrl+Z/Ctrl+Shift+Z: undo/redo; Ctrl+Enter: Apply; Ctrl+S: Apply and Save. ' +
+    'Drag game headers to reorder compatible sibling gameenv blocks. Changes are not written until Apply, then Save.'));
 }
 
 function gameMoveLine(g, index, offset) {
