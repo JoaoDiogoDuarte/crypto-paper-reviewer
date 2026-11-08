@@ -221,7 +221,16 @@ function layoutPages(doc) {
       if (chars + size > perPage * page) page = Math.floor((chars + size) / perPage) + 1;
       chars += size;
     }
-    if (!box || page !== last) { startPage(page); last = page; }
+    if (!box || page !== last) {
+      const prev = box;
+      startPage(page); last = page;
+      // a heading never ends a page: it moves on with the block it heads
+      // (in the PDF a float such as figure* can push that block over)
+      for (let tail; prev && (tail = prev.lastElementChild) && tail.seg && tail.seg.kind === 'heading';) {
+        box.insertBefore(tail, box.children[1] || null);
+        tail.seg.page = page;
+      }
+    }
     seg.page = page;
     box.append(seg.el);
   }

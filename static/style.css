@@ -684,3 +684,14 @@ body.diffing #diffbtn {
 @media (prefers-reduced-motion: reduce) {
   button, select { transition: none; }
 }
+
+/* Lists. A nested list that closes right before the next \item would break
+   the line twice (blank line): the \item starts its own line. The source
+   newline after a list end would otherwise show as a space at the start of
+   the following line. */
+.chip.listend:has(+ .chip.item)::before,
+.chip.listend:has(+ .chip.nl + .chip.item)::before { content: none; }
+.chip.listend + .chip.nl { display: none; }
+/* The paragraph being edited: no tinted slab over the whole LaTeX paragraph
+   (lists and run-on text included); the caret shows where you are. */
+.para:focus { background: transparent; }

@@ -19,6 +19,8 @@ with `Ctrl+S`; the edit lands in `sections/intro.tex` as
 
 ![Editing a sentence in place, then saving](docs/screenshots/editing.gif)
 
+More recordings, from the game editor to venue conversion: [docs/demos.md](docs/demos.md).
+
 <details><summary>Dark theme</summary>
 
 ![The editor on the ieee-conf test fixture, dark theme](docs/screenshots/editor-dark.png)
