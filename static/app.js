@@ -3415,9 +3415,26 @@ function renderGames(body) {
     if (g.title !== null) {
       const t = el('span'); t.contentEditable = 'true';
       renderTokens(L.tokenize(g.title), t, {});
-      t.addEventListener('input', () => { g.newTitle = ser(t); });
+      t.addEventListener('input', () => { g.newTitle = ser(t); figureEditStatus(); });
       head.append(t);
     } else head.append(el('span', 'small', g.kind === 'proc' ? 'procedure' : g.env));
+    if (g.env === 'gameenv') {
+      const actions = el('span', 'game-actions');
+      const action = (label, title, enabled, fn) => {
+        const button = el('button', '', label);
+        button.title = title; button.disabled = !enabled;
+        button.onclick = fn; actions.append(button);
+      };
+      action('Up', 'Move this game earlier', gi > 0 && FV.games[gi - 1].env === 'gameenv',
+        () => editWholeGame('move', gi, -1));
+      action('Down', 'Move this game later', gi + 1 < FV.games.length && FV.games[gi + 1].env === 'gameenv',
+        () => editWholeGame('move', gi, 1));
+      action('+ Game', 'Insert a new independent game after this one', true,
+        () => editWholeGame('add', gi));
+      action('Delete', 'Remove the whole game (can Undo before Apply)', true,
+        () => editWholeGame('delete', gi));
+      head.append(actions);
+    }
     box.append(head);
     let depth = 0;
     g.lines.forEach((l, li) => {
@@ -3429,8 +3446,10 @@ function renderGames(body) {
     grid.append(box);
   });
   body.append(grid);
-  body.append(el('p', 'small', 'Edit a line in place; ＋ adds a statement below, ⊕ an if-block, ✕ deletes. ' +
-    'Lines you do not touch are kept exactly. Apply, then save, to write the file; the image updates after the build.'));
+  body.append(el('p', 'small',
+    'Edit a line in place. The Insert menu offers statements, If/Else, While, For, Repeat, Return, and comments. ' +
+    'Up/Down reorder adjacent statements; game-panel Up/Down move independent games when safe. ' +
+    'Box colors use the document-defined gamechange macro. Ctrl+Z/Y undo/redo; Ctrl+Enter applies, then Save writes the file.'));
 }
 
 function algoLine(g, l, li, depth) {
@@ -3442,26 +3461,57 @@ function algoLine(g, l, li, depth) {
     row.append(el('code', 'gcomment', l.prefix.trim() || ' '));
   } else {
     if (KW[l.kind]) row.append(el('span', 'gkw', KW[l.kind]));
+    const mark = gameColorParts(l.content);
     const t = el('span', 'gtext'); t.contentEditable = 'true';
-    renderTokens(L.tokenize(l.content), t, {});
-    t.addEventListener('input', () => { l.content = ser(t); row.classList.add('edited'); });
+    if (mark.color) { t.classList.add('game-mark'); t.dataset.color = mark.color; }
+    renderTokens(L.tokenize(mark.inner), t, {});
+    t.addEventListener('input', () => {
+      const now = ser(t);
+      l.content = mark.color ? '\\gamechange{' + mark.color + '}{' + now + '}' : now;
+      row.classList.add('edited');
+      figureEditStatus();
+    });
     row.append(t);
     if (/\\Comment/.test(l.suffix)) {
-      const c = /\\Comment\s*\{([^]*)\}/.exec(l.suffix);
-      row.append(el('span', 'gcomment', '▹ ' + (c ? cleanTex(c[1]) : '')));
+      const comment = /\\Comment\s*\{([^]*)\}/.exec(l.suffix);
+      row.append(el('span', 'gcomment', '// ' + (comment ? cleanTex(comment[1]) : '')));
     }
   }
   const tools = el('span', 'gtools');
-  const indentOf = (x) => /^\s*/.exec(x.prefix)[0];
-  const add = (lines) => { g.lines.splice(li + 1, 0, ...lines.map(parseGameLine)); showFigTab('games'); };
-  const inner = indentOf(l) + (BLOCK_OPEN.has(l.cmd) || l.cmd === 'Else' || l.cmd === 'ElsIf' ? '  ' : '');
-  const b1 = el('button', '', '+'); b1.title = 'Add a statement below';
-  b1.onclick = () => add([inner + '\\State $x \\gets y$']);
-  const b2 = el('button', '', '+ if'); b2.title = 'Add an if-block below';
-  b2.onclick = () => add([inner + '\\If{$c$}', inner + '  \\State $x \\gets y$', inner + '\\EndIf']);
-  const b3 = el('button', '', 'Delete'); b3.title = 'Delete this line';
-  b3.onclick = () => { g.lines.splice(li, 1); showFigTab('games'); };
-  tools.append(b1, b2, b3);
+  const indent = /^\s*/.exec(l.prefix)[0] +
+    (BLOCK_OPEN.has(l.cmd) || l.cmd === 'Else' || l.cmd === 'ElsIf' ? '  ' : '');
+  const insert = el('select');
+  insert.title = 'Insert a new algorithmic line or complete control block below this line';
+  insert.setAttribute('aria-label', 'Insert algorithmic step');
+  for (const [value, label] of [['', '+ Insert...'], ['state', 'Statement'], ['if', 'If / EndIf'],
+    ['elseif', 'Else if'], ['else', 'Else'], ['while', 'While / EndWhile'],
+    ['for', 'For / EndFor'], ['repeat', 'Repeat / Until'], ['return', 'Return'],
+    ['require', 'Require'], ['ensure', 'Ensure'], ['comment', 'Comment']]) {
+    const opt = el('option', '', label); opt.value = value; insert.append(opt);
+  }
+  insert.onchange = () => { if (insert.value) gameInsertStep(g, li, insert.value, indent); };
+  const color = el('select', 'game-mark-input');
+  color.title = gameColorAvailable() ? 'Color the entire statement with \\gamechange' :
+    'To enable colored changes, define \\gamechange{color}{content} in your paper preamble';
+  color.setAttribute('aria-label', 'Mark game change with a color');
+  for (const [value, label] of [['', 'No box'], ['two', 'Blue box'], ['three', 'Orange box'], ['four', 'Purple box']]) {
+    const opt = el('option', '', label); opt.value = value; color.append(opt);
+  }
+  color.value = gameColorParts(l.content).color;
+  color.disabled = l.raw || !gameColorAvailable();
+  color.onchange = () => colorGameLine(g, li, color.value);
+  const up = el('button', '', 'Up');
+  up.title = 'Move one simple statement up';
+  up.disabled = li === 0 || l.raw;
+  up.onclick = () => gameMoveStep(g, li, -1);
+  const down = el('button', '', 'Down');
+  down.title = 'Move one simple statement down';
+  down.disabled = li + 1 === g.lines.length || l.raw;
+  down.onclick = () => gameMoveStep(g, li, 1);
+  const remove = el('button', '', 'Delete');
+  remove.title = 'Remove this line; a control block might need its matching end line removed too';
+  remove.onclick = () => { figureCheckpoint(); g.lines.splice(li, 1); showFigTab('games'); figureEditStatus(); };
+  tools.append(insert, color, up, down, remove);
   row.append(tools);
   return row;
 }
