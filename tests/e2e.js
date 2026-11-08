@@ -1177,7 +1177,8 @@ Object.assign(TESTS, {
     await page.select('second');
     await page.type('third');
     await page.click('#diffbtn');
-    await page.waitFor(`DIFF.marks.length === 1`, 8000, 'one change since last save');
+    await page.waitFor(`!$('#diffnav').hidden`, 8000, 'diff view opened');
+    eq(await page.eval(`DIFF.marks.length`), 1, 'one changed block since last save');
     eq(await page.eval(`$('#diffbase').value`), 'save', 'default diff baseline is last save');
     await page.eval(`$('#diffbase').value = 'head'; $('#diffbase').dispatchEvent(new Event('change'))`);
     await page.waitFor(`DIFF.marks.length === 2`, 8000, 'two changes since last commit');
