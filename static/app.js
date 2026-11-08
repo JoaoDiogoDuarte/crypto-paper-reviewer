@@ -454,7 +454,8 @@ function chip(cls, src, text) {
 
 const HIDDEN = new Set(['label', 'clearpage', 'newpage', 'maketitle', 'bibliographystyle', 'FloatBarrier',
   'vspace', 'noindent', 'centering', 'title', 'author', 'nonumber', 'medskip', 'smallskip', 'bigskip',
-  'Needspace', 'raggedbottom', 'balance', 'IEEEauthorblockN', 'IEEEauthorblockA', 'leavevmode']);
+  'Needspace', 'raggedbottom', 'balance', 'IEEEauthorblockN', 'IEEEauthorblockA', 'leavevmode',
+  'protect']);
 
 function renderChip(tok, ctx) {
   switch (tok.t) {
@@ -510,8 +511,9 @@ function renderChip(tok, ctx) {
   const accents = { c: '\u0327', "'": '\u0301', '`': '\u0300', '"': '\u0308',
     '^': '\u0302', '~': '\u0303', '=': '\u0304', '.': '\u0307',
     u: '\u0306', v: '\u030c', H: '\u030b', r: '\u030a', k: '\u0328' };
-  if (Object.prototype.hasOwnProperty.call(accents, name) && arg().length === 1)
-    return chip('char', tok.s, (arg() + accents[name]).normalize('NFC'));
+  const accented = tok.accentBase || arg();
+  if (Object.prototype.hasOwnProperty.call(accents, name) && [...accented].length === 1)
+    return chip('char', tok.s, (accented + accents[name]).normalize('NFC'));
   // a macro of the document used in text: show it typeset when its body is
   // maths (\ensuremath{...}, \mathsf{...}, \mathcal...)
   const body = DOC.macros['\\' + name];
