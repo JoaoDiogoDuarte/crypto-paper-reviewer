@@ -20,6 +20,7 @@ body { margin: 0; background: var(--bg); color: var(--fg);
   font: 17px/1.55 "Latin Modern Roman", "CMU Serif", Georgia, serif; }
 
 #bar { position: sticky; top: 0; z-index: 30; isolation: isolate; display: flex; flex-wrap: wrap; gap: .4em 1em;
+  box-shadow: 0 4px 0 var(--bg);
   align-items: center; padding: .45em 1em; background: var(--bg); border-bottom: 1px solid var(--line);
   font: 14px/1.3 system-ui, sans-serif; }
 #bar .group { display: inline-flex; gap: .3em; align-items: center; }
@@ -48,9 +49,9 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
 
 #doc { max-width: 46em; margin: 1.5em auto 50vh; padding: 0 1.2em 0 3em; }   /* left: room for the block tools */
 body.two #doc { max-width: 76em; padding-right: 2.6em; }
-body.two .page { column-count: 2; column-gap: 2.5em; column-fill: balance; column-rule: 1px solid var(--line);
-  content-visibility: visible; contain: none; overflow: visible; }
-body.two .seg > :not(.tools) { content-visibility: visible; }
+body.two .page { column-count: 2; column-gap: 2.2em; column-fill: balance; column-rule: 1px solid var(--line);
+  content-visibility: visible; contain: none; overflow: visible; min-width: 0; }
+body.two .seg > :not(.tools) { content-visibility: visible; contain: none; }
 body.two .seg { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 body.two .seg.heading { break-after: avoid-column; }
 body.two .seg.figure, body.two .seg.table, body.two .seg.code { break-inside: avoid-column; }
@@ -110,7 +111,7 @@ h4 { font-size: 1em; }
 .chip.nl, .chip.tie, .chip.char { cursor: text; }
 .chip.nl:hover, .chip.tie:hover { outline: none; }
 .chip.parbreak { display: block; height: .8em; cursor: text; }
-.chip.parbreak::after { content: "¶"; color: var(--muted); font-size: .8em; }
+.chip.parbreak::after { content: "[P]"; color: var(--muted); font: 10px system-ui, sans-serif; }
 /* lists: each item starts a new line, its marker inline with its text */
 .chip.item::before { content: "\A"; white-space: pre; }
 .chip.item .itemmark { padding-left: 1.2em; }
@@ -122,9 +123,21 @@ h4 { font-size: 1em; }
   background: var(--math); color: var(--fg); border: 1px solid var(--line); border-radius: 4px;
   padding: .5em .7em; resize: vertical; white-space: pre; overflow-x: auto; margin: .3em 0 .8em; }
 .seg.figure, .seg.table { margin: 1em 0; text-align: center; }
-.seg.figure img { max-width: 100%; background: #fff; border-radius: 3px; }
-@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .seg.figure img { filter: invert(.88) hue-rotate(180deg); } }
-:root[data-theme="dark"] .seg.figure img { filter: invert(.88) hue-rotate(180deg); }
+.seg.figure > div:first-child, .seg.table > div:first-child {
+  max-width: 100%; min-width: 0; overflow: hidden;
+}
+.seg.figure img, .seg.table img {
+  display: block; width: auto; max-width: 100%; height: auto; max-height: 72vh;
+  object-fit: contain; margin: 0 auto; background: #fff; border-radius: 3px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .seg.figure img,
+  :root:not([data-theme="light"]) .seg.table img { filter: invert(.88) hue-rotate(180deg); }
+}
+:root[data-theme="dark"] .seg.figure img,
+:root[data-theme="dark"] .seg.table img { filter: invert(.88) hue-rotate(180deg); }
+body.two .seg.figure img, body.two .seg.table img { max-height: min(64vh, 46rem); }
+
 .caption { font-size: .9em; text-align: justify; outline: none; white-space: pre-wrap; }
 .caption .capnum { font-style: normal; }
 .small { font: 12px system-ui, sans-serif; color: var(--muted); }
@@ -156,6 +169,7 @@ kbd { font: 12px ui-monospace, monospace; border: 1px solid var(--line); border-
 ::highlight(findcur) { background-color: var(--findcur); color: #000; }
 
 #toolbar { position: sticky; top: var(--bar-height, 58px); z-index: 29; isolation: isolate; display: flex; flex-wrap: wrap; gap: .3em; align-items: center;
+  box-shadow: 0 4px 0 var(--bg);
   padding: .3em 1em; background: var(--bg); border-bottom: 1px solid var(--line); font: 13px system-ui, sans-serif; }
 #toolbar button { padding: .15em .55em; }
 #toolbar .sep { width: 1px; height: 1.3em; background: var(--line); margin: 0 .3em; }
