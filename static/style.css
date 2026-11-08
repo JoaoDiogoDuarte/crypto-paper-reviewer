@@ -19,7 +19,7 @@
 body { margin: 0; background: var(--bg); color: var(--fg);
   font: 17px/1.55 "Latin Modern Roman", "CMU Serif", Georgia, serif; }
 
-#bar { position: sticky; top: 0; z-index: 10; display: flex; flex-wrap: wrap; gap: .4em 1em;
+#bar { position: sticky; top: 0; z-index: 30; isolation: isolate; display: flex; flex-wrap: wrap; gap: .4em 1em;
   align-items: center; padding: .45em 1em; background: var(--bg); border-bottom: 1px solid var(--line);
   font: 14px/1.3 system-ui, sans-serif; }
 #bar .group { display: inline-flex; gap: .3em; align-items: center; }
@@ -55,7 +55,14 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
 
 #doc { max-width: 46em; margin: 1.5em auto 50vh; padding: 0 1.2em 0 3em; }   /* left: room for the block tools */
 body.two #doc { max-width: 76em; padding-right: 2.6em; }
-body.two .page { column-count: 2; column-gap: 2.5em; column-rule: 1px solid var(--line); }
+body.two .page { column-count: 2; column-gap: 2.5em; column-fill: balance; column-rule: 1px solid var(--line);
+  content-visibility: visible; contain: none; overflow: visible; }
+body.two .seg > :not(.tools) { content-visibility: visible; }
+body.two .seg { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+body.two .seg.heading { break-after: avoid-column; }
+body.two .seg.figure, body.two .seg.table, body.two .seg.code { break-inside: avoid-column; }
+body.two .seg.wide { break-inside: avoid; }
+body.two .chip.math.display { max-width: 100%; overflow-x: auto; }
 /* content-visibility clips to the page box: the box reaches out to hold the
    block tools (＋ ✕ ↑ ↓) beside the text, or they could be neither seen nor clicked */
 .page { content-visibility: auto; contain-intrinsic-size: auto 60em; border-top: 1px dashed var(--line);
@@ -155,11 +162,11 @@ kbd { font: 12px ui-monospace, monospace; border: 1px solid var(--line); border-
 ::highlight(find) { background-color: var(--find); }
 ::highlight(findcur) { background-color: var(--findcur); color: #000; }
 
-#toolbar { position: sticky; top: 2.35em; z-index: 9; display: flex; flex-wrap: wrap; gap: .3em; align-items: center;
+#toolbar { position: sticky; top: var(--bar-height, 58px); z-index: 29; isolation: isolate; display: flex; flex-wrap: wrap; gap: .3em; align-items: center;
   padding: .3em 1em; background: var(--bg); border-bottom: 1px solid var(--line); font: 13px system-ui, sans-serif; }
 #toolbar button { padding: .15em .55em; }
 #toolbar .sep { width: 1px; height: 1.3em; background: var(--line); margin: 0 .3em; }
-#findbar { position: sticky; top: 4.6em; z-index: 9; display: flex; flex-wrap: wrap; gap: .4em; align-items: center;
+#findbar { position: sticky; top: calc(var(--bar-height, 58px) + var(--toolbar-height, 40px)); z-index: 28; display: flex; flex-wrap: wrap; gap: .4em; align-items: center;
   padding: .35em 1em; background: var(--chip); border-bottom: 1px solid var(--line); font: 13px system-ui, sans-serif; }
 #findbar input[type=text], #findbar input:not([type]) { font: 13px ui-monospace, monospace; padding: .2em .4em;
   background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 4px; width: 16em; }

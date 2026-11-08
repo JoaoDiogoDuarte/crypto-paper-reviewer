@@ -22,11 +22,11 @@
     <button id="cols" title="Switch between one and two columns">Two columns</button>
   </span>
   <span class="group" id="ttsbar">
-    <button id="play" aria-label="Play or resume reading" title="Read aloud from the sentence at the cursor (Alt+R)">▶ Read</button>
-    <button id="tts-prev" aria-label="Previous sentence" title="Previous sentence">‹</button>
-    <button id="tts-next" aria-label="Next sentence" title="Next sentence">›</button>
-    <button id="pause" aria-label="Pause or resume reading" title="Pause or resume">⏸</button>
-    <button id="stop" aria-label="Stop reading" title="Stop">⏹</button>
+    <button id="play" aria-label="Play or resume reading" title="Read aloud from the sentence at the cursor (Alt+R)">Read</button>
+    <button id="tts-prev" aria-label="Previous sentence" title="Previous sentence">←</button>
+    <button id="tts-next" aria-label="Next sentence" title="Next sentence">→</button>
+    <button id="pause" aria-label="Pause or resume reading" title="Pause or resume">Pause</button>
+    <button id="stop" aria-label="Stop reading" title="Stop">Stop</button>
     <select id="rate" aria-label="Reading speed" title="Speed">
       <option value="0.8">0.8×</option><option value="1" selected>1×</option>
       <option value="1.2">1.2×</option><option value="1.4">1.4×</option><option value="1.7">1.7×</option>
@@ -36,7 +36,7 @@
   </span>
   <span class="group">
     <select id="mainsel" title="Document of this project" hidden></select>
-    <button id="paperbtn" title="Metadata, conversion to another venue's class, anonymous version">Paper…</button>
+    <button id="paperbtn" title="Metadata and conversion (source fields are detected automatically)">Paper…</button>
     <button id="keysbtn" title="Keyboard shortcuts: see and change them">Keys</button>
     <button id="theme" title="Colour scheme: follow the system, light or dark">Auto</button>
     <button id="help" title="Keyboard shortcuts">?</button>
@@ -68,8 +68,8 @@
     <option value="session">since the editor opened</option>
   </select>
   <span id="diffnav" hidden><button id="diffprev" title="Previous change">‹</button><span id="diffcount"></span><button id="diffnext" title="Next change">›</button></span>
-  <button data-act="undo" title="Undo (Ctrl+Z)">↶</button>
-  <button data-act="redo" title="Redo (Ctrl+Shift+Z)">↷</button>
+  <button data-act="undo" title="Undo (Ctrl+Z)">Undo</button>
+  <button data-act="redo" title="Redo (Ctrl+Shift+Z)">Redo</button>
 </nav>
 <div id="findbar" hidden>
   <input id="find-q" placeholder="Find" spellcheck="false">

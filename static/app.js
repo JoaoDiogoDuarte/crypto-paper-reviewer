@@ -20,6 +20,15 @@ window.addEventListener('unhandledrejection', (e) => {
 const L = window.LatexDoc;
 const TOKEN = document.querySelector('meta[name=token]').content;
 const $ = (s) => document.querySelector(s);
+// The header wraps on narrow screens.  Never hard-code its sticky height.
+const barObserver = new ResizeObserver(() => {
+  document.documentElement.style.setProperty('--bar-height',
+    Math.ceil($('#bar').getBoundingClientRect().height) + 'px');
+  document.documentElement.style.setProperty('--toolbar-height',
+    Math.ceil($('#toolbar').getBoundingClientRect().height) + 'px');
+});
+barObserver.observe($('#bar'));
+barObserver.observe($('#toolbar'));
 
 let DOC = null;          // payload of /api/doc: files, aux, macros, bib, figs
 const FILES = {};        // name -> { text, base (hash on disk), disk (text on disk), segs }
