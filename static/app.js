@@ -194,7 +194,11 @@ function render() {
 // two columns typing rebalances one page, not the whole paper.
 const CHARS_PER_PAGE = { IEEEtran: 6500, llncs: 2700, iacrcc: 3000, acmart: 6000, article: 3300 };
 function layoutPages(doc) {
-  const exact = DOC.pages && Object.keys(DOC.pages).length > 0;
+  // In flowing two-column review, forcing SyncTeX page breaks strands tall
+  // figures opposite blank columns. Keep exact PDF pages only in one-column
+  // review; reflow two columns into balanced approximate reading pages.
+  const exact = DOC.pages && Object.keys(DOC.pages).length > 0 &&
+    !document.body.classList.contains('two');
   const cls = (DOC.docclass || 'article').split('/')[0];
   const twoCol = cls === 'IEEEtran' || /twocolumn/.test(DOC.docclass || '');
   const perPage = CHARS_PER_PAGE[cls] || 3300;
@@ -1127,8 +1131,17 @@ function caretAtStart(editable) {
 }
 
 $('#cols').onclick = () => {
+  if (DIFF.on) leaveDiff();
+  const oldY = window.scrollY;
+  const focus = DOC ? captureEditorState() : null;
+  if (DOC) commit(false);
   const two = document.body.classList.toggle('two');
   $('#cols').textContent = two ? 'One column' : 'Two columns';
+  if (DOC) {
+    render();
+    restoreEditorState(focus);
+    window.scrollTo(0, oldY);
+  }
   try { localStorage.setItem('cols', two ? '2' : '1'); } catch (e) { /* storage unavailable */ }
 };
 try { if (localStorage.getItem('cols') === '2') $('#cols').click(); } catch (e) { /* storage unavailable */ }
