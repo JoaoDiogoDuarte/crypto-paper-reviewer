@@ -330,6 +330,50 @@ class BackendTest(unittest.TestCase):
         self.assertFalse(os.path.exists(p))
         self.assertTrue(os.listdir(os.path.join(server.CACHE, 'bad-aux')))
 
+    def test_torture_conversion_preflight_output_isolation_and_overwrite(self):
+        """A missing class must create no output; conversions go to a subdir."""
+        original = server.read('main.tex')
+        names = {'ieee': 'IEEEtran.cls', 'llncs': 'llncs.cls',
+                 'iacrcc': 'iacrcc.cls', 'iacrtrans': 'iacrtrans.cls',
+                 'acmart': 'acmart.cls', 'lipics': 'lipics-v2021.cls',
+                 'article': 'article.cls'}
+        with mock.patch('server.shutil.which', return_value=None):
+            for target, class_name in names.items():
+                with self.subTest(target=target):
+                    with self.assertRaisesRegex(ValueError, class_name.replace('.', r'\.')):
+                        server.run_convert(target, False, 'output.tex', False)
+                    self.assertFalse(os.path.isdir(os.path.join(self.tmp, 'converted', target)))
+        calls = []
+        def fake_run(args, **kwargs):
+            calls.append((args, kwargs))
+            if args[0] == 'kpsewhich':
+                return server.subprocess.CompletedProcess(args, 0, stdout='/fake/latex/class.cls\n', stderr='')
+            if args[0] == 'latexmk':
+                return server.subprocess.CompletedProcess(args, 0, stdout='Done', stderr='')
+            raise AssertionError('unexpected conversion subprocess: ' + repr(args))
+        with mock.patch('server.shutil.which', return_value='/usr/bin/kpsewhich'):
+            with mock.patch('server.subprocess.run', side_effect=fake_run):
+                for target in names:
+                    with self.subTest(target=target):
+                        name = 'out-' + target + '.tex'
+                        result = server.run_convert(target, False, name, False)
+                        self.assertEqual(result['file'], os.path.join('converted', target, name))
+                        self.assertTrue(result['built'])
+                        converted = os.path.join(self.tmp, result['file'])
+                        self.assertTrue(os.path.isfile(converted))
+                        self.assertIn(r'\begin{document}', open(converted, encoding='utf-8').read())
+                        with self.assertRaises(FileExistsError):
+                            server.run_convert(target, False, name, False)
+                root = server.run_convert('article', True, 'main-article.tex', False, root=True)
+        self.assertEqual(root['file'], 'main-article.tex')
+        self.assertTrue(os.path.isfile(os.path.join(self.tmp, 'main-article.tex')))
+        self.assertEqual(server.read('main.tex'), original)
+        latexmk = [(args, kw) for args, kw in calls if args[0] == 'latexmk']
+        self.assertEqual(len(latexmk), len(names) + 1)
+        for args, kw in latexmk:
+            self.assertTrue(kw['env']['TEXINPUTS'].startswith(self.tmp + '//:'))
+            self.assertTrue(os.path.isdir(kw['cwd']))
+
     def test_missing_class_does_not_write_converted_file(self):
         with mock.patch('server.shutil.which', return_value=None):
             with self.assertRaisesRegex(ValueError, 'iacrcc.cls is not installed'):
