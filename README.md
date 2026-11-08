@@ -120,6 +120,19 @@ folder holds only the program and the shared voice models.
 - **History** lets you delete an individual saved snapshot or clear all editor
   snapshots. This deletes only `.paper-editor/history` entries and unused blobs;
   it does not delete source files or Git commits.
+- **Two-column mode** is a review reading flow: it groups source blocks into
+  approximate spreads rather than copying PDF page boundaries from SyncTeX.
+  Large figures and table images scale down to the reading-column width.
+- **Game editor** opens by double-clicking a figure that contains `gameenv`
+  or `algorithmic` blocks. Use Add to insert a statement, `if`, `while`,
+  `for`, `repeat`, `return`, comment or assertion. Ordinary statements can
+  move up/down; undo/redo of edits here are independent from whole-paper undo.
+  Use Ctrl+Z / Ctrl+Shift+Z or the Undo/Redo buttons. Ctrl+Enter applies a
+  draft; Ctrl+S applies then saves. Mark adds/removes `\\colorbox{...}{...}`
+  with an existing `xcolor` package. Add/Copy/Delete and drag/Left/Right
+  reorder complete `gameenv` blocks; moving across LaTeX layout wrappers is
+  deliberately blocked so minipages and column breaks remain valid. An edit
+  only reaches a `.tex` file after Apply, then Save.
 
 
 ## Debugging TeX builds
