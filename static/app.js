@@ -3535,7 +3535,7 @@ function procLine(g, l, li) {
   show();
   const tools = el('div', 'gtools'); tools.style.opacity = 1;
   const b1 = el('button', '', '+ line'); b1.onclick = () => { gameCheckpoint(); g.lines.splice(li + 1, 0, { prefix: '', content: '', suffix: l.suffix || ' \\\\\n' }); if (!l.suffix) l.suffix = ' \\\\\n'; showFigTab('games'); };
-  const b3 = el('button', '', 'Delete'); b3.onclick = () => { g.lines.splice(li, 1); showFigTab('games'); };
+  const b3 = el('button', '', 'Delete'); b3.onclick = () => { gameCheckpoint(); g.lines.splice(li, 1); showFigTab('games'); };
   tools.append(b1, b3);
   row.append(ta, prev, tools);
   return row;
@@ -3630,14 +3630,33 @@ function applyFigure() {
   if (seg.edit && seg.parts.caption !== undefined) { seg.edit.textContent = ''; renderTokens(L.tokenize(seg.parts.caption), seg.edit, {}); }
   markEdited();
   banner('Figure updated; save to write the file. The image updates after the build.');
-  closeFigure();
+  closeFigure(true);
 }
 
-function closeFigure() { $('#figview').hidden = true; FV.seg = null; FV.latexEdited = false; }
+function closeFigure(force = false) {
+  if (!FV.seg) return;
+  if (!force && figureWithEdits() !== FV.src &&
+      !confirm('Discard pending figure/game changes? Undo and redo here will be lost.')) return;
+  $('#figview').hidden = true;
+  FV.seg = null; FV.latexEdited = false; FV.lastEditor = null;
+}
 
 for (const b of document.querySelectorAll('.fv-tabs button')) b.onclick = () => showFigTab(b.dataset.tab);
 $('#fv-apply').onclick = applyFigure;
-$('#fv-close').onclick = closeFigure;
+$('#fv-close').onclick = () => closeFigure();
+// While editing a figure, Ctrl+S applies its draft before saving the paper.
+// Ctrl+Z/Y in Games operates on game drafts, not the document history.
+document.addEventListener('keydown', (e) => {
+  if ($('#figview').hidden || !(e.ctrlKey || e.metaKey) || e.altKey) return;
+  const key = e.key.toLowerCase();
+  if (FV.tab === 'games' && (key === 'z' || key === 'y')) {
+    e.preventDefault(); e.stopPropagation();
+    if (key === 'y' || e.shiftKey) redoGame(); else undoGame();
+  } else if (key === 's') {
+    e.preventDefault(); e.stopPropagation();
+    applyFigure(); save();
+  }
+}, true);
 doc.addEventListener('dblclick', (e) => {
   const box = e.target.closest('.seg.figure, .seg.table');
   if (!box || e.target.closest('.caption')) return;
