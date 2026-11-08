@@ -1201,7 +1201,7 @@ def run_convert(target, anonymous, name, overwrite, root=False):
     if not installed and not os.path.isfile(os.path.join(PAPER, class_name)):
         raise ValueError(f'{class_name} is not installed. Install that LaTeX class (check with '
                          f'`kpsewhich {class_name}`), then retry conversion.')
-    base_dir = os.path.join(PAPER, os.path.dirname(MAIN))
+    base_dir = os.path.normpath(os.path.join(PAPER, os.path.dirname(MAIN)))
     out_dir = base_dir if root else os.path.join(base_dir, 'converted', target)
     path = os.path.join(out_dir, name)
     if os.path.exists(path) and not overwrite:
