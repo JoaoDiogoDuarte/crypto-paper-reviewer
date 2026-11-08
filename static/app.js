@@ -3705,7 +3705,7 @@ function setGameDraft(src) {
   FV.tables = L.parseTabulars(src);
   FV.latexEdited = false;
   FV.lastEditor = null;
-  showFigTab('games');
+  showFigTab(FV.tab === 'cells' ? 'cells' : 'games');
 }
 function undoGame() {
   if (!FV.undo.length) return;
@@ -3789,15 +3789,35 @@ const GAME_COLORS = {
 function colorMarked(line) {
   return /^\\colorbox\{(yellow!20|cyan!20|green!20|magenta!15)\}\{([\s\S]*)\}$/.exec(line.content);
 }
+// xcolor, directly or through a package that loads it
+const XCOLOR_RE = /\\(?:usepackage|RequirePackage)(?:\[[^\]]*\])?\{[^}]*\b(?:xcolor|tikz|pgf|tcolorbox|todonotes)\b[^}]*\}/;
+function preambleSeg() {
+  return ((FILES[DOC.main] || {}).segs || []).find((x) => x.kind === 'hidden' && x.src.includes('\\begin{document}'));
+}
+function hasXcolor() {
+  const front = preambleSeg();
+  return (front && front.patched !== undefined && XCOLOR_RE.test(front.patched)) ||
+    Object.values(FILES).some((f) => XCOLOR_RE.test(f.text));
+}
+// Colour boxes need xcolor: offer to load it, as an ordinary edit (written on save, shown in Diff)
+function offerXcolor() {
+  const front = preambleSeg();
+  if (!front) { banner('Colour marking needs \\usepackage{xcolor} in the preamble.'); return false; }
+  if (!confirm('Colour marking needs the xcolor package, which this paper does not load.\n\n' +
+    'Add \\usepackage{xcolor} to the preamble of ' + DOC.main + '? It is written when you save.')) return false;
+  const src = front.patched !== undefined ? front.patched : front.src;
+  const i = src.lastIndexOf('\\begin{document}');
+  front.patched = src.slice(0, i) + '\\usepackage{xcolor}\n' + src.slice(i);
+  front.touched = true;
+  markEdited();
+  toast('Added \\usepackage{xcolor} to the preamble: save to write it', 'ok');
+  return true;
+}
 function gameChangeColor(line, color) {
   if (!line || line.raw || !Object.prototype.hasOwnProperty.call(GAME_COLORS, color)) return;
   const match = colorMarked(line);
   const bare = match ? match[2] : line.content;
-  if (color !== 'none' && !Object.values(FILES).some((f) =>
-    /\\usepackage(?:\[[^\]]*\])?\{[^}]*xcolor[^}]*\}/.test(f.text))) {
-    banner('Colour marking requires \\usepackage{xcolor} in the paper preamble.');
-    return;
-  }
+  if (color !== 'none' && !hasXcolor() && !offerXcolor()) return;
   const result = color === 'none' ? bare : '\\colorbox{' + color + '}{' + bare + '}';
   if (result === line.content) return;
   gameCheckpoint();
@@ -3848,6 +3868,8 @@ function renderGames(body) {
     let depth = 0;
     g.lines.forEach((l, li) => {
       if (g.kind === 'proc') { box.append(procLine(g, l, li)); return; }
+      // the empty lines a body starts and ends with (\begin{...}\n ... \n\end): not shown
+      if (l.raw && !l.prefix.trim() && (li === 0 || li === g.lines.length - 1)) return;
       if (BLOCK_CLOSE.has(l.cmd) || l.cmd === 'ElsIf' || l.cmd === 'Else') depth = Math.max(0, depth - 1);
       box.append(algoLine(g, l, li, depth));
       if (BLOCK_OPEN.has(l.cmd) || l.cmd === 'ElsIf' || l.cmd === 'Else') depth++;
@@ -3991,7 +4013,7 @@ function renderCells(body) {
       r.cells.forEach((c) => {
         const td = el('td'); td.contentEditable = 'true';
         renderTokens(L.tokenize(c.content), td, {});
-        td.addEventListener('input', () => { c.content = ser(td); td.classList.add('edited'); });
+        td.addEventListener('input', () => { gameCheckpoint(td); c.content = ser(td); td.classList.add('edited'); });
         tr.append(td);
       });
       for (let k = r.cells.length; k < ncols; k++) tr.append(el('td'));
@@ -4001,10 +4023,10 @@ function renderCells(body) {
         const nr = { lead: '', empty: false, rawRest: '', sep: r.sep || ' \\\\\n',
           cells: Array.from({ length: ncols }, (_, k) => ({ lead: k ? ' ' : '', content: '', trail: ' ' })) };
         if (!r.sep) r.sep = ' \\\\\n';
-        t.rows.splice(ri + 1, 0, nr); showFigTab('cells');
+        gameCheckpoint(); t.rows.splice(ri + 1, 0, nr); showFigTab('cells');
       };
       const del = el('button', '', 'Delete'); del.title = 'Delete this row';
-      del.onclick = () => { t.rows.splice(ri, 1); showFigTab('cells'); };
+      del.onclick = () => { gameCheckpoint(); t.rows.splice(ri, 1); showFigTab('cells'); };
       tools.append(add, del);
       tr.append(tools);
       tbl.append(tr);
@@ -4012,6 +4034,7 @@ function renderCells(body) {
     const col = el('button', '', '+ column');
     col.title = 'Add a column at the right (the column spec gets the same type as the last column)';
     col.onclick = () => {
+      gameCheckpoint();
       for (const r of t.rows) if (!r.empty && r.cells.length) {
         const lastCell = r.cells[r.cells.length - 1];
         lastCell.trail = lastCell.trail || ' ';
@@ -4108,7 +4131,7 @@ document.addEventListener('keydown', (e) => {
   const key = e.key.toLowerCase();
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault(); e.stopPropagation(); applyFigure();
-  } else if (FV.tab === 'games' && (key === 'z' || key === 'y')) {
+  } else if ((FV.tab === 'games' || FV.tab === 'cells') && (key === 'z' || key === 'y')) {
     e.preventDefault(); e.stopPropagation();
     if (key === 'y' || e.shiftKey) redoGame(); else undoGame();
   } else if (key === 's') {
