@@ -335,6 +335,8 @@ function renderFloat(seg) {
     const url = DOC.figs[seg.src];
     if (url) { const img = el('img'); img.src = url; img.alt = 'Figure'; box.append(img); }
     else box.append(el('div', 'small', '(figure image is being rendered, or the source changed; it appears after the next build)'));
+  } else if (DOC.figs[seg.src]) {
+    const img = el('img'); img.src = DOC.figs[seg.src]; img.alt = 'Table'; box.append(img);
   } else {
     const raw = /\\begin\{tabular\}[^]*?\\end\{tabular\}/.exec(seg.src);
     if (raw) box.append(el('pre', 'rawsrc', raw[0]));
@@ -2722,7 +2724,7 @@ const gameLineSrc = (l) => L.gameLineSrc(l);
 
 function openFigure(seg) {
   FV.seg = seg;
-  FV.src = seg.figSrc || seg.src;
+  FV.src = segSource(seg, [], null, false);   // with any caption edit made since
   FV.games = parseGames(FV.src);
   FV.tables = L.parseTabulars(FV.src);
   $('#fv-title').textContent = (seg.kind === 'figure' ? 'Figure ' : 'Table ') + (seg.el.querySelector('.capnum')?.textContent || '');
@@ -2919,7 +2921,7 @@ function parseGamesKeepingEdits(src) {
 function applyFigure() {
   const seg = FV.seg;
   const src = figureWithEdits();
-  if (src === (seg.figSrc || seg.src)) { closeFigure(); return; }
+  if (src === FV.src) { closeFigure(); return; }
   snapshot();
   seg.figSrc = src;
   seg.parts = L.captionParts(src) || { prefix: src, caption: '', suffix: '' };

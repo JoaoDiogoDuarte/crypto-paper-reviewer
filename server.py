@@ -392,20 +392,33 @@ def figure_sources():
     return found
 
 
-def fig_key(src):
-    return sha(src)[:16]
+def fig_key(src, labels=None):
+    """Cache key: the source plus the numbers of the labels it references."""
+    if labels is None:
+        labels = load_aux()['labels']
+    keys = sorted({k.strip() for g in re.findall(r'\\[a-zA-Z]*ref\*?\{([^}]*)\}', src) for k in g.split(',')})
+    nums = ''.join(k + '=' + str(labels.get(k, {}).get('v', '')) + ';' for k in keys)
+    return sha(src + nums)[:16]
+
+
+def aux_label_lines():
+    """The main document's label and citation definitions, for the figure build."""
+    return re.findall(r'^\\(?:newlabel|bibcite)\{.*$', aux_text(), re.M)
 
 
 def build_figures(log):
     """Render every float whose source changed to <cache>/<key>.png."""
     os.makedirs(CACHE, exist_ok=True)
-    todo = [s for s in figure_sources() if not os.path.exists(os.path.join(CACHE, fig_key(s) + '.png'))]
+    labels = load_aux()['labels']
+    todo = [s for s in figure_sources() if not os.path.exists(os.path.join(CACHE, fig_key(s, labels) + '.png'))]
     if not todo:
         return
     with tempfile.TemporaryDirectory() as tmp:
         main = read(MAIN)
         cut = main.find('\\begin{document}')
-        doc = [main[:cut], r'\pagestyle{empty}', r'\begin{document}']
+        doc = [main[:cut], r'\pagestyle{empty}', r'\begin{document}', r'\makeatletter']
+        doc += aux_label_lines()
+        doc.append(r'\makeatother')
         for src in todo:
             env = re.match(r'\\begin\{(figure\*?|table\*?)\}', src).group(1)
             body = src[src.index('}') + 1:src.rindex('\\end{')]
@@ -424,7 +437,7 @@ def build_figures(log):
         subprocess.run(['pdfcrop', '--margins', '6', 'figs.pdf', 'crop.pdf'], cwd=tmp,
                        capture_output=True, timeout=300)
         for n, src in enumerate(todo, 1):
-            out = os.path.join(CACHE, fig_key(src))
+            out = os.path.join(CACHE, fig_key(src, labels))
             subprocess.run(['pdftoppm', '-r', '200', '-png', '-singlefile', '-f', str(n), '-l', str(n),
                             os.path.join(tmp, 'crop.pdf'), out], capture_output=True, timeout=120)
             # the figure's text, for reading it in the viewer
@@ -505,8 +518,9 @@ def doc_payload():
         text = read(name)
         files[name] = {'text': text, 'hash': sha(text)}
     figs = {}
+    labels = load_aux()['labels']
     for src in figure_sources():
-        k = fig_key(src)
+        k = fig_key(src, labels)
         if os.path.exists(os.path.join(CACHE, k + '.png')):
             figs[src] = '/fig/' + k + '.png'
     for name, f in files.items():
