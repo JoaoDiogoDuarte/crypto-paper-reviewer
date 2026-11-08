@@ -3076,7 +3076,10 @@ async function diffOn() {
       const r = await fetch(`/api/baseline?name=${encodeURIComponent(name)}&ref=${ref}`);
       base = r.ok ? (await r.json()).text : null;
     }
-    const cur = FILES[name].segs.filter((sg) => sg.el && !sg.removed);
+    // Each editable block may differ from its cached .src until the next
+    // render. Compare the live serialized block, not the stale source.
+    const cur = FILES[name].segs.filter((sg) => sg.el && !sg.removed)
+      .map((sg) => ({ ...sg, src: segSource(sg, [], null, false) }));
     if (base === null) { cur.forEach((sg) => { sg.el.classList.add('diff-new'); DIFF.marks.push(sg.el); }); changedFiles++; continue; }
     if (base === FILES[name].text) continue;
     changedFiles++;
