@@ -62,7 +62,8 @@ main file. The same project can contain several main documents.
 | `Ctrl+S` | save |
 | `Ctrl+Z`, `Ctrl+Shift+Z` / `Ctrl+Y` | undo, redo (structure edits included) |
 | `Ctrl+B`, `Ctrl+I`, `Ctrl+Shift+I` | `\textbf`, `\emph`, `\textit` |
-| `$`, `Ctrl+M` | inline maths |
+| `$`, `Ctrl+M` | inline maths: the selection becomes a formula; with no selection, a new one |
+| `(` `)` `[` `]` `{` `}` `"` `'` over a selection | wrap the selection (quotes become ` `` '' `) instead of replacing it |
 | `Ctrl+Shift+M` | displayed equation at the cursor |
 | `Enter` / `Backspace` at a paragraph's start | new paragraph / join with the one before |
 | `Ctrl+Alt+1`, `2`, `3` | section, subsection, `\paragraph` heading at the cursor |
@@ -111,9 +112,19 @@ Online voices send the text being read to Microsoft or Google.
 
 ## Tests
 
+    node tests/e2e.js                        # the page in headless Chrome: typing, keys, paste, saving, conflicts
     node tests/roundtrip.js ~/papers         # every .tex parses and re-serializes byte for byte
     python3 -m unittest tests.backend_test   # save, build, document switching and launcher tests
     tests/selftest.py ~/papers/a ~/papers/b  # the page itself, in headless Firefox
+
+`tests/e2e.js` (Node 22, Chrome or Chromium; `CHROME=…` to choose) runs a real
+server on a throwaway paper and acts as a user: key presses, typing, pasting,
+the dialogs, then compares the files on disk with what was typed. Pass words
+to run only the tests whose names contain them (`node tests/e2e.js paste`).
+
+Pasted text is plain text; formulas in it (`$…$`, `$$…$$`, `\(…\)`, `\[…\]`)
+become formulas. A copy from the page keeps its LaTeX for a paste back into
+the page, and its plain text has the formulas as `$…$`.
 
 `tests/selftest.py` with no arguments reads paths from `tests/papers.local`
 (not tracked: keep your own papers out of the repository). In the browser,

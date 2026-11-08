@@ -25,19 +25,26 @@ let DOC = null;          // payload of /api/doc: files, aux, macros, bib, figs
 const FILES = {};        // name -> { text, base (hash on disk), disk (text on disk), segs }
 let ORDER = [];          // display order: segments, each with .file and .el
 let lastTyping = 0;
+// The diff view rewrites the editable blocks with its own marks: while it is
+// shown, the page is not the document, and nothing may read it back.
+let DIFF_SHOWN = false;
 
 // ---------------------------------------------------------------- loading
 
-async function load(keepScroll) {
+// Read the document from the server and render it.  Unsaved edits are kept,
+// file by file, unless the file is in `discard`: a file edited here keeps its
+// old base hash, so that saving it after it changed on disk is refused (and
+// asks) instead of overwriting the other version.
+async function load(keepScroll, discard = []) {
   const y = window.scrollY;
   const caret = captureEditorState();
   const oldMacros = DOC && JSON.stringify(DOC.macros);
   DOC = await (await fetch('/api/doc')).json();
   if (oldMacros !== JSON.stringify(DOC.macros)) KATEX_CACHE.clear();
+  if (DOC) commit();   // typing while the document was being fetched
   for (const [name, f] of Object.entries(DOC.files)) {
     const cur = FILES[name];
-    // keep unsaved edits of a file that did not change on disk
-    if (cur && cur.text !== cur.disk && cur.base === f.hash) continue;
+    if (cur && cur.text !== cur.disk && !discard.includes(name)) continue;
     FILES[name] = { text: f.text, disk: f.text, base: f.hash };
   }
   render();
@@ -58,13 +65,18 @@ function captureEditorState() {
   const before = document.createRange();
   before.selectNodeContents(seg.edit);
   before.setEnd(range.startContainer, range.startOffset);
-  return { file: seg.file, src: seg.src, offset: before.toString().length };
+  const segs = (FILES[seg.file] && FILES[seg.file].segs) || [];
+  return { file: seg.file, index: segs.indexOf(seg), src: seg.src, offset: before.toString().length };
 }
 
+// Put the caret back at the same character of the same block after a
+// re-render (the block is found by its place in its file, or by its source).
 function restoreEditorState(state) {
   if (!state) return;
-  const seg = ORDER.find((item) => item.file === state.file && item.src === state.src && item.edit);
-  if (!seg) return;
+  const segs = (FILES[state.file] && FILES[state.file].segs) || [];
+  let seg = segs[state.index];
+  if (!seg || !seg.edit || seg.edit.tagName === 'TEXTAREA') seg = ORDER.find((item) => item.file === state.file && item.src === state.src && item.edit);
+  if (!seg || !seg.edit || seg.edit.tagName === 'TEXTAREA') return;
   const walker = document.createTreeWalker(seg.edit, NodeFilter.SHOW_TEXT);
   let node, offset = state.offset;
   while ((node = walker.nextNode())) {
@@ -136,6 +148,7 @@ let HEADS = {};
 // ---------------------------------------------------------------- rendering
 
 function render() {
+  DIFF_SHOWN = false;
   const speech = typeof TTS !== 'undefined' ? TTS.capture() : null;
   if (typeof TTS !== 'undefined') TTS.reset();
   const doc = $('#doc');
@@ -206,15 +219,19 @@ function layoutPages(doc) {
 // changed (typing, a chip edit, find and replace, a join); untouched blocks
 // are not re-serialized.
 let EDIT_OBSERVER = null;
+function markTouched(records) {
+  for (const r of records) {
+    const n = r.target.nodeType === 1 ? r.target : r.target.parentElement;
+    const seg = n && segOf(n);
+    if (seg) seg.touched = true;
+  }
+}
+// The observer reports changes later (a microtask): code that changes the
+// page and reads it back at once takes the pending reports first.
+function flushEdits() { if (EDIT_OBSERVER) markTouched(EDIT_OBSERVER.takeRecords()); }
 function watchEdits() {
   if (EDIT_OBSERVER) EDIT_OBSERVER.disconnect();
-  EDIT_OBSERVER = new MutationObserver((records) => {
-    for (const r of records) {
-      const n = r.target.nodeType === 1 ? r.target : r.target.parentElement;
-      const seg = n && segOf(n);
-      if (seg) seg.touched = true;
-    }
-  });
+  EDIT_OBSERVER = new MutationObserver(markTouched);
   EDIT_OBSERVER.observe($('#doc'), { subtree: true, childList: true, characterData: true });
 }
 
@@ -251,7 +268,7 @@ function wrapSeg(seg, inner, tools) {
   const box = el('div', 'seg ' + seg.kind);
   box.append(inner);
   const t = el('div', 'tools');
-  const plus = el('button', '', '＋');
+  const plus = el('button', '', '+');
   plus.title = 'Add after this block';
   plus.onclick = (e) => { e.stopPropagation(); addMenu(seg, plus); };
   t.append(plus);
@@ -269,7 +286,7 @@ function renderPara(seg, ctx) {
   if (ctx.env.length && L.THM_ENVS.has(ctx.env[ctx.env.length - 1])) p.classList.add('thm');
   renderTokens(toks, p, ctx);
   if (toks.some((t) => t.t === 'env' && t.mode === 'begin' && L.THM_ENVS.has(t.env))) p.classList.add('thm');
-  const visible = [...p.childNodes].some((n) => n.nodeType === 3 ? n.data.trim() : !n.classList.contains('hidden'));
+  const visible = [...p.childNodes].some((n) => n.nodeType === 3 ? n.data.trim() : !(n.classList.contains('hidden') || n.classList.contains('nl')));
   if (!visible) { p.classList.add('quiet'); p.contentEditable = 'false'; }
   seg.edit = p;
   return wrapSeg(seg, p);
@@ -335,6 +352,8 @@ function renderFloat(seg) {
     const url = DOC.figs[seg.src];
     if (url) { const img = el('img'); img.src = url; img.alt = 'Figure'; box.append(img); }
     else box.append(el('div', 'small', '(figure image is being rendered, or the source changed; it appears after the next build)'));
+  } else if (DOC.figs[seg.src]) {
+    const img = el('img'); img.src = DOC.figs[seg.src]; img.alt = 'Table'; box.append(img);
   } else {
     const raw = /\\begin\{tabular\}[^]*?\\end\{tabular\}/.exec(seg.src);
     if (raw) box.append(el('pre', 'rawsrc', raw[0]));
@@ -411,7 +430,7 @@ function renderChip(tok, ctx) {
   }
   const name = tok.name;
   const arg = (k = 0) => { const m = [...tok.s.matchAll(/\{([^{}]*)\}/g)]; return m[k] ? m[k][1] : ''; };
-  if (HIDDEN.has(name)) return chip('hidden', tok.s);
+  if (HIDDEN.has(name) || (name !== 'iff' && /^(newif|else|fi|if[a-zA-Z@]*|[a-zA-Z@]+(true|false))$/.test(name))) return chip('hidden', tok.s);
   if (/^[cC]ref$|^ref$|^eqref$|^autoref$/.test(name)) return chip('ref', tok.s, refText(name, arg()));
   if (name === 'cite') {
     const nums = arg().split(',').map((k) => (DOC.aux.cites[k.trim()] || '?'));
@@ -636,6 +655,8 @@ function segSource(seg, warnings, changes, applyRules = true) {
 function commit(applyRules = true) {
   const warnings = [];
   HOUSE_RULE_CHANGES = [];
+  if (DIFF_SHOWN) return warnings;   // the texts were committed when the diff opened
+  flushEdits();
   for (const [name, f] of Object.entries(FILES)) {
     if (!f.segs) continue;
     f.text = f.segs.map((s) => segSource(s, warnings, HOUSE_RULE_CHANGES, applyRules)).join('');
@@ -649,6 +670,7 @@ function editedFiles() {
 }
 
 function markEdited() {
+  flushEdits();
   const files = editedFiles();
   $('#dirty').textContent = files.length ? files.length + ' file' + (files.length > 1 ? 's' : '') + ' edited' : '';
   $('#save').classList.toggle('has-changes', files.length > 0);
@@ -661,6 +683,7 @@ function markEdited() {
 
 // Commit, apply a change to the segment lists, re-render from the texts.
 function structural(change) {
+  if (leaveDiff()) return;   // the blocks of the diff view are not the document
   commit();
   // every segment of every file takes its current source first, so that the
   // texts rebuilt below keep the edits of files the change does not touch
@@ -671,11 +694,14 @@ function structural(change) {
   if (focus) focusPlaceholder(focus);
 }
 
+// Take a block out with one of the gaps around it: the one after a heading
+// (its text then follows the blank line before it, as a paragraph of its own).
 function removeSeg(seg) {
   const segs = FILES[seg.file].segs;
   const i = segs.indexOf(seg);
   seg.removed = true;
-  if (i > 0 && segs[i - 1].kind === 'gap') segs[i - 1].removed = true;
+  if (seg.kind === 'heading' && segs[i + 1] && segs[i + 1].kind === 'gap' && i > 0 && segs[i - 1].kind === 'gap') segs[i + 1].removed = true;
+  else if (i > 0 && segs[i - 1].kind === 'gap') segs[i - 1].removed = true;
 }
 
 function insertAfter(seg, src) {
@@ -685,8 +711,21 @@ function insertAfter(seg, src) {
 }
 
 const HEADING_RANK = { part: 0, chapter: 1, section: 2, subsection: 3, subsubsection: 4, paragraph: 5 };
-function headingRank(seg) {
-  const h = seg && seg.kind === 'heading' && L.headingParts(seg.src);
+// The rank of a heading; for an \input, the rank of the first heading of
+// the file it reads (it starts a section of the document), if any.
+function headingRank(seg, seen = new Set()) {
+  if (!seg) return null;
+  if (seg.kind === 'input') {
+    const f = seg.input && FILES[seg.input];
+    if (!f || !f.segs || seen.has(seg.input)) return null;
+    seen.add(seg.input);
+    for (const s of f.segs) {
+      const r = s.kind === 'heading' || s.kind === 'input' ? headingRank(s, seen) : null;
+      if (r !== null) return r;
+    }
+    return null;
+  }
+  const h = seg.kind === 'heading' && L.headingParts(seg.src);
   return h ? HEADING_RANK[h.level] : null;
 }
 
@@ -698,12 +737,29 @@ function sectionEnd(segs, start, rank) {
   return segs.length;
 }
 
+// What must stay where it is: the end of the document, the bibliography,
+// the start of the appendices.
+const FIXED_RE = /\\(end\{document\}|bibliography\b|printbibliography|begin\{thebibliography\}|appendix\b|appendices\b|backmatter\b)/;
+const fixedIn = (chunk) => chunk.some((s) => s.kind !== 'gap' && FIXED_RE.test(s.src.replace(/(^|[^\\])%.*$/gm, '$1')));
+
+// Swap the neighbouring chunks segs[i..j) and segs[j..k), keeping the blank
+// lines between and after them where they were.
+function swapChunks(segs, i, j, k) {
+  const split = (lo, hi) => { let m = hi; while (m > lo && segs[m - 1].kind === 'gap') m--; return [segs.slice(lo, m), segs.slice(m, hi)]; };
+  const [aBody, aGap] = split(i, j);
+  const [bBody, bGap] = split(j, k);
+  const file = segs[i].file;
+  const sep = aGap.length ? aGap : [{ kind: 'gap', src: '\n\n', file }];
+  segs.splice(i, k - i, ...bBody, ...sep, ...aBody, ...(bGap.length ? bGap : (k === segs.length ? [] : [{ kind: 'gap', src: '\n\n', file }])));
+}
+
 function moveSection(seg, direction) {
   const segs = FILES[seg.file] && FILES[seg.file].segs;
-  const start = segs && segs.indexOf(seg);
+  const start = segs ? segs.indexOf(seg) : -1;
   const rank = headingRank(seg);
   if (!segs || start < 0 || rank === null) return;
   const end = sectionEnd(segs, start, rank);
+  let lo, mid, hi;
   if (direction < 0) {
     let previous = -1;
     for (let i = start - 1; i >= 0; i--) {
@@ -711,22 +767,24 @@ function moveSection(seg, direction) {
       if (r !== null && r < rank) break;
       if (r === rank) { previous = i; break; }
     }
-    if (previous < 0) { banner('This section is already first among its siblings.'); return; }
-    structural(() => {
-      const before = segs.slice(previous, start);
-      const current = segs.slice(start, end);
-      segs.splice(previous, end - previous, ...current, ...before);
-    });
+    if (previous < 0 || segs[previous].kind !== 'heading') {
+      banner(previous < 0 ? 'This section is already first among its siblings.' : 'The section before this one is in another file (\\input); move it there.');
+      return;
+    }
+    [lo, mid, hi] = [previous, start, end];
+  } else {
+    const next = end < segs.length ? headingRank(segs[end]) : null;
+    if (next !== rank || segs[end].kind !== 'heading') {
+      banner(next === rank ? 'The section after this one is in another file (\\input); move it there.' : 'This section is already last among its siblings.');
+      return;
+    }
+    [lo, mid, hi] = [start, end, sectionEnd(segs, end, rank)];
+  }
+  if (fixedIn(segs.slice(lo, hi))) {
+    banner('One of these sections holds the end of the document, the bibliography or \\appendix, which cannot move with it.');
     return;
   }
-  const next = end < segs.length ? headingRank(segs[end]) : null;
-  if (next !== rank) { banner('This section is already last among its siblings.'); return; }
-  const nextEnd = sectionEnd(segs, end, rank);
-  structural(() => {
-    const current = segs.slice(start, end);
-    const following = segs.slice(end, nextEnd);
-    segs.splice(start, nextEnd - start, ...following, ...current);
-  });
+  structural(() => swapChunks(segs, lo, mid, hi));
 }
 
 const PLACEHOLDER = 'Write here.';
@@ -799,8 +857,12 @@ function joinWithPrevious(seg) {
 
 let drawerChip = null, drawerSeg = null;
 
-function openDrawer(chipEl, seg, title) {
-  drawerChip = chipEl; drawerSeg = seg;
+// `fresh`: the chip was just inserted to be written here; closing the
+// drawer without applying takes it out again.
+let drawerFresh = false;
+function openDrawer(chipEl, seg, title, fresh = false) {
+  if (drawerChip && drawerChip !== chipEl) closeDrawer(false);   // a new formula left unwritten
+  drawerChip = chipEl; drawerSeg = seg; drawerFresh = fresh;
   $('#drawer-title').textContent = title || 'Edit LaTeX';
   const ta = $('#drawer-src');
   ta.value = chipEl.dataset.src;
@@ -822,27 +884,43 @@ function preview() {
 }
 
 function applyDrawer(remove) {
-  if (!drawerChip) return closeDrawer();
-  if (remove) drawerChip.remove();
-  else {
+  if (!drawerChip) return closeDrawer(true);
+  if (drawerChip.isConnected) snapshot();
+  const src = $('#drawer-src').value;
+  if (remove || !src.trim()) {
+    if (drawerFresh) closeDrawer(false);      // with its line breaks
+    else { drawerChip.remove(); closeDrawer(true); }
+  } else {
     const frag = document.createDocumentFragment();
-    renderTokens(L.tokenize($('#drawer-src').value), frag, {});
+    renderTokens(L.tokenize(src), frag, {});
+    const last = frag.lastChild;
     drawerChip.replaceWith(frag);
+    if (last && last.isConnected && editableAt(selRange())) setCaretAfter(last);
+    closeDrawer(true);
   }
-  closeDrawer();
   markEdited();
 }
 
-function closeDrawer() { $('#drawer').hidden = true; drawerChip = null; drawerSeg = null; }
+function closeDrawer(applied) {
+  if (!applied && drawerFresh && drawerChip && drawerChip.isConnected) {
+    // the line breaks put around a new displayed formula go with it
+    for (const n of [drawerChip.previousSibling, drawerChip.nextSibling]) {
+      if (n && n.nodeType === 1 && n.classList.contains('nl') && n.dataset.fresh) n.remove();
+    }
+    drawerChip.remove();
+    markEditedSoon();
+  }
+  $('#drawer').hidden = true; drawerChip = null; drawerSeg = null; drawerFresh = false;
+}
 
 $('#drawer-src').addEventListener('input', preview);
 $('#drawer-src').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); applyDrawer(false); }
-  if (e.key === 'Escape') { e.preventDefault(); closeDrawer(); }
+  if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeDrawer(false); }
 });
 $('#drawer-apply').onclick = () => applyDrawer(false);
 $('#drawer-delete').onclick = () => applyDrawer(true);
-$('#drawer-cancel').onclick = closeDrawer;
+$('#drawer-cancel').onclick = () => closeDrawer(false);
 
 // Insert a chip with the given source at the caret, and open it.
 function insertSource(src, title) {
@@ -876,17 +954,104 @@ function markEditedSoon() { clearTimeout(markTimer); markTimer = setTimeout(mark
 
 /* key handling: see the keymap section below */
 
-// Paste plain text only.
+// Copy, cut and paste.  A copy from the page carries its LaTeX (in a type of
+// its own) and a plain text in which formulas are $...$, so that pasting it
+// back, here or from anywhere else, gives formulas again.
+const LATEX_MIME = 'application/x-paper-editor-latex';
+
+// Plain text: formulas between dollars ($...$, $$...$$, \(...\), \[...\])
+// become formulas; everything else is text.  A $ is a dollar sign unless it
+// opens and closes a formula: no space just inside, no digit right after
+// the closing one (so "5$ or 10$" stays text); \$ is a dollar sign.
+function pastedNodes(text) {
+  const nodes = [];
+  let buf = '';
+  const flush = () => { if (buf) nodes.push(document.createTextNode(buf)); buf = ''; };
+  const math = (src, display) => { flush(); nodes.push(mathChip(src, display)); };
+  let i = 0;
+  while (i < text.length) {
+    if (text.startsWith('\\$', i)) { buf += '$'; i += 2; continue; }
+    let close;
+    if (text.startsWith('$$', i) && (close = text.indexOf('$$', i + 2)) > i + 2) {
+      math(text.slice(i, close + 2), true); i = close + 2; continue;
+    }
+    if (text.startsWith('\\[', i) && (close = text.indexOf('\\]', i + 2)) > i + 2) {
+      math(text.slice(i, close + 2), true); i = close + 2; continue;
+    }
+    if (text.startsWith('\\(', i) && (close = text.indexOf('\\)', i + 2)) > i + 2) {
+      math(text.slice(i, close + 2), false); i = close + 2; continue;
+    }
+    if (text[i] === '$' && text[i + 1] !== '$' && text[i + 1] && !/\s/.test(text[i + 1])) {
+      let j = i + 1;
+      for (; j < text.length; j++) {
+        if (text[j] === '\\') { j++; continue; }
+        if (text[j] === '$') break;
+      }
+      if (j < text.length && !/\s/.test(text[j - 1]) && !/[0-9]/.test(text[j + 1] || '')) {
+        math(text.slice(i, j + 1), false); i = j + 1; continue;
+      }
+    }
+    buf += text[i++];
+  }
+  flush();
+  return nodes;
+}
+
 doc.addEventListener('paste', (e) => {
-  if (e.target.tagName === 'TEXTAREA') return;
+  if (/^(TEXTAREA|INPUT)$/.test(e.target.tagName)) return;
   e.preventDefault();
-  const text = e.clipboardData.getData('text/plain').replace(/\r\n?/g, '\n').replace(/\n{2,}/g, ' ').replace(/\n/g, ' ');
-  const display = /^\$\$([^]*)\$\$$/.exec(text.trim());
-  const inline = /^\$([^]*)\$$/.exec(text.trim());
-  if (display && insertNodes([mathChip('$$' + display[1] + '$$', true)])) return;
-  if (inline && insertNodes([mathChip('$' + inline[1] + '$', false)])) return;
-  document.execCommand('insertText', false, text);
+  if (!editableAt(selRange())) return;
+  if (spansEditables()) { banner(ACROSS); return; }
+  const latex = e.clipboardData.getData(LATEX_MIME);
+  let nodes;
+  if (latex) {
+    const frag = document.createDocumentFragment();
+    renderTokens(L.tokenize(latex.replace(/\r\n?/g, '\n').replace(/\n{2,}/g, '\n')), frag, {});
+    nodes = [...frag.childNodes];
+  } else {
+    const text = e.clipboardData.getData('text/plain').replace(/\r\n?/g, '\n').replace(/\s*\n\s*/g, ' ');
+    nodes = pastedNodes(text);
+  }
+  if (!nodes.length) return;
+  insertNodes(nodes);
+  lastTyping = Date.now();
 });
+
+// The plain text of a piece of the page, with formulas as their LaTeX.
+function plainOf(node) {
+  let out = '';
+  for (const n of node.childNodes) {
+    if (n.nodeType === 3) { out += n.data; continue; }
+    if (n.nodeType !== 1 || n.classList.contains('hidden') || n.classList.contains('tools')) continue;
+    if (n.classList.contains('math')) { out += n.dataset.src; continue; }
+    if (n.classList.contains('nl') || n.classList.contains('parbreak')) { out += n.classList.contains('parbreak') ? '\n\n' : ' '; continue; }
+    if (n.classList.contains('chip')) { out += n.textContent; continue; }
+    if (/^(DIV|P|H[1-6])$/.test(n.tagName) && out && !out.endsWith('\n')) out += '\n\n';
+    out += plainOf(n);
+  }
+  return out;
+}
+
+function copySelection(e, cut) {
+  if (/^(TEXTAREA|INPUT)$/.test(e.target.tagName)) return;
+  const r = selectionInOneEditable();
+  if (!r) {              // across blocks: the browser's own copy, and no cut
+    if (cut && spansEditables()) { e.preventDefault(); banner(ACROSS); }
+    return;
+  }
+  const frag = r.cloneContents();
+  KEEP_UNICODE = '';
+  e.clipboardData.setData('text/plain', plainOf(frag));
+  e.clipboardData.setData(LATEX_MIME, ser(frag));
+  e.preventDefault();
+  if (cut) {
+    snapshot();
+    r.deleteContents();
+    markEditedSoon();
+  }
+}
+doc.addEventListener('copy', (e) => copySelection(e, false));
+doc.addEventListener('cut', (e) => copySelection(e, true));
 
 function segOf(node) {
   const box = node.closest && node.closest('.seg');
@@ -910,46 +1075,93 @@ $('#cols').onclick = () => {
 };
 try { if (localStorage.getItem('cols') === '2') $('#cols').click(); } catch (e) { /* storage unavailable */ }
 $('#help').onclick = () => { $('#helpbox').hidden = false; };
+$('#save').onclick = () => save();
 $('#helpclose').onclick = () => { $('#helpbox').hidden = true; };
 
 // ----------------------------------------------------------------- save
 
+// One save at a time: a save asked for while one runs happens after it (two
+// saves sent together would carry the same base hash, and the second would
+// be refused as a conflict with the first).  The poller stays away while
+// SAVING, so that it never mistakes our own write for an outside change.
+let SAVING = false, SAVE_AGAIN = false;
 async function save() {
-  commit(false);
-  const rawTexts = Object.fromEntries(Object.entries(FILES).map(([name, f]) => [name, f.text]));
-  const warnings = commit(true);
-  if (HOUSE_RULE_CHANGES.length) {
-    const kinds = [...new Set(HOUSE_RULE_CHANGES.map((seg) => seg.kind))].join(', ');
-    const apply = confirm(`House rules will adjust ${HOUSE_RULE_CHANGES.length} edited ${kinds} block${HOUSE_RULE_CHANGES.length === 1 ? '' : 's'} (including spacing${(DOC.config || {}).house_rules?.one_sentence_per_line ? ' and sentence-per-line formatting' : ''}). Apply them before saving?`);
-    if (!apply) for (const [name, text] of Object.entries(rawTexts)) FILES[name].text = text;
-  }
-  const files = Object.keys(FILES).filter((n) => FILES[n].text !== FILES[n].disk);
-  if (!files.length) return setBuild({ state: 'idle', message: 'nothing to save' });
-  for (const name of files) {
-    const r = await fetch('/api/save', {
-      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
-      body: JSON.stringify({ name, base: FILES[name].base, text: FILES[name].text }),
-    });
-    if (r.status === 409) { banner(`${name} changed on disk since it was loaded; your edits to it are kept here but not saved. Copy them, then reload.`); continue; }
-    if (!r.ok) { banner(`Saving ${name} failed: ${(await r.json()).error}`); continue; }
-    const { hash } = await r.json();
-    FILES[name].disk = FILES[name].text;
-    FILES[name].base = hash;
-  }
-  if (warnings.length) banner('Saved. House rules: ' + [...new Set(warnings)].join('; '));
-  setBuild({ state: 'running', message: 'saved; rebuilding PDF' });
-  // re-render only when the saved text has new structure (a paragraph break,
-  // a heading) that the page shows as a chip until it is parsed again
-  if (document.querySelector('#doc .chip.parbreak, #doc .chip.src[data-src^="\\\\section"], #doc .chip.src[data-src^="\\\\subsection"]')) {
-    const y = window.scrollY;
-    render();
-    window.scrollTo(0, y);
-  } else {
-    for (const seg of ORDER) if (seg.touched) { seg.src = segSource(seg, []); seg.touched = false; }
-    for (const name of files) FILES[name].segs.forEach((sg) => { if (!sg.el) return; });
-    markEdited();
+  leaveDiff();
+  if (SAVING) { SAVE_AGAIN = true; return; }
+  SAVING = true;
+  try {
+    do { SAVE_AGAIN = false; await saveOnce(); } while (SAVE_AGAIN);
+  } catch (e) {
+    banner('Saving failed: ' + e.message + '. Your edits are still here.');
+  } finally {
+    SAVING = false;
   }
 }
+
+async function saveOnce() {
+  commit(false);
+  const rawTexts = Object.fromEntries(Object.entries(FILES).map(([name, f]) => [name, f.text]));
+  let warnings = commit(true);
+  let apply = true;
+  if (HOUSE_RULE_CHANGES.length) {
+    const kinds = [...new Set(HOUSE_RULE_CHANGES.map((seg) => seg.kind))].join(', ');
+    apply = confirm(`House rules will adjust ${HOUSE_RULE_CHANGES.length} edited ${kinds} block${HOUSE_RULE_CHANGES.length === 1 ? '' : 's'} (${[...new Set(warnings)].join('; ') || 'ties, dashes, quotes, spacing'}${(DOC.config || {}).house_rules?.one_sentence_per_line ? ', one sentence per line' : ''}). Apply them before saving?`);
+    if (!apply) {
+      for (const [name, text] of Object.entries(rawTexts)) FILES[name].text = text;
+      warnings = [];
+    }
+  }
+  const files = Object.keys(FILES).filter((n) => FILES[n].text !== FILES[n].disk);
+  if (!files.length) { setBuild({ state: 'idle', message: 'nothing to save' }); return; }
+  const conflicts = [];
+  let saved = 0;
+  const batch = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);   // one entry of the history
+  for (const name of files) {
+    const text = FILES[name].text;
+    const r = await fetch('/api/save', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
+      body: JSON.stringify({ name, base: FILES[name].base, text, batch, create: FILES[name].base === null }),
+    });
+    const res = await r.json().catch(() => ({}));
+    if (r.status === 409) { conflicts.push([name, res.hash]); continue; }
+    if (r.status === 403) { banner(`Saving ${name} failed: the editor was restarted and no longer accepts this page. Your edits are still here: copy them out, then reload the page.`); continue; }
+    if (!r.ok) { banner(`Saving ${name} failed: ${res.error || r.status}. Your edits are still here.`); continue; }
+    FILES[name].disk = text;
+    FILES[name].base = res.hash;
+    saved++;
+  }
+  // the blocks take the source just saved (with or without the house rules,
+  // as chosen), so that the page and the file agree; typing that happened
+  // while the save was on its way stays an edit
+  if (document.querySelector('#doc .chip.parbreak, #doc .chip.src[data-src^="\\\\section"], #doc .chip.src[data-src^="\\\\subsection"], #doc .chip.src[data-src^="\\\\paragraph"], #doc .chip.src[data-src^="\\\\input"]')) {
+    // new structure (a paragraph break, a heading) is shown as a chip until
+    // it is parsed again
+    commit(apply);
+    const y = window.scrollY;
+    const caret = captureEditorState();
+    render();
+    restoreEditorState(caret);
+    window.scrollTo(0, y);
+  } else {
+    for (const seg of ORDER) if (seg.touched) { seg.src = segSource(seg, [], null, apply); seg.touched = false; }
+    markEdited();
+  }
+  if (saved) setBuild({ state: 'running', message: 'saved; rebuilding PDF' });
+  if (warnings.length && saved) banner('Saved. House rules: ' + [...new Set(warnings)].join('; '));
+  if (conflicts.length) showExternal(conflicts, true);
+  // a new \input names a file the page has not read yet
+  if (saved && Object.values(FILES).some((f) => (f.segs || []).some((s) => s.kind === 'input' && !s.removed && !s.input))) {
+    await load(true);
+  }
+}
+
+// Leaving the page (closing the tab, reloading) with unsaved edits asks first.
+window.addEventListener('beforeunload', (e) => {
+  if (!DOC) return;
+  let edited = false;
+  try { edited = editedFiles().length > 0; } catch (err) { edited = false; }
+  if (edited || SAVING) { e.preventDefault(); e.returnValue = ''; }
+});
 
 function banner(msg) {
   const b = $('#banner');
@@ -970,74 +1182,90 @@ let AUXVER = 0;
 let PENDING_EXTERNAL = null;
 const IGNORED_EXTERNAL = {};
 
-function showExternal(changed) {
-  if (PENDING_EXTERNAL) return;
-  PENDING_EXTERNAL = changed;
-  $('#external-files').textContent = changed.map((name) => name).join(', ');
+// The dialog for files that changed on disk while they have edits here:
+// changed is [[name, hash on disk]].  `refused`: a save was just refused.
+function showExternal(changed, refused) {
+  if (PENDING_EXTERNAL) {
+    for (const c of changed) if (!PENDING_EXTERNAL.some(([n]) => n === c[0])) PENDING_EXTERNAL.push(c);
+  } else PENDING_EXTERNAL = changed;
+  $('#external-title').textContent = refused
+    ? 'Not saved: these files changed on disk since the editor read them'
+    : 'Files you are editing changed outside the editor';
+  $('#external-files').textContent = PENDING_EXTERNAL.map(([name]) => name).join(', ');
   $('#external').hidden = false;
 }
 
-function discardExternalEdits(names) {
-  for (const name of names) {
-    const f = FILES[name];
-    if (f) f.text = f.disk;
-  }
-}
-
-async function reloadExternal() {
-  if (!PENDING_EXTERNAL) return;
-  const names = PENDING_EXTERNAL.map(([name]) => name);
-  names.forEach((name) => { delete IGNORED_EXTERNAL[name]; });
-  PENDING_EXTERNAL = null; $('#external').hidden = true;
-  discardExternalEdits(names);
-  await load(true);
-}
-
-async function overwriteExternal() {
-  if (!PENDING_EXTERNAL) return;
-  const pending = PENDING_EXTERNAL;
+function closeExternal() {
+  const pending = PENDING_EXTERNAL || [];
   pending.forEach(([name]) => { delete IGNORED_EXTERNAL[name]; });
   PENDING_EXTERNAL = null; $('#external').hidden = true;
-  for (const [name, hash] of pending) if (FILES[name]) FILES[name].base = hash;
+  return pending;
+}
+
+// Reload: take the disk version, dropping the edits made here.
+async function reloadExternal() {
+  if (!PENDING_EXTERNAL) return;
+  const names = closeExternal().map(([name]) => name);
+  await load(true, names);
+}
+
+// Overwrite: save the version made here over the one on disk.
+async function overwriteExternal() {
+  if (!PENDING_EXTERNAL) return;
+  // a file gone from disk has no hash: the save writes it again
+  for (const [name, hash] of closeExternal()) if (FILES[name]) FILES[name].base = hash || null;
   await save();
 }
 
+// Backup: keep the version made here in a new file beside it, then reload.
 async function backupExternal() {
   if (!PENDING_EXTERNAL) return;
   const names = PENDING_EXTERNAL.map(([name]) => name);
-  names.forEach((name) => { delete IGNORED_EXTERNAL[name]; });
-  commit();
+  commit(false);
+  const made = [];
   for (const name of names) {
     const f = FILES[name];
     if (!f) continue;
-    await fetch('/api/backup', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
+    const r = await fetch('/api/backup', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
       body: JSON.stringify({ name, text: f.text }) });
+    if (!r.ok) { banner(`Could not back up ${name}; nothing was reloaded.`); return; }
+    made.push((await r.json()).backup);
   }
-  PENDING_EXTERNAL = null; $('#external').hidden = true;
-  discardExternalEdits(names);
-  await load(true);
-  banner('Local edits were saved as a backup before reloading the external changes.');
+  closeExternal();
+  await load(true, names);
+  banner('Your edits were saved in ' + made.join(', ') + ', and the files were reloaded from disk.');
 }
 
 $('#external-reload').onclick = reloadExternal;
 $('#external-overwrite').onclick = overwriteExternal;
 $('#external-backup').onclick = backupExternal;
 $('#external-later').onclick = () => {
-  if (PENDING_EXTERNAL) for (const [name, hash] of PENDING_EXTERNAL) IGNORED_EXTERNAL[name] = hash;
+  const pending = PENDING_EXTERNAL || [];
   PENDING_EXTERNAL = null; $('#external').hidden = true;
+  for (const [name, hash] of pending) IGNORED_EXTERNAL[name] = hash;
 };
 
+// Every 2 s: the build state, a new build (new numbers), files changed on
+// disk.  A changed file without edits here is reloaded at once; one with
+// edits asks (once per version on disk).  Nothing happens while typing,
+// while a dialog or the LaTeX drawer is open, or while saving.
 async function poll() {
   try {
-    const s = await (await fetch('/api/state')).json();
-    setBuild(s.build);
-    const changed = Object.keys(s.hashes).filter((n) => FILES[n] && s.hashes[n] !== FILES[n].base && IGNORED_EXTERNAL[n] !== s.hashes[n]);
-    const busy = Date.now() - lastTyping < 4000 || !$('#drawer').hidden;
-    if ((changed.length || s.auxver !== AUXVER) && !busy) {
-      commit();
-      const hashes = changed.map((name) => [name, s.hashes[name]]);
-      if (hashes.length) showExternal(hashes);
-      AUXVER = s.auxver;
+    const s = SAVING ? null : await (await fetch('/api/state')).json();
+    if (s && !SAVING) {
+      setBuild(s.build);
+      const busy = Date.now() - lastTyping < 4000 || !$('#drawer').hidden || PENDING_EXTERNAL || !$('#figview').hidden || DIFF_SHOWN || DIFF.on;
+      const changed = Object.keys(s.hashes).filter((n) => FILES[n] && s.hashes[n] !== FILES[n].base);
+      if (!busy && (changed.length || s.auxver !== AUXVER)) {
+        commit();
+        const edited = changed.filter((n) => FILES[n].text !== FILES[n].disk);
+        const quiet = changed.filter((n) => !edited.includes(n));
+        const ask = edited.filter((n) => IGNORED_EXTERNAL[n] !== s.hashes[n]);
+        const newBuild = s.auxver !== AUXVER;
+        AUXVER = s.auxver;
+        if (quiet.length || newBuild) await load(true);
+        if (ask.length) showExternal(ask.map((n) => [n, s.hashes[n]]));
+      }
     }
   } catch (e) { /* server restarting */ }
   setTimeout(poll, 2000);
@@ -1573,13 +1801,14 @@ doc.addEventListener('beforeinput', () => {
   typingSnap = setTimeout(() => { typingSnap = null; }, 1200);
 });
 function restore(from, to) {
+  leaveDiff();
   commit();
   const cur = Object.fromEntries(Object.entries(FILES).map(([n, f]) => [n, f.text]));
   let texts = from.pop();
   while (texts && Object.keys(texts).every((n) => texts[n] === cur[n])) texts = from.pop();
   if (!texts) return;
   to.push(cur);
-  for (const [n, t] of Object.entries(texts)) FILES[n].text = t;
+  for (const [n, t] of Object.entries(texts)) if (FILES[n]) FILES[n].text = t;
   const y = window.scrollY;
   render();
   window.scrollTo(0, y);
@@ -1606,9 +1835,42 @@ function selectLine() {
 
 // Wrap the selection (or a placeholder) in \emph, \textbf or \textit.
 function wrap(prefix, tag) {
-  const r = selRange();
+  let r = selRange();
   if (!editableAt(r)) return;
+  if (!r.collapsed) {
+    r = selectionInOneEditable();
+    if (!r) { banner('Select text inside one paragraph to format it.'); return; }
+  }
   snapshot();
+  // already formatted that way: remove the formatting from the selection
+  const sel = tag === 'strong' ? 'strong, b' : 'em, i';
+  const anc = r.commonAncestorContainer;
+  const root = (anc.nodeType === 1 ? anc : anc.parentElement).closest('[contenteditable="true"]');
+  const fmt = (anc.nodeType === 1 ? anc : anc.parentElement).closest(sel);
+  if (fmt && root && root.contains(fmt) && fmt !== root && !fmt.classList.contains('runin')) {
+    if (!r.collapsed) {
+      const cut = (a, b) => {
+        const x = document.createRange();
+        x.setStart(...a); x.setEnd(...b);
+        const f = x.extractContents();
+        if (!f.textContent) return null;
+        const c = fmt.cloneNode(false); c.append(f); return c;
+      };
+      const pre = cut([fmt, 0], [r.startContainer, r.startOffset]);
+      const post = cut([r.endContainer, r.endOffset], [fmt, fmt.childNodes.length]);
+      if (pre) fmt.before(pre);
+      if (post) fmt.after(post);
+    }
+    const kids = [...fmt.childNodes];
+    fmt.replaceWith(...kids);
+    if (kids.length) {
+      const nr = document.createRange();
+      nr.setStartBefore(kids[0]); nr.setEndAfter(kids[kids.length - 1]);
+      const s = getSelection(); s.removeAllRanges(); s.addRange(nr);
+    }
+    markEditedSoon();
+    return;
+  }
   const e = el(tag);
   e.dataset.prefix = prefix;
   if (r.collapsed) e.append(document.createTextNode('text'));
@@ -1619,30 +1881,116 @@ function wrap(prefix, tag) {
   markEditedSoon();
 }
 
-function wrapLiteral(open, close) {
-  const r = selRange();
-  if (!editableAt(r)) return;
-  snapshot();
-  if (r.collapsed) {
-    const text = document.createTextNode(open + close);
-    r.insertNode(text);
-    r.setStart(text, open.length); r.collapse(true);
-  } else {
-    const contents = r.extractContents();
-    const frag = document.createDocumentFragment();
-    frag.append(document.createTextNode(open), contents, document.createTextNode(close));
-    r.insertNode(frag);
-  }
-  markEditedSoon();
+// A range never cuts through a chip (maths, a reference): it is widened to
+// take the whole chip, so that wrapping or copying never splits one.
+function snapOutOfChips(r) {
+  const chipOf = (n) => (n.nodeType === 1 ? n : n.parentElement)?.closest('.chip');
+  const a = chipOf(r.startContainer), b = chipOf(r.endContainer);
+  if (a) r.setStartBefore(a);
+  if (b) r.setEndAfter(b);
+  return r;
 }
 
-function mathAtSelection() {
+// The selection (a copy, widened to whole chips) when it lies inside one
+// editable text, else null.
+function selectionInOneEditable() {
   const r = selRange();
-  if (!r || r.collapsed || !editableAt(r)) return insertMath(false);
+  if (!r || r.collapsed || spansEditables(r)) return null;
+  return snapOutOfChips(r.cloneRange());
+}
+
+// A selection from one block (or heading, caption) into another: the
+// browser would delete across blocks, page structure included, so nothing
+// may edit it.
+function spansEditables(r = selRange()) {
+  if (!r || r.collapsed) return false;
+  const a = editableAt(r);
+  const endNode = r.endContainer.nodeType === 1 ? r.endContainer : r.endContainer.parentElement;
+  return !a || !endNode || endNode.closest('[contenteditable=true]') !== a;
+}
+const ACROSS = 'Select inside one paragraph (or heading) to change it: a selection across blocks is only for copying.';
+document.addEventListener('beforeinput', (e) => {
+  if (e.target.closest && e.target.closest('#doc') && e.target.isContentEditable && spansEditables()) {
+    e.preventDefault();
+    banner(ACROSS);
+  }
+}, true);
+
+// Keys that wrap a selection instead of replacing it; both the opening and
+// the closing key wrap.  Quotes become TeX quotes (`` '' and ` ') on saving.
+const WRAP_PAIRS = {
+  '(': ['(', ')'], ')': ['(', ')'], '[': ['[', ']'], ']': ['[', ']'], '{': ['{', '}'], '}': ['{', '}'],
+  '"': ['“', '”'], "'": ['‘', '’'], '`': ['‘', '’'],
+};
+
+// Wrap the selection in open … close; the selection stays on the wrapped
+// text, so that another key wraps it again.
+function wrapLiteral(open, close) {
+  const r = selectionInOneEditable();
+  if (!r) return false;
   snapshot();
-  const source = '$' + ser(r.cloneContents()) + '$';
-  const math = mathChip(source, false);
-  r.deleteContents(); r.insertNode(math); setCaretAfter(math);
+  const contents = r.extractContents();
+  const a = document.createTextNode(open), b = document.createTextNode(close);
+  const frag = document.createDocumentFragment();
+  frag.append(a, contents, b);
+  r.insertNode(frag);
+  const nr = document.createRange();
+  nr.setStartAfter(a); nr.setEndBefore(b);
+  const s = getSelection(); s.removeAllRanges(); s.addRange(nr);
+  markEditedSoon();
+  return true;
+}
+
+// The LaTeX of a piece of the page taken as maths: typed text as it is (an
+// x^2 typed as text is maths x^2), formulas without their dollars.
+function mathSourceOf(node, top = true) {
+  let out = '';
+  for (const n of node.childNodes) {
+    // in maths too, % starts a comment (it would eat the rest of the line,
+    // closing braces included), # and & mean other things, and $ ends it
+    if (n.nodeType === 3) { out += escapeIn(n.data.replace(/ /g, '~'), '%#&$'); continue; }
+    if (n.nodeType !== 1) continue;
+    if (n.classList.contains('math')) { out += mathBody(n.dataset.src)[0]; continue; }
+    if (n.dataset.src !== undefined) { out += n.classList.contains('nl') ? ' ' : n.dataset.src; continue; }
+    out += mathSourceOf(n, false);
+  }
+  if (top) {
+    // braces typed as text that do not pair up are literal braces
+    let depth = 0, ok = true;
+    for (const c of out.replace(/\\./g, '')) { if (c === '{') depth++; if (c === '}' && --depth < 0) ok = false; }
+    if (!ok || depth) out = escapeIn(out, '{}');
+  }
+  return out;
+}
+
+// Put a backslash before each of `chars` in s that has none yet.
+function escapeIn(s, chars) {
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === '\\') { out += s[i] + (s[i + 1] || ''); i++; continue; }
+    out += (chars.includes(s[i]) ? '\\' : '') + s[i];
+  }
+  return out;
+}
+
+// $ or Ctrl+M: the selection becomes inline maths; with no selection, a new
+// formula opens in the drawer.
+function mathAtSelection() {
+  const sel = getSelection();
+  if (!sel.rangeCount || sel.isCollapsed) return insertMath(false);
+  const r = selectionInOneEditable();
+  if (!r) { banner('Select text inside one paragraph to make it maths.'); return; }
+  snapshot();
+  const body = mathSourceOf(r.cloneContents());
+  const lead = body.match(/^\s*/)[0], trail = body.match(/\s*$/)[0];
+  const math = mathChip('$' + body.trim() + '$', false);
+  r.deleteContents();
+  const frag = document.createDocumentFragment();
+  if (lead) frag.append(document.createTextNode(lead));
+  frag.append(math);
+  if (trail) frag.append(document.createTextNode(trail));
+  r.insertNode(frag);
+  setCaretAfter(math);
   markEditedSoon();
 }
 
@@ -1661,6 +2009,24 @@ function insertNodes(nodes) {
   return true;
 }
 
+// A paragraph break (with anything after it) at the caret.  A line break
+// right beside the caret goes: the paragraph break replaces it, rather than
+// leaving three newlines in the file.
+function insertBreak(nodes = [chip('parbreak', '\n\n', '')]) {
+  const r = selRange();
+  if (!editableAt(r)) return false;
+  if (r.collapsed) {
+    const nb = neighbours(r);
+    const isNl = (n) => n && n.nodeType === 1 && n.classList.contains('nl') && /^\s*\n\s*$/.test(n.dataset.src || '');
+    if (!nb.inText) {
+      snapshot();
+      if (isNl(nb.before)) { const b = nb.before; r.setStartBefore(b); r.collapse(true); b.remove(); }
+      else if (isNl(nb.after)) nb.after.remove();
+    }
+  }
+  return insertNodes(nodes);
+}
+
 // A heading at the caret: the paragraph is split there, and the text after
 // the caret goes under the new heading.
 function headingAtCaret(level) {
@@ -1670,7 +2036,7 @@ function headingAtCaret(level) {
   const nodes = level === 'paragraph'
     ? [chip('parbreak', '\n\n', ''), chip('src', src, src)]
     : [chip('parbreak', '\n\n', ''), chip('src', src, src), chip('parbreak', '\n\n', '')];
-  if (!insertNodes(nodes)) return;
+  if (!insertBreak(nodes)) return;
   structural(() => PLACEHOLDER);
 }
 
@@ -1689,13 +2055,38 @@ function splitSectionAtCaret() {
 
 function insertMath(display) {
   const m = display ? mathChip('\\[\n  \n\\]', true) : mathChip('$ $', false);
-  const nodes = display ? [chip('nl', '\n', ' '), m, chip('nl', '\n', ' ')] : [m];
-  if (insertNodes(nodes)) openDrawer(m, null, display ? 'New displayed equation' : 'New inline maths');
+  let nodes = [m];
+  if (display) {
+    // a displayed formula on its own lines; never a blank line (a new
+    // paragraph) where a line break was already
+    const r = selRange();
+    const around = r && editableAt(r) ? neighbours(r) : {};
+    const isBreak = (n) => n && n.nodeType === 1 && /\n/.test(n.dataset.src || '') && (n.classList.contains('nl') || n.classList.contains('parbreak'));
+    const br = () => { const c = chip('nl', '\n', ' '); c.dataset.fresh = '1'; return c; };
+    nodes = [...(isBreak(around.before) ? [] : [br()]), m, ...(isBreak(around.after) ? [] : [br()])];
+  }
+  if (insertNodes(nodes)) openDrawer(m, null, display ? 'New displayed equation' : 'New inline maths', true);
+}
+
+// The nodes just before and after a collapsed range (empty text skipped).
+function neighbours(r) {
+  const skip = (n, dir) => { while (n && n.nodeType === 3 && !n.data) n = n[dir]; return n; };
+  const c = r.startContainer, o = r.startOffset;
+  let before, after;
+  if (c.nodeType === 3) {
+    before = o > 0 ? c : skip(c.previousSibling, 'previousSibling');
+    after = o < c.data.length ? c : skip(c.nextSibling, 'nextSibling');
+    if (o > 0 && o < c.data.length) return { before: c, after: c, inText: true };
+  } else {
+    before = skip(c.childNodes[o - 1], 'previousSibling');
+    after = skip(c.childNodes[o], 'nextSibling');
+  }
+  return { before, after };
 }
 
 function insertLatex(src, title) {
   const c = chip('src', src, src);
-  if (insertNodes([c])) openDrawer(c, null, title);
+  if (insertNodes([c])) openDrawer(c, null, title, true);
 }
 
 // C-d: delete the current line.  M-w: cut the region, or the line.
@@ -1770,6 +2161,7 @@ function keyName(e) {
 function closeCurrentMenu() {
   if (!$('#external').hidden) { $('#external-later').click(); return; }
   if (!$('#openbox').hidden) { $('#open-cancel').click(); return; }
+  if (!$('#historybox').hidden) { $('#historybox').hidden = true; return; }
   if (!$('#newfilebox').hidden) { $('#newfile-cancel').click(); return; }
   if (!$('#palette').hidden) { closePalette(); return; }
   if (!$('#keysbox').hidden) { RECORDING = null; $('#keysbox').hidden = true; return; }
@@ -1796,7 +2188,7 @@ const TEXT_KEYS = {
   'C-i': () => wrap('\\emph{', 'em'),
   'C-I': () => wrap('\\textit{', 'em'),
   'C-m': mathAtSelection, 'C-M': () => insertMath(true),
-  '$': mathAtSelection, '"': () => wrapLiteral('"', '"'),
+  '$': mathAtSelection,
   'C-\\': () => insertLatex('\\cref{}', 'Insert LaTeX'),
   'C-M-r': () => insertLatex('\\cref{}', 'Insert a reference'),
   'C-M-c': () => insertLatex('\\cite{}', 'Insert a citation'),
@@ -1821,16 +2213,47 @@ document.addEventListener('keydown', (e) => {
   if (GLOBAL_KEYS[k]) { e.preventDefault(); GLOBAL_KEYS[k](); return; }
   const inText = e.target.isContentEditable && segOf(e.target);
   if (!inText) return;
+  const sel = getSelection();
+  if (spansEditables() && ((e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) ||
+      ['Enter', 'Backspace', 'Delete', 'Tab'].includes(e.key))) {
+    e.preventDefault();
+    banner(ACROSS);
+    return;
+  }
+  // a bracket or quote typed over a selection wraps it instead of replacing it
+  if (WRAP_PAIRS[e.key] && !e.ctrlKey && !e.altKey && !e.metaKey && !getSelection().isCollapsed) {
+    e.preventDefault();
+    if (!wrapLiteral(...WRAP_PAIRS[e.key])) banner('Select text inside one paragraph to wrap it.');
+    return;
+  }
   if (TEXT_KEYS[k]) { e.preventDefault(); TEXT_KEYS[k](); return; }
+  // the browser's own bold, italic, underline would bypass the editor (and
+  // keep working after the shortcut is moved to another key)
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && /^[biu]$/i.test(e.key)) { e.preventDefault(); return; }
   const seg = segOf(e.target);
   if (e.key === 'Enter' && !e.ctrlKey && !e.altKey) {
     e.preventDefault();
-    if (seg.kind === 'para') insertNodes([chip('parbreak', '\n\n', '')]);
+    if (seg.kind === 'para') insertBreak();
     return;
   }
   if (e.key === 'Backspace' && !e.ctrlKey && seg.kind === 'para' && caretAtStart(seg.edit)) {
     snapshot();
-    if (joinWithPrevious(seg)) e.preventDefault();
+    if (joinWithPrevious(seg)) { e.preventDefault(); return; }
+  }
+  // Backspace or Delete next to a paragraph or line break takes the break
+  // (the browser does not delete these empty, non-editable marks)
+  if ((e.key === 'Backspace' || e.key === 'Delete') && !e.ctrlKey && !e.altKey && sel.rangeCount && sel.isCollapsed) {
+    const nb = neighbours(sel.getRangeAt(0));
+    const n = e.key === 'Backspace' ? nb.before : nb.after;
+    if (!nb.inText && n && n.nodeType === 1 && n.classList.contains('chip') &&
+        (n.classList.contains('parbreak') || n.classList.contains('nl') || n.classList.contains('tie'))) {
+      e.preventDefault();
+      snapshot();
+      const r = document.createRange(); r.setStartBefore(n); r.collapse(true);
+      n.remove();
+      sel.removeAllRanges(); sel.addRange(r);
+      markEditedSoon();
+    }
   }
 });
 
@@ -1858,13 +2281,27 @@ function openPalette(opts) {
   refreshPalette();
 }
 
-function closePalette() { $('#palette').hidden = true; PAL.opts = null; }
+function closePalette() {
+  $('#palette').hidden = true; PAL.opts = null;
+  clearTimeout(PAL.timer);
+  if (PAL.abort) { PAL.abort.abort(); PAL.abort = null; }
+}
 
 function refreshPalette() {
   clearTimeout(PAL.timer);
   PAL.timer = setTimeout(async () => {
+    if (!PAL.opts) return;      // closed before the search ran
     const seq = ++PAL.seq;
-    const items = await PAL.opts.search($('#pal-q').value);
+    // a newer search makes the one still on its way useless: drop it
+    if (PAL.abort) PAL.abort.abort();
+    const abort = PAL.abort = new AbortController();
+    let items;
+    try { items = await PAL.opts.search($('#pal-q').value, abort.signal); }
+    catch (e) {
+      if (e.name === 'AbortError') return;
+      if (seq === PAL.seq) banner('Search failed: ' + e.message);
+      items = [];
+    }
     if (seq !== PAL.seq || !PAL.opts) return;
     PAL.items = items; PAL.active = 0;
     drawPalette();
@@ -1954,14 +2391,17 @@ function citePalette() {
     title: 'Cite',
     placeholder: 'Key, title words, authors or year: e.g. "goldwasser micali", "probabilistic encryption 84"',
     empty: 'Nothing in references.bib or cryptobib. Press Search online.',
-    search: async (q) => {
+    search: async (q, signal) => {
       if (!q.trim()) return [];
       if (online) {
-        const r = await fetch('/api/online?q=' + encodeURIComponent(q));
-        if (!r.ok) { banner((await r.json()).error); return []; }
-        return (await r.json()).map((h) => ({ ...h, online: true }));
+        const r = await fetch('/api/online?q=' + encodeURIComponent(q), { signal });
+        const res = await r.json().catch(() => ({ error: 'the online search failed (' + r.status + ')' }));
+        if (!r.ok) { banner(res.error || 'the online search failed'); return []; }
+        return res.map((h) => ({ ...h, online: true }));
       }
-      return (await fetch('/api/bib?q=' + encodeURIComponent(q))).json();
+      const r = await fetch('/api/bib?q=' + encodeURIComponent(q), { signal });
+      if (!r.ok) { banner('The bibliography search failed (' + r.status + '); see the server output.'); return []; }
+      return r.json();
     },
     delay: 150,
     view: (it) => it.online ? {
@@ -2265,7 +2705,7 @@ const ACTIONS = {
   subsection: () => headingAtCaret('subsection'),
   paragraph: () => headingAtCaret('paragraph'),
   splitsection: splitSectionAtCaret,
-  newpara: () => insertNodes([chip('parbreak', '\n\n', '')]),
+  newpara: () => insertBreak(),
   find: () => openFind(false),
   undo, redo,
 };
@@ -2528,6 +2968,7 @@ async function diffOn() {
   const ref = $('#diffbase').value;
   DIFF.marks = [];
   document.body.classList.add('diffing');
+  DIFF_SHOWN = true;
   for (const e of document.querySelectorAll('#doc [contenteditable="true"]')) e.contentEditable = 'false';
   for (const ta of document.querySelectorAll('#doc textarea')) ta.readOnly = true;
   const names = Object.keys(FILES).filter((n) => FILES[n].segs);
@@ -2589,6 +3030,16 @@ function diffOff() {
   const y = window.scrollY;
   render();
   window.scrollTo(0, y);
+}
+
+// Leave the diff view if it is on (the page is rendered again from the
+// texts).  Returns true when a structure edit should not go on: its block
+// was one of the diff view's.
+function leaveDiff() {
+  if (!DIFF.on && !DIFF_SHOWN) return false;
+  diffOff();
+  banner('Left the diff view.');
+  return true;
 }
 
 function diffStep(d) {
@@ -2658,7 +3109,7 @@ const gameLineSrc = (l) => L.gameLineSrc(l);
 
 function openFigure(seg) {
   FV.seg = seg;
-  FV.src = seg.figSrc || seg.src;
+  FV.src = segSource(seg, [], null, false);   // with any caption edit made since
   FV.games = parseGames(FV.src);
   FV.tables = L.parseTabulars(FV.src);
   $('#fv-title').textContent = (seg.kind === 'figure' ? 'Figure ' : 'Table ') + (seg.el.querySelector('.capnum')?.textContent || '');
@@ -2745,7 +3196,7 @@ function algoLine(g, l, li, depth) {
   const indentOf = (x) => /^\s*/.exec(x.prefix)[0];
   const add = (lines) => { g.lines.splice(li + 1, 0, ...lines.map(parseGameLine)); showFigTab('games'); };
   const inner = indentOf(l) + (BLOCK_OPEN.has(l.cmd) || l.cmd === 'Else' || l.cmd === 'ElsIf' ? '  ' : '');
-  const b1 = el('button', '', '＋'); b1.title = 'Add a statement below';
+  const b1 = el('button', '', '+'); b1.title = 'Add a statement below';
   b1.onclick = () => add([inner + '\\State $x \\gets y$']);
   const b2 = el('button', '', '⊕'); b2.title = 'Add an if-block below';
   b2.onclick = () => add([inner + '\\If{$c$}', inner + '  \\State $x \\gets y$', inner + '\\EndIf']);
@@ -2768,7 +3219,7 @@ function procLine(g, l, li) {
   ta.oninput = () => { l.content = ta.value; show(); };
   show();
   const tools = el('div', 'gtools'); tools.style.opacity = 1;
-  const b1 = el('button', '', '＋ line'); b1.onclick = () => { g.lines.splice(li + 1, 0, { prefix: '', content: '', suffix: l.suffix || ' \\\\\n' }); if (!l.suffix) l.suffix = ' \\\\\n'; showFigTab('games'); };
+  const b1 = el('button', '', '+ line'); b1.onclick = () => { g.lines.splice(li + 1, 0, { prefix: '', content: '', suffix: l.suffix || ' \\\\\n' }); if (!l.suffix) l.suffix = ' \\\\\n'; showFigTab('games'); };
   const b3 = el('button', '', '✕'); b3.onclick = () => { g.lines.splice(li, 1); showFigTab('games'); };
   tools.append(b1, b3);
   row.append(ta, prev, tools);
@@ -2855,7 +3306,7 @@ function parseGamesKeepingEdits(src) {
 function applyFigure() {
   const seg = FV.seg;
   const src = figureWithEdits();
-  if (src === (seg.figSrc || seg.src)) { closeFigure(); return; }
+  if (src === FV.src) { closeFigure(); return; }
   snapshot();
   seg.figSrc = src;
   seg.parts = L.captionParts(src) || { prefix: src, caption: '', suffix: '' };
@@ -2953,7 +3404,7 @@ const ACTION_DEFS = [
   ['bold', 'Bold (\\textbf)', 'text', ['C-b'], () => wrap('\\textbf{', 'strong')],
   ['emph', 'Emphasis (\\emph)', 'text', ['C-i'], () => wrap('\\emph{', 'em')],
   ['italic', 'Italic (\\textit)', 'text', ['C-I'], () => wrap('\\textit{', 'em')],
-  ['math', 'Inline maths', 'text', ['C-m', '$'], () => insertMath(false)],
+  ['math', 'Inline maths (the selection, or a new formula)', 'text', ['C-m', '$'], () => mathAtSelection()],
   ['display', 'Displayed equation', 'text', ['C-M'], () => insertMath(true)],
   ['cite', 'Cite (search)', 'text', ['C-M-c'], () => citePalette()],
   ['ref', 'Reference (search)', 'text', ['C-M-r'], () => refPalette()],
@@ -3034,12 +3485,115 @@ $('#keys-save').onclick = async () => {
   banner('Shortcuts saved.');
 };
 
+// ========================================================== save history
+//
+// The server keeps, for every save, the text each file had before and after
+// it.  The dialog lists the saves (newest first), shows what one changed, and
+// restores the files as they were before or after it: as unsaved edits.
+
+const HIST = { list: [], cur: null };
+
+async function openHistory() {
+  $('#historybox').hidden = false;
+  $('#history-list').textContent = 'Loading…';
+  try { HIST.list = await (await fetch('/api/history')).json(); }
+  catch (e) { HIST.list = []; }
+  drawHistoryList();
+}
+
+function drawHistoryList() {
+  const list = $('#history-list');
+  list.textContent = '';
+  if (!HIST.list.length) { list.append(el('p', 'small', 'No saves yet.')); return; }
+  for (const b of HIST.list) {
+    const row = el('div', 'hist-item' + (HIST.cur === b ? ' active' : ''));
+    const d = new Date(b.t * 1000);
+    row.append(el('div', 'when', d.toLocaleDateString() + ' ' + d.toLocaleTimeString()),
+      el('div', 'what', b.files.map((f) => f.name).join(', ')));
+    row.dataset.batch = b.batch;
+    row.onclick = () => showHistory(b);
+    list.append(row);
+  }
+}
+
+const historyText = async (id) => {
+  const r = await fetch('/api/history/text?id=' + encodeURIComponent(id));
+  if (!r.ok) throw new Error('that version is no longer kept');
+  return (await r.json()).text;
+};
+
+// Lines that changed, with a little context; the rest elided.
+function lineDiff(a, b, into) {
+  const A = a.split('\n'), B = b.split('\n');
+  let p = 0; while (p < A.length && p < B.length && A[p] === B[p]) p++;
+  let q = 0; while (q < A.length - p && q < B.length - p && A[A.length - 1 - q] === B[B.length - 1 - q]) q++;
+  const midA = A.slice(p, A.length - q), midB = B.slice(p, B.length - q);
+  const ops = lcs(midA, midB, (x, y) => x === y) || [...midA.map((x) => ['-', x, null]), ...midB.map((y) => ['+', null, y])];
+  const ctx = 2;
+  if (p > ctx) into.append(el('span', 'skip', `… ${p - ctx} unchanged lines\n`));
+  for (const l of A.slice(Math.max(0, p - ctx), p)) into.append(l + '\n');
+  for (const [op, x, y] of ops) {
+    if (op === '=') into.append(x + '\n');
+    else into.append(el('span', op === '-' ? 'del' : 'ins', (op === '-' ? x : y) + '\n'));
+  }
+  for (const l of A.slice(A.length - q, Math.min(A.length, A.length - q + ctx))) into.append(l + '\n');
+  if (q > ctx) into.append(el('span', 'skip', `… ${q - ctx} unchanged lines`));
+}
+
+async function showHistory(b) {
+  HIST.cur = b;
+  drawHistoryList();
+  const box = $('#history-detail');
+  box.textContent = '';
+  const acts = el('div', 'hist-actions');
+  const before = el('button', '', 'Restore as before this save');
+  before.title = 'Put the files of this save back as they were just before it (as unsaved edits)';
+  before.onclick = () => restoreHistory(b, 'before');
+  const after = el('button', '', 'Restore as after this save');
+  after.title = 'Put the files of this save back as this save wrote them (as unsaved edits)';
+  after.onclick = () => restoreHistory(b, 'after');
+  acts.append(before, after);
+  box.append(acts);
+  for (const f of b.files) {
+    box.append(el('h4', '', f.name));
+    const pre = el('pre', 'hist-diff', '');
+    box.append(pre);
+    try { lineDiff(await historyText(f.before), await historyText(f.after), pre); }
+    catch (e) { pre.textContent = e.message; }
+    if (HIST.cur !== b) return;     // another save was chosen meanwhile
+  }
+}
+
+async function restoreHistory(b, which) {
+  commit();
+  const texts = {};
+  try { for (const f of b.files) texts[f.name] = await historyText(f[which]); }
+  catch (e) { banner('Could not restore: ' + e.message); return; }
+  const missing = Object.keys(texts).filter((n) => !FILES[n]);
+  const edited = Object.keys(texts).filter((n) => FILES[n] && FILES[n].text !== FILES[n].disk && FILES[n].text !== texts[n]);
+  if (edited.length && !confirm(`${edited.join(', ')} ${edited.length === 1 ? 'has' : 'have'} unsaved edits, which the restored version replaces (Undo brings them back). Restore?`)) return;
+  snapshot();
+  for (const [n, t] of Object.entries(texts)) if (FILES[n]) FILES[n].text = t;
+  const y = window.scrollY;
+  render();
+  window.scrollTo(0, y);
+  $('#historybox').hidden = true;
+  const changed = Object.keys(texts).filter((n) => FILES[n] && FILES[n].text !== FILES[n].disk);
+  banner((changed.length ? `Restored ${changed.join(', ')} as ${which} that save: save to keep it, or undo.` : 'The files are already as in that version.') +
+    (missing.length ? ` Not restored (no longer part of the document): ${missing.join(', ')}.` : ''));
+}
+
+$('#historybtn').onclick = openHistory;
+$('#history-close').onclick = () => { $('#historybox').hidden = true; };
+
 // ======================================================= main switcher
 
 let OPEN_PROJECT = null;
 
+let NEWFILE_AT = null;   // where the \input goes: the caret when the dialog opened
 function showNewFile() {
   if (!editableAt(selRange())) { banner('Put the cursor in the paper where the new file should be included.'); return; }
+  NEWFILE_AT = selRange().cloneRange();
   $('#newfilebox').hidden = false;
   $('#newfile-name').focus();
 }
@@ -3053,7 +3607,17 @@ async function createNewFile() {
   if (!r.ok) { banner('Could not create the file: ' + (await r.json()).error); return; }
   const created = (await r.json()).name;
   const input = created.replace(/\.tex$/, '');
-  if (!insertNodes([chip('src', '\\input{' + input + '}', '\\input{' + input + '}')])) return;
+  if (NEWFILE_AT && NEWFILE_AT.startContainer.isConnected) {
+    const sel = getSelection(); sel.removeAllRanges(); sel.addRange(NEWFILE_AT);
+    const host = editableAt(NEWFILE_AT); if (host) host.focus({ preventScroll: true });
+  }
+  const src = '\\input{' + input + '}';
+  // the new file is a block of its own
+  if (!insertNodes([chip('parbreak', '\n\n', ''), chip('src', src, src), chip('parbreak', '\n\n', '')])) {
+    banner(`Created ${created}, but the cursor left the text: insert \\input{${input}} yourself.`);
+    $('#newfilebox').hidden = true;
+    return;
+  }
   $('#newfilebox').hidden = true;
   $('#newfile-name').value = '';
   commit();
@@ -3087,7 +3651,7 @@ async function openSelectedProject() {
   if (!r.ok) { banner('Could not open it: ' + (await r.json()).error); return; }
   $('#openbox').hidden = true;
   OPEN_PROJECT = null;
-  for (const k of Object.keys(FILES)) delete FILES[k];
+  forgetDocument();
   await load(false);
   AUXVER = DOC.auxver;
 }
@@ -3095,6 +3659,14 @@ async function openSelectedProject() {
 $('#openbtn').onclick = chooseProjectDirectory;
 $('#open-confirm').onclick = openSelectedProject;
 $('#open-cancel').onclick = () => { OPEN_PROJECT = null; $('#openbox').hidden = true; };
+
+// Before another document or project is opened: nothing of this one stays.
+function forgetDocument() {
+  for (const k of Object.keys(FILES)) delete FILES[k];
+  HISTORY.undo = []; HISTORY.redo = [];
+  for (const k of Object.keys(IGNORED_EXTERNAL)) delete IGNORED_EXTERNAL[k];
+  PENDING_EXTERNAL = null; $('#external').hidden = true;
+}
 
 function fillMains() {
   const sel = $('#mainsel');
@@ -3109,7 +3681,7 @@ $('#mainsel').onchange = async () => {
   const r = await fetch('/api/open', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
     body: JSON.stringify({ main: $('#mainsel').value }) });
   if (!r.ok) { banner('Could not open it: ' + (await r.json()).error); return; }
-  for (const k of Object.keys(FILES)) delete FILES[k];
+  forgetDocument();
   await load(false);
 };
 

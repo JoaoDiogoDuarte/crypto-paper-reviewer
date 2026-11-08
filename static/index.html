@@ -16,6 +16,7 @@
     <button id="openbtn" title="Open a paper directory">Open…</button>
     <button id="newfilebtn" title="Create a new TeX section file">New file…</button>
     <button id="save" title="Save edited files (Ctrl+S)">Save</button>
+    <button id="historybtn" title="Earlier versions: every save keeps the text it replaced">History…</button>
     <span id="dirty"></span>
   </span>
   <span class="group">
@@ -136,6 +137,16 @@
     <button id="md-save">Save metadata</button><button id="md-close">Close</button></div>
   <div id="md-body"></div>
 </div>
+<div id="historybox" role="dialog" aria-labelledby="history-title" hidden>
+  <div class="fv-head"><b id="history-title">Save history</b><span class="spacer"></span>
+    <button id="history-close">Close</button></div>
+  <div class="history-cols">
+    <div id="history-list"></div>
+    <div id="history-detail"><p class="small">Every save keeps the text it replaced. Choose a save to see what it changed.
+      Restoring puts that version in the editor as unsaved edits: nothing is written until you save, and that save
+      is in the history too.</p></div>
+  </div>
+</div>
 <div id="keysbox" role="dialog" aria-labelledby="keys-title" hidden>
   <div class="fv-head"><b>Keyboard shortcuts</b><span class="spacer"></span>
     <button id="keys-reset">Reset to defaults</button><button id="keys-save">Save</button><button id="keys-close">Close</button></div>
@@ -166,7 +177,8 @@
   <h3 id="help-title">Editing</h3>
   <ul>
     <li>Type anywhere in the text. <kbd>Enter</kbd> starts a new paragraph; <kbd>Backspace</kbd> at the start of a paragraph joins it to the one before.</li>
-    <li><kbd>$</kbd> or <kbd>Ctrl</kbd>+<kbd>M</kbd>: inline maths. <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd>: displayed maths.</li>
+    <li><kbd>$</kbd> or <kbd>Ctrl</kbd>+<kbd>M</kbd>: inline maths (of the selection, if any). <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd>: displayed maths.</li>
+    <li>A bracket, brace or quote typed over a selection wraps it. Pasted <code>$…$</code> becomes maths.</li>
     <li><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd>: cite (search by key, title, author or year; Ctrl+Enter picks several; not found? search online and add it to references.bib).</li>
     <li><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>R</kbd>: reference a section, theorem, figure, table or equation.</li>
     <li><kbd>Ctrl</kbd>+<kbd>F</kbd>: find and replace. <kbd>Ctrl</kbd>+<kbd>\</kbd>: insert any LaTeX.</li>
