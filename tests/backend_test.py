@@ -128,16 +128,17 @@ class BackendTest(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(result['main'], 'other.tex')
 
-    def test_create_file_and_reject_overwrite(self):
-        code, result = self.post('/api/create-file', {'name': 'sections/new.tex', 'text': 'New section.\n'})
-        self.assertEqual(code, 201)
-        self.assertEqual(result['name'], 'sections/new.tex')
-        with open(os.path.join(self.tmp, 'sections', 'new.tex')) as f:
-            self.assertEqual(f.read(), 'New section.\n')
-        code, result = self.post('/api/create-file', {'name': 'sections/new.tex', 'text': 'Changed.'})
-        self.assertEqual(code, 409)
-        code, result = self.post('/api/create-file', {'name': '../escape.tex', 'text': 'bad'})
-        self.assertEqual(code, 400)
+    def test_ieee_metadata_ignores_anonymous_author_branch(self):
+        tex = (r'\documentclass[conference]{IEEEtran}' + '\n' +
+               r'\ifanon\author{\IEEEauthorblockN{Anonymous authors}}' + '\n' +
+               r'\else\author{\IEEEauthorblockN{João Diogo Duarte}' +
+               r'\IEEEauthorblockA{\textit{University of Porto}\\Porto, Portugal}}\fi' + '\n' +
+               r'\begin{IEEEkeywords}crypto, proofs\end{IEEEkeywords}')
+        md = server.convert.extract(tex)
+        self.assertEqual([a['name'] for a in md['authors']], ['João Diogo Duarte'])
+        self.assertEqual(md['affiliations'][0]['city'], 'Porto')
+        self.assertEqual(md['affiliations'][0]['country'], 'Portugal')
+        self.assertEqual(md['keywords'], ['crypto', 'proofs'])
 
     def test_makefile_is_default_build_command(self):
         with open(os.path.join(self.tmp, 'Makefile'), 'w') as f:
@@ -166,6 +167,71 @@ class BackendTest(unittest.TestCase):
             server.CONFIG = old_config
         self.assertEqual(builder.state['state'], 'error')
         self.assertIn('failed', builder.state['message'])
+
+    def test_broken_hyperref_bookmarks_get_one_clean_retry(self):
+        p = os.path.join(self.tmp, 'main.out')
+        with open(p, 'w') as f:
+            f.write('\\BOOKMARK{partial')
+        builder = server.Builder.__new__(server.Builder)
+        builder.aux = {}
+        builder.auxver = 1
+        builder.state = {'state': 'idle', 'message': '', 'at': 0}
+        builder.log = lambda message: None
+        config = server.CONFIG
+        server.CONFIG = {'build': ['latexmk', '-pdf', 'main.tex']}
+        failed = server.subprocess.CompletedProcess([], 12,
+            stdout='! File ended while scanning use of \\@@BOOKMARK.', stderr='')
+        success = server.subprocess.CompletedProcess([], 0, stdout='', stderr='')
+        try:
+            with mock.patch('server.subprocess.run', side_effect=[failed, success]) as run:
+                builder.build_once()
+        finally:
+            server.CONFIG = config
+        self.assertEqual(builder.state['state'], 'ok')
+        self.assertEqual(run.call_count, 2)
+        self.assertFalse(os.path.exists(p))
+        self.assertTrue(os.listdir(os.path.join(server.CACHE, 'bad-aux')))
+
+    def test_corrupt_aux_is_backed_up_and_retried_once(self):
+    def test_missing_class_does_not_write_converted_file(self):
+        with mock.patch('server.shutil.which', return_value=None):
+            with self.assertRaisesRegex(ValueError, 'iacrcc.cls is not installed'):
+                server.run_convert('iacrcc', True, 'conversion.tex', False)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, 'converted', 'iacrcc', 'conversion.tex')))
+
+        aux_path = os.path.join(self.tmp, 'main.aux')
+        with open(aux_path, 'w') as out:
+            out.write('\\newlabel{bad}{{1}')
+        builder = server.Builder.__new__(server.Builder)
+        builder.aux = {}
+        builder.auxver = 1
+        builder.state = {'state': 'idle', 'message': '', 'at': 0}
+        builder.log = lambda message: None
+        old_config = server.CONFIG
+        server.CONFIG = {'build': ['latexmk', '-pdf', 'main.tex']}
+        failed = server.subprocess.CompletedProcess([], 1,
+            stdout='! File ended while scanning use of \\@newl@bel.', stderr='')
+        passed = server.subprocess.CompletedProcess([], 0, stdout='', stderr='')
+        try:
+            with mock.patch('server.subprocess.run', side_effect=[failed, passed]) as run:
+                builder.build_once()
+        finally:
+            server.CONFIG = old_config
+        self.assertEqual(builder.state['state'], 'ok')
+        self.assertEqual(builder.auxver, 2)
+        self.assertEqual(run.call_count, 2)
+        self.assertIn('-g', run.call_args.args[0])
+        self.assertTrue(os.listdir(os.path.join(server.CACHE, 'bad-aux')))
+
+    def test_multiline_aux_labels_are_not_truncated(self):
+        data = ('\\newlabel{thm:one}{{1}{2}{A long title\ncontinued}{theorem.1}{}}\n'
+                '\\bibcite{a}{{12}{2026}}\n'
+                '\\newlabel{broken}{{1}{2}')
+        with mock.patch('server.aux_text', return_value=data):
+            definitions = server.aux_label_lines()
+        self.assertEqual(len(definitions), 2)
+        self.assertIn('continued}{theorem.1}', definitions[0])
+        self.assertIn('\\bibcite{a}{{12}{2026}}', definitions[1])
 
     @mock.patch('server.shutil.which', return_value='/usr/bin/google-chrome')
     @mock.patch('server.subprocess.Popen')

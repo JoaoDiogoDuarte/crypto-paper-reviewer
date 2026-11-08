@@ -398,16 +398,61 @@ def fig_key(src, labels=None):
         labels = load_aux()['labels']
     keys = sorted({k.strip() for g in re.findall(r'\\[a-zA-Z]*ref\*?\{([^}]*)\}', src) for k in g.split(',')})
     nums = ''.join(k + '=' + str(labels.get(k, {}).get('v', '')) + ';' for k in keys)
-    return sha(src + nums)[:16]
+    cite_keys = sorted({k.strip() for g in re.findall(
+        r'\\(?:cite|citep|citet|Cite)\*?(?:\[[^]]*\])*\{([^}]*)\}', src) for k in g.split(',')})
+    if cite_keys:
+        cites = load_aux()['cites']
+        nums += ''.join('cite:' + k + '=' + str(cites.get(k, '')) + ';' for k in cite_keys)
+    # Invalidate cached images made with the previous broken reference loader.
+    return sha('figures-v2:' + src + nums)[:16]
 
 
 def aux_label_lines():
-    """The main document's label and citation definitions, for the figure build."""
-    return re.findall(r'^\\(?:newlabel|bibcite)\{.*$', aux_text(), re.M)
+    """Copy complete aux definitions; they need not occupy a single line.
+
+    A truncated ``\\newlabel`` copied into figs.tex used to produce
+    ``File ended while scanning use of \\@newl@bel``.  Ignore incomplete
+    definitions rather than poisoning an otherwise independent figure build.
+    """
+    aux, definitions = aux_text(), []
+    for m in re.finditer(r'\\(?:newlabel|bibcite)\s*(?=\{)', aux):
+        try:
+            _, end = group(aux, m.end())
+            _, end = group(aux, end)
+        except (IndexError, AssertionError):
+            continue
+        definitions.append(aux[m.start():end])
+    return definitions
+
+
+def tex_error(result):
+    """Show the TeX error instead of only saying 'LaTeX failed'."""
+    lines = ((result.stdout or '') + '\n' + (result.stderr or '')).splitlines()
+    errors = [line.strip() for line in lines if line.lstrip().startswith('!')]
+    return ' '.join(errors[:3]) if errors else ('latexmk failed (exit %s)' % result.returncode)
+
+
+def debug_capture(kind, command, result, files=(), log=None):
+    """Opt-in local evidence: PAPER_EDITOR_DEBUG=1, outside tracked sources."""
+    if os.environ.get('PAPER_EDITOR_DEBUG', '').lower() in ('', '0', 'false', 'no'):
+        return
+    root = os.path.join(STATE, 'debug')
+    os.makedirs(root, exist_ok=True)
+    folder = tempfile.mkdtemp(prefix=time.strftime('%Y%m%d-%H%M%S-') + kind + '-', dir=root)
+    for name, content in (('command.txt', repr(command) + '\n'),
+                          ('stdout.log', result.stdout or ''),
+                          ('stderr.log', result.stderr or '')):
+        with open(os.path.join(folder, name), 'w', encoding='utf-8') as out:
+            out.write(content)
+    for path in files:
+        if os.path.isfile(path):
+            shutil.copy2(path, os.path.join(folder, os.path.basename(path)))
+    if log:
+        log('debug: %s logs in %s' % (kind, folder))
 
 
 def build_figures(log):
-    """Render every float whose source changed to <cache>/<key>.png."""
+    """Render figures as in-place boxes: no float placement or blank float pages."""
     os.makedirs(CACHE, exist_ok=True)
     labels = load_aux()['labels']
     todo = [s for s in figure_sources() if not os.path.exists(os.path.join(CACHE, fig_key(s, labels) + '.png'))]
@@ -416,34 +461,55 @@ def build_figures(log):
     with tempfile.TemporaryDirectory() as tmp:
         main = read(MAIN)
         cut = main.find('\\begin{document}')
-        doc = [main[:cut], r'\pagestyle{empty}', r'\begin{document}', r'\makeatletter']
+        if cut < 0:
+            log('figures: main document has no \\begin{document}')
+            return
+        # Preserve the two-column width before switching to a predictable
+        # single-column page; otherwise figure* float placement shifts pages.
+        doc = [main[:cut], r'\newlength{\pefloatcolumnwidth}', r'\makeatletter']
         doc += aux_label_lines()
-        doc.append(r'\makeatother')
+        doc.extend([r'\makeatother', r'\pagestyle{empty}', r'\begin{document}',
+                    r'\setlength{\pefloatcolumnwidth}{\columnwidth}', r'\onecolumn'])
         for src in todo:
             env = re.match(r'\\begin\{(figure\*?|table\*?)\}', src).group(1)
             body = src[src.index('}') + 1:src.rindex('\\end{')]
             body = re.sub(r'^\[[^\]]*\]', '', body)
             body = strip_cmd(strip_cmd(body, 'caption'), 'label')
-            doc.append(r'\begin{%s}[p]%s\end{%s}\clearpage' % (env, body, env))
+            width = r'\textwidth' if env.endswith('*') else r'\pefloatcolumnwidth'
+            doc.extend([r'\noindent\begin{minipage}{%s}' % width, body,
+                        r'\end{minipage}\par\clearpage'])
         doc.append(r'\end{document}')
         tex = os.path.join(tmp, 'figs.tex')
-        open(tex, 'w').write('\n'.join(doc))
+        with open(tex, 'w', encoding='utf-8') as out:
+            out.write('\n'.join(doc))
         env = dict(os.environ, TEXINPUTS=PAPER + '//:' + os.path.dirname(PAPER) + '//:')
-        r = subprocess.run(['latexmk', '-pdf', '-interaction=nonstopmode', '-halt-on-error', 'figs.tex'],
-                           cwd=tmp, env=env, capture_output=True, text=True, timeout=600)
-        if r.returncode != 0:
-            log('figures: LaTeX failed')
+        cmd = ['latexmk', '-pdf', '-interaction=nonstopmode', '-halt-on-error', 'figs.tex']
+        r = subprocess.run(cmd, cwd=tmp, env=env, capture_output=True, text=True, timeout=600)
+        debug_capture('figures', cmd, r, [tex, os.path.join(tmp, 'figs.log'),
+                                          os.path.join(tmp, 'figs.aux')], log)
+        if r.returncode != 0 or not os.path.exists(os.path.join(tmp, 'figs.pdf')):
+            log('figures: ' + tex_error(r))
             return
-        subprocess.run(['pdfcrop', '--margins', '6', 'figs.pdf', 'crop.pdf'], cwd=tmp,
-                       capture_output=True, timeout=300)
+        crop = subprocess.run(['pdfcrop', '--margins', '6', 'figs.pdf', 'crop.pdf'], cwd=tmp,
+                              capture_output=True, timeout=300)
+        pdf = os.path.join(tmp, 'crop.pdf')
+        if crop.returncode != 0 or not os.path.exists(pdf):
+            log('figures: pdfcrop failed, using uncropped pages')
+            pdf = os.path.join(tmp, 'figs.pdf')
+        rendered = 0
         for n, src in enumerate(todo, 1):
             out = os.path.join(CACHE, fig_key(src, labels))
-            subprocess.run(['pdftoppm', '-r', '200', '-png', '-singlefile', '-f', str(n), '-l', str(n),
-                            os.path.join(tmp, 'crop.pdf'), out], capture_output=True, timeout=120)
+            png = subprocess.run(['pdftoppm', '-r', '200', '-png', '-singlefile', '-f', str(n), '-l', str(n),
+                                  pdf, out], capture_output=True, timeout=120)
+            if png.returncode != 0 or not os.path.isfile(out + '.png'):
+                log('figures: PNG conversion failed for figure %s: %s' %
+                    (n, (png.stderr or b'').decode(errors='replace')[-250:]))
+                continue
+            rendered += 1
             # the figure's text, for reading it in the viewer
             subprocess.run(['pdftotext', '-layout', '-f', str(n), '-l', str(n), os.path.join(tmp, 'figs.pdf'),
                             out + '.txt'], capture_output=True, timeout=120)
-    log(f'figures: rendered {len(todo)}')
+    log(f'figures: rendered {rendered}/{len(todo)}')
 
 
 # ------------------------------------------------------------------ builder
@@ -475,16 +541,40 @@ class Builder:
     def build_once(self):
         cmd = self.build_command()
         self.state = {'state': 'running', 'message': 'make' if cmd == ['make'] else 'latexmk', 'at': time.time()}
+        log_files = [os.path.join(PAPER, stem() + suffix) for suffix in ('.log', '.aux', '.out', '.fdb_latexmk')]
         try:
             r = subprocess.run(cmd, cwd=PAPER, capture_output=True, text=True, timeout=600,
                                shell=isinstance(cmd, str))
+            debug_capture('pdf-build', cmd, r, log_files, self.log)
+            output = (r.stdout or '') + '\n' + (r.stderr or '')
+            # Hyperref's .out is just as vulnerable to partial writes as .aux.
+            # Keep the damaged files, and remove latexmk's stale status before
+            # retrying.  Do not delete any manuscript .tex/.bib files.
+            recoverable = re.search(
+                r'File ended while scanning use of \\(?:@newl@bel|@@BOOKMARK|pgfsys@pdfmark)',
+                output)
+            nontext = any(os.path.isfile(p) and b'\x00' in open(p, 'rb').read()
+                          for p in log_files if p.endswith(('.aux', '.out')))
+            if (r.returncode != 0 and isinstance(cmd, list) and cmd
+                    and os.path.basename(cmd[0]) == 'latexmk' and (recoverable or nontext)):
+                backup_dir = os.path.join(CACHE, 'bad-aux', str(time.time_ns()))
+                os.makedirs(backup_dir, exist_ok=True)
+                for suffix in ('.aux', '.out', '.fdb_latexmk', '.fls'):
+                    path = os.path.join(PAPER, stem() + suffix)
+                    if os.path.isfile(path):
+                        backup = os.path.join(backup_dir, os.path.basename(path))
+                        shutil.copy2(path, backup)
+                        os.unlink(path)
+                self.log('build: saved damaged aux/out/build state in %s; rebuilding once' % backup_dir)
+                retry = cmd + ['-g']
+                r = subprocess.run(retry, cwd=PAPER, capture_output=True, text=True, timeout=600)
+                debug_capture('pdf-retry', retry, r, log_files, self.log)
             if r.returncode == 0:
                 self.aux = load_aux()
                 self.auxver += 1
                 self.state = {'state': 'ok', 'message': 'PDF rebuilt', 'at': time.time()}
             else:
-                err = [l for l in r.stdout.splitlines() if l.startswith('!')][:3]
-                self.state = {'state': 'error', 'message': ' '.join(err) or 'latexmk failed', 'at': time.time()}
+                self.state = {'state': 'error', 'message': tex_error(r), 'at': time.time()}
         except subprocess.TimeoutExpired:
             self.state = {'state': 'error', 'message': 'latexmk timed out after 600 seconds', 'at': time.time()}
         except OSError as e:
@@ -1038,13 +1128,21 @@ def synctex_pages():
                     page = int(line[1:].strip() or 0)
                 elif line.startswith('Input:'):
                     tag, _, name = line[6:].rstrip('\n').partition(':')
+    os.makedirs(out_dir, exist_ok=True)
                     full = os.path.normpath(os.path.join(PAPER, name))
                     inputs[tag] = os.path.relpath(full, PAPER)
+    # Relative \input, \bibliography, \includegraphics must resolve from the
+    # original source tree even when the converted main is in a subfolder.
+    env = dict(os.environ)
+    for k in ('TEXINPUTS', 'BIBINPUTS', 'BSTINPUTS'):
+        env[k] = base_dir + '//:' + env.get(k, '')
                 elif page and c in 'xhvkg$([':
                     m = re.match(r'.(\d+),(\d+)', line)
                     if m:
                         key = (m.group(1), int(m.group(2)))
                         if key not in best:
+    if r.returncode and not errors:
+        errors = [tex_error(r)]
                             best[key] = page
     except (OSError, EOFError, ValueError):
         return {}
@@ -1095,31 +1193,43 @@ def theorems_used():
     return sorted(used - {'proof'})
 
 
-def run_convert(target, anonymous, name, overwrite):
+def run_convert(target, anonymous, name, overwrite, root=False):
     if target not in convert.TARGETS:
         raise ValueError('unknown target')
     if not re.fullmatch(r'[A-Za-z0-9._-]+\.tex', name or ''):
         raise ValueError('the file name must end in .tex, without folders')
-    out_dir = os.path.join(PAPER, os.path.dirname(MAIN))
+    # A missing class is an installation problem, not a failed conversion.
+    # Fail before writing an unusable .tex file.
+    target_class = {'ieee': 'IEEEtran', 'llncs': 'llncs', 'iacrcc': 'iacrcc',
+                    'iacrtrans': 'iacrtrans', 'acmart': 'acmart',
+                    'lipics': 'lipics-v2021', 'article': 'article'}.get(target, target)
+    class_name = target_class + '.cls'
+    found = shutil.which('kpsewhich')
+    installed = subprocess.run(['kpsewhich', class_name], capture_output=True, text=True).stdout.strip() if found else ''
+    if not installed and not os.path.isfile(os.path.join(PAPER, class_name)):
+        raise ValueError(f'{class_name} is not installed. Install that LaTeX class (check with '
+                         f'`kpsewhich {class_name}`), then retry conversion.')
+    base_dir = os.path.join(PAPER, os.path.dirname(MAIN))
+    out_dir = base_dir if root else os.path.join(base_dir, 'converted', target)
     path = os.path.join(out_dir, name)
     if os.path.exists(path) and not overwrite:
-        raise FileExistsError(name)
+        raise FileExistsError(os.path.relpath(path, PAPER))
     md = metadata()['metadata']
-    def resolve_text(name):
-        f = resolve_input(name)
+    def resolve_text(item):
+        f = resolve_input(item)
         return read(f) if f else None
     everything = '\n'.join(read(f) for f in paper_files() if f != MAIN)
     text, warnings = convert.convert(read(MAIN), md, target, anonymous, theorems_used(), resolve_text, everything)
     with open(path, 'w', encoding='utf-8', newline='') as f:
         f.write(text)
     r = subprocess.run(['latexmk', '-pdf', '-interaction=nonstopmode', '-halt-on-error', name], cwd=out_dir,
-                       capture_output=True, text=True, timeout=600)
-    log = os.path.join(out_dir, name[:-4] + '.log')
-    log = open(log, errors='replace').read() if os.path.exists(log) else ''
+                       env=env, capture_output=True, text=True, timeout=600)
+    logfile = os.path.join(out_dir, name[:-4] + '.log')
+    log = open(logfile, errors='replace').read() if os.path.exists(logfile) else ''
     errors = [l for l in log.splitlines() if l.startswith('!')][:5]
     undefined = len(re.findall(r'(Citation|Reference) .* undefined', log))
-    return {'file': name, 'built': r.returncode == 0, 'errors': errors, 'undefined': undefined,
-            'warnings': warnings, 'missing': convert.missing(md, target)}
+    return {'file': os.path.relpath(path, PAPER), 'built': r.returncode == 0, 'errors': errors,
+            'undefined': undefined, 'warnings': warnings, 'missing': convert.missing(md, target)}
 
 
 def html_escape(t):
@@ -1128,6 +1238,11 @@ def html_escape(t):
 
 # ------------------------------------------------------------------ HTTP
 
+            # Persist only intentional overrides.  New values discovered in
+            # the source front matter then populate fields automatically.
+            extracted = convert.extract(read(MAIN))
+            overrides = {k: v for k, v in md.items() if k != 'source_class'
+                         and v != extracted.get(k)}
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
@@ -1218,14 +1333,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.send(400, {'error': 'expected a JSON object'})
             ensure_state()
             with open(os.path.join(STATE, 'metadata.json'), 'w') as f:
-                json.dump(md, f, indent=2, ensure_ascii=False)
+                json.dump(overrides, f, indent=2, ensure_ascii=False)
             return self.send(200, metadata())
         if urllib.parse.urlparse(self.path).path == '/api/convert':
             req = self.json_body()
             if not isinstance(req, dict):
                 return self.send(400, {'error': 'expected a JSON object'})
             try:
-                res = run_convert(req.get('target'), bool(req.get('anonymous')), req.get('name'), bool(req.get('overwrite')))
+                res = run_convert(req.get('target'), bool(req.get('anonymous')), req.get('name'), bool(req.get('overwrite')), bool(req.get('root')))
             except FileExistsError as e:
                 return self.send(409, {'error': f'{e} exists'})
             except Exception as e:
@@ -1246,11 +1361,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.send(400, {'error': 'expected a JSON object'})
             with PROJECT_LOCK:
                 name = req.get('main', '')
-                if name not in find_mains(os.path.join(PAPER, os.path.dirname(MAIN))):
+                if not isinstance(name, str):
+                    return self.send(400, {'error': 'invalid main document'})
+                norm = os.path.normpath(name)
+                if os.path.isabs(name) or norm.startswith('..') or not name.endswith('.tex'):
+                    return self.send(400, {'error': 'invalid main document'})
+                folder = os.path.dirname(norm)
+                if os.path.basename(norm) not in find_mains(os.path.join(PAPER, folder)):
                     return self.send(400, {'error': 'not a document of this project'})
-                # another document of the same project: same directory for LaTeX,
-                # same settings and caches
-                open_paper(os.path.join(PAPER, os.path.dirname(MAIN), name), cwd=PAPER, state=STATE)
+                open_paper(os.path.join(PAPER, norm), cwd=PAPER, state=STATE)
                 ensure_state()
                 BUILDER.aux = load_aux()
                 BUILDER.auxver += 1
@@ -1301,22 +1420,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 BUILDER.aux = load_aux()
                 BUILDER.auxver += 1
                 return self.send(200, {'main': MAIN, 'path': PAPER})
-        if urllib.parse.urlparse(self.path).path == '/api/create-file':
-            req = self.json_body()
-            if not isinstance(req, dict) or not isinstance(req.get('name'), str) or not isinstance(req.get('text'), str):
-                return self.send(400, {'error': 'expected a JSON object with name and text'})
-            name, text = req['name'], req['text']
-            normalized = os.path.normpath(name)
-            if not name.endswith('.tex') or os.path.isabs(name) or normalized == '..' or normalized.startswith('..' + os.sep):
-                return self.send(400, {'error': 'file name must be a relative .tex path'})
-            path = os.path.join(PAPER, normalized)
-            with PROJECT_LOCK:
-                if os.path.exists(path):
-                    return self.send(409, {'error': 'file already exists'})
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                with open(path, 'w', encoding='utf-8', newline='') as f:
-                    f.write(text)
-            return self.send(201, {'name': normalized})
         if urllib.parse.urlparse(self.path).path != '/api/save':
             return self.send(404, {'error': 'not found'})
         req = self.json_body()
@@ -1434,18 +1537,19 @@ def load_token():
 
 
 def ensure_state():
-    """Create <project>/.paper-editor with a .gitignore for its cache and history."""
+    """Create <project>/.paper-editor; generated data stays untracked."""
     os.makedirs(CACHE, exist_ok=True)
     gi = os.path.join(STATE, '.gitignore')
     if not os.path.exists(gi):
         with open(gi, 'w') as f:
-            f.write('# written by paper-editor: the cache and the save history are not worth tracking\ncache/\nhistory/\n')
+            f.write('# written by paper-editor: generated data is not worth tracking\ncache/\nhistory/\ndebug/\n')
     else:
         with open(gi) as f:
             lines = f.read().splitlines()
-        if 'history/' not in lines:
+        missing = [name for name in ('cache/', 'history/', 'debug/') if name not in lines]
+        if missing:
             with open(gi, 'a') as f:
-                f.write(('' if not lines or lines[-1] == '' else '\n') + 'history/\n')
+                f.write(('' if not lines or lines[-1] == '' else '\n') + '\n'.join(missing) + '\n')
 
 
 # ------------------------------------------------------------------ save history

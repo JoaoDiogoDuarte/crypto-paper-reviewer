@@ -49,8 +49,8 @@ main file. The same project can contain several main documents.
   under a cryptobib-style key; every `\label` by number, type and text.
 - **Find and replace**, toolbar, undo/redo for every kind of edit,
   light/dark/auto colours, one or two columns.
-- Sections can be moved, combined, or split at the cursor; new TeX section
-  files can be created from the interface and inserted with `\input`.
+- Sections can be moved, combined, or split at the cursor. Existing `\input`
+  files can be reviewed and edited in place.
 - **Reads aloud**, phrase by phrase, highlighting the phrase; maths is read
   as words. Voices: the browser's, Kokoro and Piper (offline), Edge
   (unofficial endpoint), Azure and Google (official, need keys).
@@ -99,6 +99,29 @@ folder holds only the program and the shared voice models.
   When saving edited content, the editor asks before applying the configured
   house rules. Existing untouched content is preserved exactly; only edited
   blocks can be changed by those rules.
+## Review workflow notes
+
+- **New file** has been removed. Existing documents remain editable and can be
+  compared through the diff view, which now includes a clickable change minimap.
+- **Metadata** is detected from the LaTeX source; nonmatching values are saved
+  as overrides in `.paper-editor/metadata.json`. The dialog can restore the
+  extracted values. Metadata edits do **not** rewrite the source `\author`.
+- **Conversion** checks the required `.cls` first. Converted mains default to
+  `converted/<venue>/` (the original folder can be chosen explicitly).
+  Missing classes require installing their TeX packages separately.
+
+
+## Debugging TeX builds
+
+Start with `PAPER_EDITOR_DEBUG=1 ./run /path/to/paper` to keep the full
+`latexmk` output, the main document's `.log`/`.aux`, and the temporary
+`figs.tex`/`figs.log`/`figs.aux` in `<paper>/.paper-editor/debug/`.
+Each build has its own timestamped directory. Debug data can contain paper
+text; it is excluded from Git. Failed figure builds now print the TeX error
+in the terminal. If a previous aborted build left an unreadable main `.aux`,
+the editor keeps its old contents under `.paper-editor/cache/bad-aux/`,
+then retries `latexmk -g` once. You should not run a second `latexmk` on the
+same paper at the same time as the editor.
 
 ## Setup
 

@@ -20,6 +20,15 @@ window.addEventListener('unhandledrejection', (e) => {
 const L = window.LatexDoc;
 const TOKEN = document.querySelector('meta[name=token]').content;
 const $ = (s) => document.querySelector(s);
+// The header wraps on narrow screens.  Never hard-code its sticky height.
+const barObserver = new ResizeObserver(() => {
+  document.documentElement.style.setProperty('--bar-height',
+    Math.ceil($('#bar').getBoundingClientRect().height) + 'px');
+  document.documentElement.style.setProperty('--toolbar-height',
+    Math.ceil($('#toolbar').getBoundingClientRect().height) + 'px');
+});
+barObserver.observe($('#bar'));
+barObserver.observe($('#toolbar'));
 
 let DOC = null;          // payload of /api/doc: files, aux, macros, bib, figs
 const FILES = {};        // name -> { text, base (hash on disk), disk (text on disk), segs }
@@ -345,6 +354,31 @@ function renderCode(seg) {
   return wrapSeg(seg, ta);
 }
 
+// Preview LaTeX tabulars without changing their source.  Cell editor remains
+// in the figure viewer; this is an accessible reading-only presentation.
+function previewTabular(src) {
+  const tables = L.parseTabulars(src);
+  if (!tables.length) return null;
+  const container = el('div', 'tabular-preview');
+  for (const t of tables) {
+    const table = el('table', 'tabular-render');
+    for (const r of t.rows) {
+      if (r.empty) continue;
+      const tr = el('tr');
+      for (const cell of r.cells) {
+        const td = el('td');
+        renderTokens(L.tokenize(cell.content), td, {});
+        tr.append(td);
+      }
+      table.append(tr);
+      if (/\\(midrule|toprule|bottomrule|hline)/.test(r.lead))
+        tr.classList.add('rule-above');
+    }
+    container.append(table);
+  }
+  return container;
+}
+
 function renderFloat(seg) {
   const box = el('div');
   seg.wide = /^\s*\\begin\{(figure|table)\*\}/.test(seg.src);
@@ -355,8 +389,7 @@ function renderFloat(seg) {
   } else if (DOC.figs[seg.src]) {
     const img = el('img'); img.src = DOC.figs[seg.src]; img.alt = 'Table'; box.append(img);
   } else {
-    const raw = /\\begin\{tabular\}[^]*?\\end\{tabular\}/.exec(seg.src);
-    if (raw) box.append(el('pre', 'rawsrc', raw[0]));
+    box.append(previewTabular(seg.src) || el('div', 'small', '(table preview is being rendered)'));
   }
   const cap = L.captionParts(seg.src);
   seg.parts = cap;
@@ -458,12 +491,24 @@ function renderChip(tok, ctx) {
   if (name === 'texorpdfstring') { const c = chip('', tok.s); renderTokens(L.tokenize(arg(0)), c, ctx); return c; }
   if (name === ',' || name === ' ' || name === ';' || name === '@') return chip('nl', tok.s, ' ');
   if (name === 'dots' || name === 'ldots') return chip('nl', tok.s, '…');
+  if (name === 'verbatim' && /^tabular(?:\*|x)?$/.test(tok.env)) {
+    const c = chip('tabular-inline', tok.s);
+    c.append(previewTabular(tok.s) || el('code', '', tok.s));
+    return c;
+  }
   if (name === 'verbatim') return chip('src', tok.s, '[' + tok.env + ']');
   // characters typed into the text are saved as these commands; show them as
   // the characters
   if (name === 'textasciitilde') return chip('char', tok.s, '~');
   if (name === 'textasciicircum') return chip('char', tok.s, '^');
   if (name === 'textbackslash') return chip('char', tok.s, '\\');
+  // Text accents belong to Unicode in the reading view, but keep their exact
+  // LaTeX source in data-src so editing/saving still round-trips losslessly.
+  const accents = { c: '\u0327', "'": '\u0301', '`': '\u0300', '"': '\u0308',
+    '^': '\u0302', '~': '\u0303', '=': '\u0304', '.': '\u0307',
+    u: '\u0306', v: '\u030c', H: '\u030b', r: '\u030a', k: '\u0328' };
+  if (Object.prototype.hasOwnProperty.call(accents, name) && arg().length === 1)
+    return chip('char', tok.s, (arg() + accents[name]).normalize('NFC'));
   // a macro of the document used in text: show it typeset when its body is
   // maths (\ensuremath{...}, \mathsf{...}, \mathcal...)
   const body = DOC.macros['\\' + name];
@@ -529,6 +574,16 @@ const katexMacros = () => ({ ...KATEX_SHIMS, ...DOC.macros });
 function typesetInto(src, node, display) {
   let [body, disp] = mathBody(src);
   body = body.replace(/\\label\{[^}]*\}/g, '').replace(/\\(nonumber|notag)\b/g, '');
+  // KaTeX cannot parse amsmath's multline/multline* directly.  A display
+  // aligned environment handles line breaks, alignment marks and spacing.
+    if (node.classList.contains('bad')) node.title = 'Math preview unsupported by KaTeX: ' + node.textContent;
+    else node.removeAttribute('title');
+  // Only the preview changes; data-src always remains the original LaTeX.
+  body = body.replace(/\\begin\{multline\*?\}/g, '\\begin{aligned}')
+    .replace(/\\end\{multline\*?\}/g, '\\end{aligned}')
+    node.title = 'Math preview error: ' + e.message;
+    .replace(/\\begin\{split\}/g, '\\begin{aligned}')
+    .replace(/\\end\{split\}/g, '\\end{aligned}');
   try {
     const key = (display || disp ? 'D' : 'I') + body;
     let html = KATEX_CACHE.get(key);
@@ -2162,7 +2217,6 @@ function closeCurrentMenu() {
   if (!$('#external').hidden) { $('#external-later').click(); return; }
   if (!$('#openbox').hidden) { $('#open-cancel').click(); return; }
   if (!$('#historybox').hidden) { $('#historybox').hidden = true; return; }
-  if (!$('#newfilebox').hidden) { $('#newfile-cancel').click(); return; }
   if (!$('#palette').hidden) { closePalette(); return; }
   if (!$('#keysbox').hidden) { RECORDING = null; $('#keysbox').hidden = true; return; }
   if (!$('#paperbox').hidden) { $('#paperbox').hidden = true; return; }
@@ -2893,6 +2947,44 @@ async function fuzzTest(n, seed) {
 }
 {
   const q = new URLSearchParams(location.search);
+function updateDiffMap() {
+  if (!DIFF.on || !DIFF.marks.length) return;
+  const map = $('#diffmap');
+  const height = Math.max(1, document.documentElement.scrollHeight - innerHeight);
+  map.querySelectorAll('.diffmap-mark').forEach((mark) => {
+    const target = DIFF.marks[+mark.dataset.index];
+    if (!target || !target.isConnected) return;
+    const y = Math.max(0, target.getBoundingClientRect().top + scrollY) / height;
+    mark.style.top = `${Math.min(98, y * 98)}%`;
+    mark.classList.toggle('active', target.classList.contains('diff-current'));
+  });
+  const view = $('#diffmap-viewport');
+  view.style.top = `${Math.max(0, Math.min(98, 98 * scrollY / height))}%`;
+  view.style.height = `${Math.max(2, Math.min(100, innerHeight * 100 / document.documentElement.scrollHeight))}%`;
+}
+function fillDiffMap() {
+  const map = $('#diffmap');
+  map.querySelectorAll('.diffmap-mark').forEach((node) => node.remove());
+  map.hidden = !DIFF.on || !DIFF.marks.length;
+  DIFF.marks.forEach((target, i) => {
+    const mark = el('button', 'diffmap-mark');
+    mark.type = 'button';
+    mark.dataset.index = i;
+    mark.setAttribute('aria-label', `Go to change ${i + 1}`);
+    mark.title = `Change ${i + 1} of ${DIFF.marks.length}`;
+    mark.classList.add(target.classList.contains('diff-gone') ? 'removed' :
+      target.classList.contains('diff-new') ? 'added' : 'modified');
+    mark.onclick = () => {
+      if (DIFF.marks[DIFF.cur]) DIFF.marks[DIFF.cur].classList.remove('diff-current');
+      DIFF.cur = i - 1;
+      diffStep(1);
+    };
+    map.append(mark);
+  });
+  requestAnimationFrame(updateDiffMap);
+}
+addEventListener('scroll', updateDiffMap, { passive: true });
+addEventListener('resize', updateDiffMap);
   if (q.has('fuzz')) {
     const t = setInterval(() => { if (ORDER.length) { clearInterval(t); setTimeout(() => fuzzTest(+q.get('fuzz') || 200, +q.get('seed') || 1), 500); } }, 200);
   }
@@ -3001,6 +3093,7 @@ async function diffOn() {
           DIFF.marks.push(b.el);
         } else { b.el.classList.add('diff-new'); DIFF.marks.push(b.el); }
       }
+  fillDiffMap();
       for (const d of dels) {   // deleted blocks, shown where they were
         const ghost = renderSeg({ ...d }, {});
         if (!ghost) continue;
@@ -3009,6 +3102,7 @@ async function diffOn() {
         if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(ghost, anchor);
         else if (cur.length && cur[cur.length - 1].el) cur[cur.length - 1].el.after(ghost);
         DIFF.marks.push(ghost);
+  $('#diffmap').hidden = true;
       }
       i = j - 1;
     }
@@ -3036,6 +3130,7 @@ function diffOff() {
 // texts).  Returns true when a structure edit should not go on: its block
 // was one of the diff view's.
 function leaveDiff() {
+  updateDiffMap();
   if (!DIFF.on && !DIFF_SHOWN) return false;
   diffOff();
   banner('Left the diff view.');
@@ -3590,44 +3685,6 @@ $('#history-close').onclick = () => { $('#historybox').hidden = true; };
 
 let OPEN_PROJECT = null;
 
-let NEWFILE_AT = null;   // where the \input goes: the caret when the dialog opened
-function showNewFile() {
-  if (!editableAt(selRange())) { banner('Put the cursor in the paper where the new file should be included.'); return; }
-  NEWFILE_AT = selRange().cloneRange();
-  $('#newfilebox').hidden = false;
-  $('#newfile-name').focus();
-}
-
-async function createNewFile() {
-  const name = $('#newfile-name').value.trim();
-  const text = $('#newfile-text').value;
-  if (!name) return;
-  const r = await fetch('/api/create-file', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
-    body: JSON.stringify({ name, text }) });
-  if (!r.ok) { banner('Could not create the file: ' + (await r.json()).error); return; }
-  const created = (await r.json()).name;
-  const input = created.replace(/\.tex$/, '');
-  if (NEWFILE_AT && NEWFILE_AT.startContainer.isConnected) {
-    const sel = getSelection(); sel.removeAllRanges(); sel.addRange(NEWFILE_AT);
-    const host = editableAt(NEWFILE_AT); if (host) host.focus({ preventScroll: true });
-  }
-  const src = '\\input{' + input + '}';
-  // the new file is a block of its own
-  if (!insertNodes([chip('parbreak', '\n\n', ''), chip('src', src, src), chip('parbreak', '\n\n', '')])) {
-    banner(`Created ${created}, but the cursor left the text: insert \\input{${input}} yourself.`);
-    $('#newfilebox').hidden = true;
-    return;
-  }
-  $('#newfilebox').hidden = true;
-  $('#newfile-name').value = '';
-  commit();
-  await load(true);
-}
-
-$('#newfilebtn').onclick = showNewFile;
-$('#newfile-create').onclick = createNewFile;
-$('#newfile-cancel').onclick = () => { $('#newfilebox').hidden = true; };
-
 async function chooseProjectDirectory() {
   const r = await fetch('/api/pick-directory', { method: 'POST', headers: { 'X-Token': TOKEN, 'Content-Type': 'application/json' }, body: '{}' });
   if (r.status === 204) return;
@@ -3690,7 +3747,12 @@ $('#mainsel').onchange = async () => {
 // Metadata (extracted from the front matter, edited here, saved in the
 // project's .paper-editor/metadata.json), and conversion to another class.
 
-const MD = { data: null, info: null, target: 'llncs', anon: false };
+const MD = { data: null, info: null, target: 'llncs', anon: false, dirty: false };
+function metadataDirty() {
+  MD.dirty = false;
+  MD.dirty = true;
+  const status = $('#md-status'); if (status) status.textContent = 'Unsaved metadata changes';
+}
 
 async function openPaper() {
   MD.info = await (await fetch('/api/metadata')).json();
@@ -3707,18 +3769,37 @@ function drawPaper() {
     const i = el('input'); i.type = 'text'; i.value = obj[key] || ''; i.placeholder = label;
     i.style.width = width || '14em';
     if (need.has(where + '|' + key)) i.classList.add('need');
-    i.oninput = () => { obj[key] = i.value; refreshMissing(); };
+    i.oninput = () => {
+      obj[key] = i.value;
+      metadataDirty();
+      if (key === 'name' && md.affiliations.includes(obj)) {
+        const afid = md.affiliations.indexOf(obj);
+        document.querySelectorAll(`[data-afflink="${afid}"]`).forEach((node) =>
+          node.textContent = `${afid + 1}. ${(i.value || '?').slice(0, 30)}`);
+      }
+      refreshMissing();
+    };
     const l = el('label', '', label + ' '); l.append(i);
     return l;
   };
-  body.append(el('div', 'small', `Read from the front matter (${md.source_class})${MD.info.saved ? ', with your saved edits' : ''}. Names keep their LaTeX (accents, macros).`));
+  const origin = el('div', 'small', `Detected from ${md.source_class} front matter${MD.info.saved ? '; manual overrides applied' : ''}. Metadata is saved separately; the LaTeX is never rewritten.`);
+  const reset = el('button', '', 'Restore detected fields');
+  reset.title = 'Replace saved metadata overrides with values detected from the LaTeX source';
+  reset.onclick = () => {
+    if (!confirm('Replace your metadata edits with values found in the LaTeX source?')) return;
+    MD.data = structuredClone(MD.info.extracted);
+    drawPaper(); metadataDirty();
+  };
+  const status = el('span', 'small', MD.dirty ? 'Unsaved metadata changes' : 'Metadata loaded');
+  status.id = 'md-status'; status.setAttribute('role', 'status');
+  body.append(origin, reset, status);
   body.append(el('h4', '', 'Paper'));
   let r = el('div', 'row');
   r.append(field(md, 'title', 'Title', 'paper', '30em'), field(md, 'running_title', 'Running title', 'paper'));
   body.append(r);
   r = el('div', 'row');
   const kw = el('input'); kw.type = 'text'; kw.value = (md.keywords || []).join(', '); kw.style.width = '30em';
-  kw.oninput = () => { md.keywords = kw.value.split(',').map((x) => x.trim()).filter(Boolean); };
+  kw.oninput = () => { md.keywords = kw.value.split(',').map((x) => x.trim()).filter(Boolean); metadataDirty(); };
   const kl = el('label', '', 'Keywords (comma-separated) '); kl.append(kw);
   r.append(kl, field(md, 'license', 'Licence (e.g. CC-by)', 'paper', '9em'));
   body.append(r);
@@ -3729,22 +3810,25 @@ function drawPaper() {
     r = el('div', 'row');
     r.append(field(a, 'name', 'Name', where, '16em'), field(a, 'email', 'Email', where), field(a, 'orcid', 'ORCID', where, '11em'));
     const del = el('button', '', '✕'); del.title = 'Remove this author';
-    del.onclick = () => { md.authors.splice(i, 1); drawPaper(); };
+    del.onclick = () => { md.authors.splice(i, 1); drawPaper(); metadataDirty(); };
     r.append(del);
     c.append(r);
     r = el('div', 'row');
     r.append(el('span', need.has(where + '|affiliation') ? 'missing' : '', 'Affiliations:'));
     md.affiliations.forEach((af, k) => {
       const cb = el('input'); cb.type = 'checkbox'; cb.checked = (a.affiliations || []).includes(k);
-      cb.onchange = () => { a.affiliations = md.affiliations.map((_, j) => j).filter((j) => (j === k ? cb.checked : (a.affiliations || []).includes(j))); refreshMissing(); };
-      const l = el('label', '', ' ' + (k + 1) + '. ' + (af.name || '?').slice(0, 30)); l.prepend(cb);
+      cb.onchange = () => { a.affiliations = md.affiliations.map((_, j) => j).filter((j) => (j === k ? cb.checked : (a.affiliations || []).includes(j))); refreshMissing(); metadataDirty(); };
+      const l = el('label', '');
+      const txt = el('span', '', (k + 1) + '. ' + (af.name || '?').slice(0, 30));
+      txt.dataset.afflink = k;
+      l.append(cb, txt);
       r.append(l);
     });
     c.append(r);
     body.append(c);
   });
   const addA = el('button', '', '＋ author');
-  addA.onclick = () => { md.authors.push({ name: '', email: '', orcid: '', affiliations: [] }); drawPaper(); };
+  addA.onclick = () => { md.authors.push({ name: '', email: '', orcid: '', affiliations: [] }); drawPaper(); metadataDirty(); };
   body.append(addA);
   body.append(el('h4', '', 'Affiliations'));
   md.affiliations.forEach((af, k) => {
@@ -3762,7 +3846,7 @@ function drawPaper() {
     body.append(r);
   });
   const addF = el('button', '', '＋ affiliation');
-  addF.onclick = () => { md.affiliations.push({ name: '', department: '', city: '', country: '', ror: '' }); drawPaper(); };
+  addF.onclick = () => { md.affiliations.push({ name: '', department: '', city: '', country: '', ror: '' }); drawPaper(); metadataDirty(); };
   body.append(addF);
   // conversion
   const cv = el('div', 'convert');
@@ -3774,14 +3858,17 @@ function drawPaper() {
   const an = el('input'); an.type = 'checkbox'; an.checked = MD.anon;
   an.onchange = () => { MD.anon = an.checked; drawPaper(); };
   const al = el('label', '', ' anonymous (no authors, affiliations or acknowledgements)'); al.prepend(an);
+  const rootOutput = el('input'); rootOutput.type = 'checkbox'; rootOutput.checked = false;
+  const rootLabel = el('label', '', ' Put converted document beside original (rather than converted/<venue>/)');
+  rootLabel.prepend(rootOutput);
   const name = el('input'); name.type = 'text'; name.style.width = '16em';
   name.value = DOC.main.split('/').pop().replace(/\.tex$/, '') + '-' + MD.target + (MD.anon ? '-anon' : '') + '.tex';
   const go = el('button', '', 'Convert and build');
   r.append(sel, al);
   cv.append(r);
   r = el('div', 'row');
-  const nl = el('label', '', 'New main file '); nl.append(name);
-  r.append(nl, go);
+  const nl = el('label', '', 'Converted document filename '); nl.append(name);
+  r.append(nl, rootLabel, go);
   cv.append(r);
   const miss = el('div', 'missingbox');
   cv.append(miss);
@@ -3793,7 +3880,8 @@ function drawPaper() {
     await saveMetadata(true);
     result.textContent = 'Converting and building…';
     const send = (overwrite) => fetch('/api/convert', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
-      body: JSON.stringify({ target: MD.target, anonymous: MD.anon, name: name.value, overwrite }) });
+      body: JSON.stringify({ target: MD.target, anonymous: MD.anon, name: name.value, overwrite,
+        root: rootOutput.checked }) });
     let resp = await send(false);
     if (resp.status === 409 && confirm(`${name.value} exists. Overwrite it?`)) resp = await send(true);
     const res = await resp.json();
@@ -3805,7 +3893,8 @@ function drawPaper() {
     for (const w of res.warnings) result.append(el('p', 'small', '• ' + w));
     const open = el('button', '', 'Open it in the editor');
     open.onclick = async () => {
-      await fetch('/api/open', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN }, body: JSON.stringify({ main: res.file }) });
+      const opened = await fetch('/api/open', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN }, body: JSON.stringify({ main: res.file }) });
+      if (!opened.ok) { banner('Could not open converted file: ' + (await opened.json()).error); return; }
       for (const k of Object.keys(FILES)) delete FILES[k];
       $('#paperbox').hidden = true;
       await load(false);
@@ -3843,11 +3932,18 @@ function refreshMissing() {
     : `Everything ${MD.info.targets[MD.target]} needs is filled in.`;
 }
 
+  if (!r.ok) { const msg = 'Metadata save failed (' + r.status + ')';
+    const status = $('#md-status'); if (status) status.textContent = msg;
+    banner(msg); return;
+  }
 async function saveMetadata(quiet) {
   const r = await fetch('/api/metadata', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
     body: JSON.stringify(MD.data) });
   MD.info = await r.json();
-  if (!quiet) banner('Metadata saved in .paper-editor/metadata.json.');
+  MD.dirty = false;
+  const status = $('#md-status');
+  if (status) status.textContent = 'Saved locally at ' + new Date().toLocaleTimeString();
+  if (!quiet) banner('Metadata saved successfully in .paper-editor/metadata.json.');
 }
 
 $('#paperbtn').onclick = openPaper;
