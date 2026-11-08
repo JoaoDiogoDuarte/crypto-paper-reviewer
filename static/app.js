@@ -3530,10 +3530,11 @@ function procLine(g, l, li) {
     try { katex.render(l.content.replace(/\\\\\s*$/, ''), prev, { throwOnError: false, macros: { ...katexMacros(), ...CRYPTOCODE_MACROS } }); }
     catch (e) { prev.textContent = l.content; }
   };
-  ta.oninput = () => { l.content = ta.value; show(); };
+  ta.oninput = () => { gameCheckpoint(ta); l.content = ta.value; show(); };
+  ta.onblur = () => { FV.lastEditor = null; };
   show();
   const tools = el('div', 'gtools'); tools.style.opacity = 1;
-  const b1 = el('button', '', '+ line'); b1.onclick = () => { g.lines.splice(li + 1, 0, { prefix: '', content: '', suffix: l.suffix || ' \\\\\n' }); if (!l.suffix) l.suffix = ' \\\\\n'; showFigTab('games'); };
+  const b1 = el('button', '', '+ line'); b1.onclick = () => { gameCheckpoint(); g.lines.splice(li + 1, 0, { prefix: '', content: '', suffix: l.suffix || ' \\\\\n' }); if (!l.suffix) l.suffix = ' \\\\\n'; showFigTab('games'); };
   const b3 = el('button', '', 'Delete'); b3.onclick = () => { g.lines.splice(li, 1); showFigTab('games'); };
   tools.append(b1, b3);
   row.append(ta, prev, tools);
