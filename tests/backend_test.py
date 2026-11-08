@@ -337,7 +337,8 @@ class BackendTest(unittest.TestCase):
                  'iacrcc': 'iacrcc.cls', 'iacrtrans': 'iacrtrans.cls',
                  'acmart': 'acmart.cls', 'lipics': 'lipics-v2021.cls',
                  'article': 'article.cls'}
-        with mock.patch('server.shutil.which', return_value=None):
+        # no TeX installation and none of the classes the editor bundles
+        with mock.patch('server.shutil.which', return_value=None), mock.patch('server.CLASSES', self.tmp + '/no-classes'):
             for target, class_name in names.items():
                 with self.subTest(target=target):
                     with self.assertRaisesRegex(ValueError, class_name.replace('.', r'\.')):
@@ -375,7 +376,7 @@ class BackendTest(unittest.TestCase):
             self.assertTrue(os.path.isdir(kw['cwd']))
 
     def test_missing_class_does_not_write_converted_file(self):
-        with mock.patch('server.shutil.which', return_value=None):
+        with mock.patch('server.shutil.which', return_value=None), mock.patch('server.CLASSES', self.tmp + '/no-classes'):
             with self.assertRaisesRegex(ValueError, 'iacrcc.cls is not installed'):
                 server.run_convert('iacrcc', True, 'conversion.tex', False)
         self.assertFalse(os.path.exists(os.path.join(self.tmp, 'converted', 'iacrcc', 'conversion.tex')))

@@ -141,8 +141,15 @@ the classes.
   drop acknowledgements and the PDF author field, and warn about
   acknowledgements, funding and `\thanks` in other files. Self-citations in
   the first person are yours to check.
-- **Class files** must be installed. For LNCS use Springer's
-  [llncs package](https://ctan.org/pkg/llncs) (it includes `splncs04.bst`).
+- **Class files** that TeX Live does not ship (`iacrcc`, `iacrtrans`,
+  `lipics-v2021`, `svjour3`, Springer Nature's `sn-jnl`, with their
+  `.bst`/`.clo` files) are bundled in `classes/`. Others must be installed;
+  for LNCS use Springer's [llncs package](https://ctan.org/pkg/llncs) (it
+  includes `splncs04.bst`).
+- **Round trips.** A converted file remembers the file it came from.
+  Converting it back gives the original byte for byte, with your edits to
+  the converted text carried over; converting it to a third venue starts
+  from the original, so no compatibility shims pile up.
 - **IACR:** `iacrcc` is a legacy target. IACR now recommends
   [`iacrj.cls`](https://github.com/IACR/latex), which is not supported yet.
 

@@ -33,6 +33,8 @@ import selftest  # noqa: E402
 
 FIX = os.path.join(HERE, 'fixtures')
 CLASSES = os.path.join(HERE, 'classes')
+# classes the editor ships (classes/ at its root), then any you add here
+CLASS_DIRS = [os.path.join(os.path.dirname(HERE), 'classes'), CLASSES]
 STYLE_EXT = ('.cls', '.bst', '.sty', '.bbx', '.cbx', '.clo', '.dbx', '.lbx')
 
 
@@ -52,7 +54,7 @@ def needed_class_missing(main):
         return None
     cls = m.group(1) + '.cls'
     have = subprocess.run(['kpsewhich', cls], capture_output=True).returncode == 0
-    return None if have or os.path.exists(os.path.join(CLASSES, cls)) else cls
+    return None if have or any(os.path.exists(os.path.join(d, cls)) for d in CLASS_DIRS) else cls
 
 
 def tex_files(root):
@@ -85,9 +87,10 @@ def check(name, rounds):
         missing = needed_class_missing(main)
         if missing:
             return 'SKIP', [f'{missing} not installed; put it in tests/classes/']
-        for f in os.listdir(CLASSES) if os.path.isdir(CLASSES) else []:
-            if f.endswith(STYLE_EXT):
-                shutil.copy(os.path.join(CLASSES, f), os.path.dirname(main))
+        for cdir in CLASS_DIRS:
+            for f in os.listdir(cdir) if os.path.isdir(cdir) else []:
+                if f.endswith(STYLE_EXT + ('.pdf',)):
+                    shutil.copy(os.path.join(cdir, f), os.path.dirname(main))
         # 1. build
         r = subprocess.run(['latexmk', '-pdf', '-synctex=1', '-interaction=nonstopmode', '-halt-on-error',
                             os.path.basename(main)], cwd=os.path.dirname(main), capture_output=True, text=True,

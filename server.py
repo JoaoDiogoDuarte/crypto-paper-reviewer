@@ -31,6 +31,9 @@ import convert
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, 'static')
+# LaTeX classes and bibliography styles TeX Live does not ship (iacrcc, iacrtrans,
+# lipics, svjour3, sn-jnl): found by every build after the paper's own files
+CLASSES = os.path.join(HERE, 'classes')
 TOKEN = secrets.token_hex(16)
 
 # Set by main(): the directory of the main file (LaTeX's working directory),
@@ -1237,11 +1240,12 @@ def run_convert(target, anonymous, name, overwrite, root=False):
                     'lipics': 'lipics-v2021', 'article': 'article'}.get(target, target)
     class_name = target_class + '.cls'
     found = shutil.which('kpsewhich')
-    installed = subprocess.run(['kpsewhich', class_name], capture_output=True, text=True).stdout.strip() if found else ''
-    if not installed and not os.path.isfile(os.path.join(PAPER, class_name)):
+    installed = subprocess.run(['kpsewhich', class_name], capture_output=True, text=True, errors='replace').stdout.strip() if found else ''
+    if not installed and not any(os.path.isfile(os.path.join(d, class_name)) for d in (PAPER, source_root(), CLASSES)):
         raise ValueError(f'{class_name} is not installed. Install that LaTeX class (check with '
                          f'`kpsewhich {class_name}`), then retry conversion.')
-    base_dir = os.path.normpath(os.path.join(PAPER, os.path.dirname(MAIN)))
+    # from a converted file too: next to the original, never converted/x/converted/y/
+    base_dir = source_root()
     out_dir = base_dir if root else os.path.join(base_dir, 'converted', target)
     path = os.path.join(out_dir, name)
     if os.path.exists(path) and not overwrite:

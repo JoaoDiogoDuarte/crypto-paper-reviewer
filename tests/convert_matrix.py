@@ -21,6 +21,7 @@ import convert  # noqa: E402
 
 FIX = os.path.join(HERE, 'fixtures')
 CLASSES = os.path.join(HERE, 'classes')
+CLASS_DIRS = [os.path.join(os.path.dirname(HERE), 'classes'), CLASSES]
 THM = r'theorem|lemma|corollary|proposition|definition|claim|assumption|remark|example|conjecture|thm|fact'
 
 
@@ -52,9 +53,10 @@ def run(source, target, anon):
         shutil.copytree(os.path.join(FIX, source), work)
         main = os.path.join(work, 'main.tex') if os.path.exists(os.path.join(work, 'main.tex')) else os.path.join(work, 'paper', 'main.tex')
         d = os.path.dirname(main)
-        for f in os.listdir(CLASSES):
-            if not f.startswith('.'):
-                shutil.copy(os.path.join(CLASSES, f), d)
+        for cdir in CLASS_DIRS:
+            for f in os.listdir(cdir) if os.path.isdir(cdir) else []:
+                if not f.startswith('.') and os.path.isfile(os.path.join(cdir, f)):
+                    shutil.copy(os.path.join(cdir, f), d)
         text = open(main, encoding='utf-8-sig').read()
         md = fill(convert.extract(text), target)
         used = set()
