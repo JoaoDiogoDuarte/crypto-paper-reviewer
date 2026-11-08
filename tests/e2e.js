@@ -1284,6 +1284,41 @@ Object.assign(TESTS, {
     untouched(env, 'main.tex');
   },
 
+  async 'game editor: loops colours undo and game blocks'(env, page) {
+    await page.click("js:ORDER.find((s) => s.kind === 'figure').el.querySelector('div.small, img')", { count: 2 });
+    await page.waitFor(visible('#figview'));
+    const src = ['\\begin{figure}', '\\begin{gameenv}{Game A}', '  \\State $x \\gets y$',
+      '\\end{gameenv}', '\\begin{gameenv}{Game B}', '  \\State $z \\gets w$',
+      '\\end{gameenv}', '\\end{figure}'].join('\n');
+    const state = await page.eval('(() => { const src = ' + JSON.stringify(src) +
+      '; FV.src = src; FV.games = parseGames(src); FV.tables = L.parseTabulars(src);' +
+      ' showFigTab("games"); return { count: FV.games.length, spans: FV.games.map((g) => [g.start, g.end]) }; })()');
+    eq(state.count, 2, 'both gameenv blocks parsed');
+    eq(state.spans.every(([a, b]) => b > a), true, 'whole game spans available');
+    await page.eval('(() => { const menu = document.querySelector("#fv-body .g-insert");' +
+      ' menu.value = "While"; menu.parentElement.querySelector("button").click(); })()');
+    has(await page.eval('figureWithEdits()'), '\\While{$c$}', 'inserted while block');
+    has(await page.eval('figureWithEdits()'), '\\EndWhile', 'while loop has an end');
+    await page.click('#fv-undo');
+    eq(await page.eval('figureWithEdits()'), src, 'undo restores exact source');
+    await page.click('#fv-redo');
+    has(await page.eval('figureWithEdits()'), '\\While{$c$}', 'redo restores while block');
+    await page.eval('(() => { FILES[DOC.main].text += String.fromCharCode(92) + "usepackage{xcolor}";' +
+      ' const menu = document.querySelector("#fv-body select.g-mark");' +
+      ' menu.value = "yellow!20"; menu.dispatchEvent(new Event("change")); })()');
+    has(await page.eval('figureWithEdits()'), '\\colorbox{yellow!20}', 'colour mark emits LaTeX');
+    await page.eval('gameMove(0, 1)');
+    eq(await page.eval('FV.games[0].title'), 'Game B', 'game blocks were reordered');
+    await page.click('#fv-undo');
+    eq(await page.eval('FV.games[0].title'), 'Game A', 'reorder can be undone');
+    await page.click('#fv-add-game');
+    eq(await page.eval('FV.games.length'), 3, 'game created');
+    await page.click('#fv-undo');
+    eq(await page.eval('FV.games.length'), 2, 'creation undone');
+    await page.click('#fv-close');
+    untouched(env, 'main.tex', 'sections/body.tex');
+  },
+
   // ---- combinations
   async 'a selection across two paragraphs: ( wraps nothing and deletes nothing'(env, page) {
     await selectSpan(page, 'lazy', 'A second');
