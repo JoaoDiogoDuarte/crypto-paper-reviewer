@@ -1304,7 +1304,7 @@ Object.assign(TESTS, {
     await page.click('#fv-redo');
     has(await page.eval('figureWithEdits()'), '\\While{$c$}', 'redo restores while block');
     await page.eval('(() => { FILES[DOC.main].text += String.fromCharCode(92) + "usepackage{xcolor}";' +
-      ' const menu = document.querySelector("#fv-body select.g-mark");' +
+      ' const menu = document.querySelector("#fv-body select.g-mark:not(:disabled)");' +
       ' menu.value = "yellow!20"; menu.dispatchEvent(new Event("change")); })()');
     has(await page.eval('figureWithEdits()'), '\\colorbox{yellow!20}', 'colour mark emits LaTeX');
     await page.eval('gameMove(0, 1)');
