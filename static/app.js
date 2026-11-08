@@ -206,7 +206,7 @@ function layoutPages(doc) {
   const startPage = (n) => {
     box = el('section', 'page');
     box.dataset.page = n;
-    box.append(el('div', 'pagemark', (exact ? 'page ' : '≈ page ') + n));
+    box.append(el('div', 'pagemark', (exact ? 'page ' : 'approx. page ') + n));
     doc.append(box);
   };
   for (const seg of ORDER) {
@@ -422,6 +422,19 @@ function renderFloat(seg) {
 // Render tokens into parent.  Plain text stays editable; everything else is
 // an atomic chip that carries its source in data-src.
 function renderTokens(toks, parent, ctx) {
+  // Preserve the original source when bare accents cross two tokenizer tokens.
+  const accents = new Set(["'", String.fromCharCode(96), '"', '^', '~', '=', '.', 'u', 'v', 'H', 'r', 'k', 'c']);
+  const original = toks;
+  toks = [];
+  for (let i = 0; i < original.length; i++) {
+    const token = original[i], next = original[i + 1];
+    if (token.t === 'cmd' && token.s === '\\' + token.name &&
+        accents.has(token.name) && next && next.t === 'text' && /^[a-zA-Z]/.test(next.s)) {
+      toks.push({ ...token, s: token.s + next.s[0], bareAccent: next.s[0] });
+      if (next.s.length > 1) toks.push({ ...next, s: next.s.slice(1) });
+      i++;
+    } else toks.push(token);
+  }
   toks.forEach((tok, i) => {
     if (tok.t !== 'env' || tok.mode !== 'begin') return;
     for (let k = i + 1; k < toks.length && k < i + 4; k++) {
@@ -472,6 +485,7 @@ function renderChip(tok, ctx) {
   }
   const name = tok.name;
   const arg = (k = 0) => { const m = [...tok.s.matchAll(/\{([^{}]*)\}/g)]; return m[k] ? m[k][1] : ''; };
+  if (name === 'protect') return chip('hidden', tok.s);
   if (HIDDEN.has(name) || (name !== 'iff' && /^(newif|else|fi|if[a-zA-Z@]*|[a-zA-Z@]+(true|false))$/.test(name))) return chip('hidden', tok.s);
   if (/^[cC]ref$|^ref$|^eqref$|^autoref$/.test(name)) return chip('ref', tok.s, refText(name, arg()));
   if (name === 'cite') {
@@ -516,8 +530,9 @@ function renderChip(tok, ctx) {
   const accents = { c: '\u0327', "'": '\u0301', '`': '\u0300', '"': '\u0308',
     '^': '\u0302', '~': '\u0303', '=': '\u0304', '.': '\u0307',
     u: '\u0306', v: '\u030c', H: '\u030b', r: '\u030a', k: '\u0328' };
-  if (Object.prototype.hasOwnProperty.call(accents, name) && arg().length === 1)
-    return chip('char', tok.s, (arg() + accents[name]).normalize('NFC'));
+  const accentArg = tok.bareAccent || arg();
+  if (Object.prototype.hasOwnProperty.call(accents, name) && accentArg.length === 1)
+    return chip('char', tok.s, (accentArg + accents[name]).normalize('NFC'));
   // a macro of the document used in text: show it typeset when its body is
   // maths (\ensuremath{...}, \mathsf{...}, \mathcal...)
   const body = DOC.macros['\\' + name];
