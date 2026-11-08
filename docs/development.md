@@ -91,5 +91,5 @@ second `latexmk` on the same paper while the editor is running.
   column breaks stay valid. Its undo history is separate from the paper's.
 - `tests/convert_matrix.py` generates the venue variants used by the
   fixture-based conversion tests.
-- `docs/demos.md` is recorded by a script that drives headless Chrome over a
-  built copy of `tests/fixtures/ieee-conf`.
+- The README screenshots and editing GIF were recorded by driving headless
+  Chrome over a built copy of `tests/fixtures/ieee-conf`.

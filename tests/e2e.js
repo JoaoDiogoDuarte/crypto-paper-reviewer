@@ -122,7 +122,7 @@ function findChrome() {
 // One page of the editor, with helpers that act as a user would.
 class Page {
   constructor(cdp, sessionId) {
-    this.cdp = cdp; this.sid = sessionId; this.dialogs = []; this.dialogAnswer = true; this.errors = [];
+    this.cdp = cdp; this.sid = sessionId; this.dialogs = []; this.dialogAnswer = true; this.errors = []; this.consoleErrors = [];
     cdp.on((m) => {
       if (m.sessionId !== this.sid) return;
       if (m.method === 'Page.javascriptDialogOpening') {
@@ -138,6 +138,8 @@ class Page {
           this.send('Fetch.failRequest', { requestId: id, errorReason: 'ConnectionReset' }).catch(() => {});
         } else this.held.push(id);
       }
+      if (m.method === 'Runtime.consoleAPICalled' && m.params.type === 'error')
+        this.consoleErrors.push(m.params.args.map((a) => a.value !== undefined ? String(a.value) : (a.description || a.type)).join(' '));
       if (m.method === 'Runtime.exceptionThrown') this.errors.push(m.params.exceptionDetails.exception?.description || m.params.exceptionDetails.text);
     });
   }
@@ -2242,10 +2244,40 @@ async function tortureRun(env, page, seed, ops) {
     const fresh = await env.openPage(CHROME);
     eq(await fresh.eval(`ORDER.filter((s) => s.edit && segSource(s, []) !== s.src).length`), 0, `seed ${seed}: blocks that do not read back`);
     // the text of every block (not the figure images, which a newer tab may have)
-    const texts = `[...document.querySelectorAll('#doc [contenteditable], #doc textarea')].map((e) => (e.value !== undefined ? e.value : e.innerText).replace(/\\s+/g, ' ').trim()).join('\\n')`;
-    eq(await fresh.eval(texts), await page.eval(texts), `seed ${seed}: a fresh tab shows the same page`);
+    const texts = `[...document.querySelectorAll('#doc [contenteditable=true], #doc textarea')].map((e) => (e.value !== undefined ? e.value : e.innerText).replace(/\\s+/g, ' ').trim()).join('\\n')`;
+    eq(await fresh.eval(texts), await page.eval(texts), `seed ${seed}: a fresh tab shows the same page\n${files.map((n) => fs.existsSync(path.join(env.paper, n)) ? '--- ' + n + '\n' + env.read(n) : '').join('\n')}`);
   }
 }
+
+Object.assign(TESTS, {
+  async 'peek: hovering the change bar of an edited block shows the change, and Revert takes it back'(env, page) {
+    await page.select('brown'); await page.type('red'); await sleep(600);
+    const at = await page.eval(`(() => { const s = ORDER.find((x) => x.el && x.el.classList.contains('edited')); const b = s.el.getBoundingClientRect(); return { x: b.left - 7, y: b.top + 8 }; })()`);
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: at.x, y: at.y });
+    await sleep(300);
+    eq(await page.eval(`!!document.getElementById('peek') && !$('#peek').hidden`), false, 'not open after a short pass');
+    await page.waitFor(`document.getElementById('peek') && !$('#peek').hidden`, 3000, 'the peek after resting');
+    eq(await page.eval(`[...$('#peek').querySelectorAll('.d-del')].map((e) => e.textContent).join()`), 'brown', 'deleted word');
+    eq(await page.eval(`[...$('#peek').querySelectorAll('.d-ins')].map((e) => e.textContent).join()`), 'red', 'inserted word');
+    await page.click('js:$("#peek button")');
+    await sleep(200);
+    eq(await dirty(page), 0, 'nothing edited after revert');
+    await page.key('z', { ctrl: true }); await sleep(200);
+    eq(await dirty(page), 1, 'undo brings the edit back');
+  },
+  async 'find: replace one and replace all say what they did, and undo'(env, page) {
+    await page.key('h', { ctrl: true }); await sleep(150);
+    await page.type('paper');
+    await page.eval(`$('#find-r').focus()`); await page.type('essay');
+    await page.click('#find-one'); await sleep(200);
+    has(await page.eval(`[...document.querySelectorAll('.toast')].map((t) => t.textContent).join('|')`), 'Replaced 1', 'toast after one');
+    await page.click('#find-all'); await sleep(200);
+    has(await page.eval(`[...document.querySelectorAll('.toast')].map((t) => t.textContent).join('|')`), 'Replaced', 'toast after all');
+    await page.save();
+    hasNot(env.read('main.tex'), 'paper', 'every match replaced');
+    has(env.read('main.tex'), 'Final words of the essay.', 'replacement written');
+  },
+});
 
 const SEEDS = (process.env.E2E_SEEDS || '1,2,3,4').split(',').map(Number);
 for (const seed of SEEDS) {
@@ -2296,4 +2328,4 @@ async function main() {
 }
 
 if (require.main === module) main().catch((e) => { console.error(e); process.exit(2); });
-module.exports = { TESTS, main };
+module.exports = { TESTS, main, CDP, Page, Env, findChrome, freePort, waitHttp, sleep, eq, has };

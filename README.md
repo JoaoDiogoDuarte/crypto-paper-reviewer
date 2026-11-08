@@ -14,9 +14,6 @@ Type into the paper, make a phrase bold, save: the edit lands in
 
 ![Editing a sentence in place, then saving](docs/screenshots/editing.gif)
 
-**[More recordings](docs/demos.md)**: maths, citations, the game editor,
-tables, diff, history, venue conversion and more.
-
 <details><summary>Dark theme</summary>
 
 ![The same paper in the dark theme](docs/screenshots/editor-dark.png)
