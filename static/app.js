@@ -3390,9 +3390,37 @@ function renderGames(body) {
     if (g.title !== null) {
       const t = el('span'); t.contentEditable = 'true';
       renderTokens(L.tokenize(g.title), t, {});
-      t.addEventListener('input', () => { g.newTitle = ser(t); });
+      t.addEventListener('input', () => { gameCheckpoint(t); g.newTitle = ser(t); });
+      t.addEventListener('blur', () => { FV.lastEditor = null; });
       head.append(t);
     } else head.append(el('span', 'small', g.kind === 'proc' ? 'procedure' : g.env));
+    const actions = el('span', 'game-actions');
+    const handle = el('span', 'game-drag', 'Drag');
+    handle.title = 'Drag a game onto another panel to move it; unsafe LaTeX boundaries block moving';
+    handle.draggable = true;
+    handle.addEventListener('dragstart', (e) => {
+      FV.dragIndex = gi;
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', String(gi));
+    });
+    handle.addEventListener('dragend', () => { FV.dragIndex = -1; });
+    const action = (label, title, fn) => {
+      const b = el('button', '', label); b.type = 'button'; b.title = title;
+      b.onclick = fn; actions.append(b); return b;
+    };
+    action('Left', 'Move game to previous position if source is a safe sibling', () => gameMove(gi, gi - 1)).disabled = gi === 0;
+    action('Right', 'Move game to next position if source is a safe sibling', () => gameMove(gi, gi + 1)).disabled = gi === FV.games.length - 1;
+    action('Copy', 'Duplicate this game block', () => gameDuplicate(gi)).disabled = g.kind !== 'algo' || g.env !== 'gameenv';
+    action('Delete', 'Remove this game block', () => gameRemove(gi));
+    actions.append(handle);
+    head.append(actions);
+    box.addEventListener('dragover', (e) => { if (FV.dragIndex >= 0) e.preventDefault(); });
+    box.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const from = FV.dragIndex;
+      FV.dragIndex = -1;
+      if (from >= 0) gameMove(from, gi);
+    });
     box.append(head);
     let depth = 0;
     g.lines.forEach((l, li) => {
@@ -3404,8 +3432,9 @@ function renderGames(body) {
     grid.append(box);
   });
   body.append(grid);
-  body.append(el('p', 'small', 'Edit a line in place; ＋ adds a statement below, ⊕ an if-block, ✕ deletes. ' +
-    'Lines you do not touch are kept exactly. Apply, then save, to write the file; the image updates after the build.'));
+  body.append(el('p', 'small', 'Edit a line in place. Use Add to insert statements, conditions and loops; Up/Down to move lines; Mark to highlight changes. ' +
+    'Undo/Redo affect only this viewer. Drag game headers to reorder compatible sibling gameenv blocks; unsafe layout boundaries are protected. ' +
+    'Apply, then Save, to write LaTeX and rebuild its image.'));
 }
 
 function algoLine(g, l, li, depth) {
