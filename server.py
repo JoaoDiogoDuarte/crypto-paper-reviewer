@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A local reading editor for a LaTeX paper.
 
-    paper-editor path/to/main.tex [--port 8765] [--browser chrome-app] [--no-open]
+    ./run path/to/main.tex [--port 8765] [--browser chrome-app] [--no-open]
 
 Serves the editor on http://127.0.0.1:8765 only.  It reads the main file and
 everything it \\inputs, writes a file back when you save in the editor, then
@@ -1314,6 +1314,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
             return None
 
+    def do_HEAD(self):
+        if urllib.parse.urlparse(self.path).path == '/pdf':
+            ok = os.path.isfile(os.path.join(PAPER, stem() + '.pdf'))
+            self.send_response(200 if ok else 404)
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
+        self.send_response(405)
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+
     def do_GET(self):
         url = urllib.parse.urlparse(self.path)
         p = url.path
@@ -1329,6 +1340,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if os.path.exists(f):
                 return self.send(200, open(f, 'rb').read(), 'image/png')
             return self.send(404, {'error': 'no figure'})
+        if p == '/pdf':
+            pdf = os.path.join(PAPER, stem() + '.pdf')
+            if os.path.isfile(pdf):
+                return self.send(200, open(pdf, 'rb').read(), 'application/pdf')
+            return self.send(404, {'error': 'no PDF yet: save to build it'})
         if p == '/api/tts':
             return self.tts(urllib.parse.parse_qs(url.query))
         if p == '/api/bib':
@@ -1822,7 +1838,7 @@ def main():
     threading.Thread(target=bib_entries, daemon=True).start()
     srv = http.server.ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
     url = f'http://127.0.0.1:{args.port}/'
-    print(f'Paper editor for {os.path.join(PAPER, MAIN)} on {url}  (Ctrl+C to stop)', flush=True)
+    print(f'Crypto Paper Reviewer for {os.path.join(PAPER, MAIN)} on {url}  (Ctrl+C to stop)', flush=True)
     if not args.no_open:
         threading.Timer(0.5, lambda: open_browser(url, args.browser)).start()
     try:

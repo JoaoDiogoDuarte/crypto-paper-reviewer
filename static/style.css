@@ -343,7 +343,7 @@ pre.hist-diff .skip { color: var(--muted); }
 :root {
   --bg: #e4e4e8;
   --fg: #1c1c1e;
-  --muted: #66666b;
+  --muted: #545459;
   --line: #c0c0c6;
   --chip: #d3d3d8;
   --accent: #007aff;
@@ -685,6 +685,102 @@ body.diffing #diffbtn {
   button, select { transition: none; }
 }
 
+/* ------------------------------------------------------------------ chrome
+   One sticky block (#chrome) holds the title bar, the edit toolbar, the find
+   bar and the banner.  The bars inside it are plain blocks: no second sticky
+   offset to compute, so no gap where the paper could show between them. */
+:root { --sel-bg: #0b5fcc; --sel-fg: #ffffff; }
+html { scroll-padding-top: calc(var(--chrome-height, 90px) + 8px); scrollbar-gutter: stable; }
+html.modal-open, html.modal-open body { overflow: hidden; }
+#chrome {
+  position: sticky; top: 0; z-index: 30; isolation: isolate;
+  background: var(--mac-chrome);
+  border-bottom: 1px solid var(--line);
+  font: 12px/1.3 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, 'DejaVu Sans', 'Noto Sans Symbols 2', sans-serif;
+}
+#chrome > #bar, #chrome > #toolbar, #chrome > #findbar {
+  position: static; top: auto; z-index: auto; box-shadow: none;
+  backdrop-filter: none; -webkit-backdrop-filter: none;
+  background: transparent; max-width: 100%;
+}
+#chrome > #bar { padding: .25em .6em; gap: .25em .45em; font-size: 12px; border-bottom: 1px solid var(--line); }
+#chrome > #toolbar { padding: .12em .6em; gap: .1em; font-size: 12px; border-bottom: 0; }
+#chrome > #findbar { padding: .2em .6em; border-top: 1px solid var(--line); border-bottom: 0; background: var(--mac-control); }
+#chrome > #banner { margin: 0; border-top: 1px solid var(--line); border-bottom: 0; padding: .3em .8em; color: var(--fg); }
+#chrome button, #chrome select { font-size: 12px; line-height: 1.3; }
+#chrome button > i:not(.em), #figview button > i { font-style: normal; }
+#title-wrap { display: flex; flex-direction: column; min-width: 0; flex: 1 1 14em; margin-right: auto; }
+#title { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: 0; }
+#where { font: 10.5px/1.2 ui-monospace, "DejaVu Sans Mono", monospace; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left; }
+/* groups wrap inside themselves: never wider than the window */
+#bar .group { flex-wrap: wrap; min-width: 0; max-width: 100%; }
+#bar .group button, #bar .group select { padding: .1em .42em; }
+#voice { max-width: 15em; min-width: 6em; text-overflow: ellipsis; }
+#rate { width: 4.2em; }
+#bar #tts-state { min-width: 0; padding: 0 .3em; }
+#build { max-width: 22em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 11.5px; }
+#toolbar button { padding: .12em .42em; min-width: 1.9em; }
+#toolbar .sep { height: 1.1em; margin: 0 .2em; }
+#findbar input[type=text], #findbar input:not([type]) { width: 14em; max-width: 34vw; }
+@media (max-width: 900px) { #findbar .small { display: none; } #build { max-width: 12em; } }
+
+/* Selected and pressed states read at a glance: filled, white text (WCAG AA). */
+#chrome button[aria-pressed="true"], body.two #cols, body.diffing #diffbtn,
+.fv-tabs button.on, #figview .fv-tabs button.on {
+  background: var(--sel-bg); color: var(--sel-fg);
+  border-color: var(--sel-bg); box-shadow: none;
+}
+#chrome button[aria-pressed="true"]:hover:not(:disabled), body.two #cols:hover, body.diffing #diffbtn:hover,
+.fv-tabs button.on:hover:not(:disabled) { background: color-mix(in srgb, var(--sel-bg) 85%, #000); color: var(--sel-fg); }
+button:disabled { opacity: .5; }
+
+/* A press always shows, even when its effect is elsewhere on the page. */
+@keyframes press-flash { from { box-shadow: 0 0 0 2px var(--accent); } to { box-shadow: 0 0 0 2px transparent; } }
+button.flash { animation: press-flash .45s ease-out; }
+
+/* Short confirmations, bottom right, above everything but menus. */
+#toasts { position: fixed; z-index: 60; right: 14px; bottom: 14px; display: flex; flex-direction: column;
+  align-items: flex-end; gap: 6px; pointer-events: none; max-width: min(28em, 90vw); }
+.toast { pointer-events: auto; padding: .45em .8em; border-radius: 8px; background: var(--mac-raised); color: var(--fg);
+  border: 1px solid var(--mac-control-border); box-shadow: 0 6px 20px var(--mac-shadow);
+  font: 12.5px/1.35 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  transition: opacity .35s ease, transform .35s ease; }
+.toast.ok { border-color: color-mix(in srgb, #30d158 55%, var(--mac-control-border)); }
+.toast.error { border-color: #ff453a; }
+.toast.gone { opacity: 0; transform: translateY(6px); }
+@media (prefers-reduced-motion: reduce) { button.flash { animation: none; outline: 2px solid var(--accent); } .toast { transition: none; } }
+
+/* Windows are opaque: the paper never shows through their bars. */
+#figview, #paperbox, #historybox, #keysbox, #helpbox, #openbox, #external, #palette {
+  background: var(--mac-chrome); backdrop-filter: none; -webkit-backdrop-filter: none;
+}
+#diffmap { top: calc(var(--chrome-height, 90px) + 10px); }
+/* The page boxes reach into the margin for the block tools: never a reason
+   to scroll the window sideways. */
+body { overflow-x: clip; }
+
+/* Game lines never move under the mouse: a line's tools float above its
+   right end, for the line being edited, instead of opening a row in flow. */
+.gline { position: relative; }
+.gline .gtools { display: none; position: absolute; right: 0; bottom: 100%; z-index: 4; flex: none;
+  padding: .2em .3em; border: 1px solid var(--mac-control-border); border-radius: 8px;
+  background: var(--mac-raised); box-shadow: 0 4px 14px var(--mac-shadow); }
+.gline:hover .gtools { display: none; }
+.gline:focus-within .gtools, .gline .gtools:hover { display: flex; }
+/* the formula editor also serves the figure window: above it */
+#drawer { z-index: 48; }
+.chip.src.textmacro { font: inherit; color: inherit; background: none; padding: 0; }
+#chrome button > i:not(.em) { opacity: .85; margin-right: .1em; }
+/* the help can be longer than the window: it scrolls inside */
+#helpbox { max-height: calc(100vh - 6em); overflow: auto; }
+/* one column: the block tools are on the left only, so the page box reaches
+   left, not past the right edge of a narrow window */
+body:not(.two) .page { margin-right: -1.2em; padding-right: 1.2em; }
+/* toasts never take a click meant for what is under them */
+.toast { pointer-events: none; }
+@media (max-width: 1300px) { #findbar .small { display: none; } }
+
 /* Lists. A nested list that closes right before the next \item would break
    the line twice (blank line): the \item starts its own line. The source
    newline after a list end would otherwise show as a space at the start of
@@ -695,3 +791,81 @@ body.diffing #diffbtn {
 /* The paragraph being edited: no tinted slab over the whole LaTeX paragraph
    (lists and run-on text included); the caret shows where you are. */
 .para:focus { background: transparent; }
+/* at fractional zoom the bars' last device pixel is shared with the page:
+   a solid band below them keeps the text from showing in it */
+#chrome::after { content: ''; position: absolute; left: 0; right: 0; top: 100%; height: 2px; background: var(--mac-chrome); pointer-events: none; }
+/* A figure changed in the viewer but not yet rebuilt: its picture is old. */
+.seg img.stale { opacity: .45; }
+.stale-note { color: var(--muted); font-style: italic; margin-top: .3em; }
+/* Change bars (edited, diff) stand a little away from the text: a strip of
+   page colour, then the bar. */
+.edited { box-shadow: -8px 0 0 var(--bg), -11px 0 0 var(--dirty); }
+.diff-changed { box-shadow: -8px 0 0 var(--bg), -12px 0 0 #e0a030; }
+.diff-new { box-shadow: -8px 0 0 var(--bg), -12px 0 0 #2a3; }
+.diff-gone { box-shadow: -8px 0 0 var(--bg), -12px 0 0 #c33; }
+/* status lives in the title's second line: it shrinks, never re-wraps the bar */
+#sub { display: flex; gap: .7em; min-width: 0; white-space: nowrap; font-size: 11px; line-height: 1.25; }
+#sub > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+#sub #where { flex: 0 1 auto; }
+#sub #dirty { flex: none; font-size: 11px; padding: 0; }
+#sub #build { flex: 0 1 auto; max-width: none; font-size: 11px; }
+#title-wrap { flex: 1 1 10em; }
+#sub #dirty { color: color-mix(in srgb, var(--dirty) 45%, var(--fg)); font-weight: 600; }
+#sub { height: 14px; line-height: 14px; } #sub > * { line-height: 14px; }
+/* change peek (hover an edited block's bar) */
+#peek { position: fixed; z-index: 44; max-height: 50vh; overflow: auto; background: var(--mac-raised); color: var(--fg);
+  border: 1px solid var(--mac-control-border); border-left: 3px solid var(--dirty); border-radius: 8px;
+  box-shadow: 0 10px 30px var(--mac-shadow); font: 15px/1.5 "Latin Modern Roman", "CMU Serif", Georgia, serif; }
+#peek .peek-head { display: flex; justify-content: space-between; align-items: center; gap: .6em; padding: .3em .6em;
+  border-bottom: 1px solid var(--line); color: var(--muted);
+  font: 11.5px/1.3 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; position: sticky; top: 0; background: var(--mac-raised); }
+#peek .peek-head button { font-size: 11.5px; padding: .1em .45em; }
+#peek .peek-body { padding: .4em .7em .6em; white-space: pre-wrap; }
+.seg.edited::before { content: ''; position: absolute; left: -14px; top: 0; bottom: 0; width: 14px; cursor: help; }
+/* Word-level diff: stronger tints, readable on the grey light page. */
+.d-del { background: color-mix(in srgb, #d33 32%, transparent); text-decoration-thickness: 1.5px; }
+.d-ins { background: color-mix(in srgb, #2a3 32%, transparent); text-decoration-thickness: 1.5px; }
+/* A figure spanning both columns keeps the scale it has in one column
+   (about the single-column text width), not 1.7x larger text. */
+body.two .seg.wide img { max-width: min(100%, 42em); }
+/* Cite palette: optional note for \cite[...]{...}; picked keys can be removed */
+#pal-foot .pal-note { margin-right: .8em; }
+#pal-note { width: 13em; font: 12px ui-monospace, monospace; padding: .15em .35em; }
+#pal-tray .key .unpick { border: 0; background: none; padding: 0 0 0 .25em; cursor: pointer; color: var(--muted); font-size: 1em; line-height: 1; }
+#pal-tray .key .unpick:hover { color: var(--fg); }
+/* Dark theme, a little lighter than near-black. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #151517; --line: #2c2c30; --chip: #1e1e21; --math: #1a1a1d;
+    --mac-chrome: #1a1a1d; --mac-raised: #232327; --mac-control: #232327; --mac-control-border: #35353a;
+    --mac-hover: #2e2e33; --mac-window: rgba(26, 26, 29, .96);
+  }
+  :root:not([data-theme="light"]) .seg.figure img,
+  :root:not([data-theme="light"]) .seg.table img { filter: invert(.92) hue-rotate(180deg); }
+}
+:root[data-theme="dark"] {
+  --bg: #151517; --line: #2c2c30; --chip: #1e1e21; --math: #1a1a1d;
+  --mac-chrome: #1a1a1d; --mac-raised: #232327; --mac-control: #232327; --mac-control-border: #35353a;
+  --mac-hover: #2e2e33; --mac-window: rgba(26, 26, 29, .96);
+}
+:root[data-theme="dark"] .seg.figure img,
+:root[data-theme="dark"] .seg.table img { filter: invert(.92) hue-rotate(180deg); }
+
+/* Colour-blind palette (Okabe-Ito): blue for added, vermillion for removed,
+   orange for edited; changes also differ by line style, not colour alone. */
+:root[data-cb] { --dirty: #e69f00; --cb-add: #0072b2; --cb-del: #d55e00; --cb-chg: #e69f00; }
+:root[data-cb] .d-ins { background: color-mix(in srgb, var(--cb-add) 28%, transparent);
+  text-decoration: underline dashed; text-decoration-color: var(--cb-add); text-decoration-thickness: 2px; }
+:root[data-cb] .d-del { background: color-mix(in srgb, var(--cb-del) 26%, transparent);
+  text-decoration: line-through; text-decoration-color: var(--cb-del); text-decoration-thickness: 2px; }
+:root[data-cb] .diff-new { box-shadow: -8px 0 0 var(--bg), -12px 0 0 var(--cb-add); background: color-mix(in srgb, var(--cb-add) 8%, transparent); }
+:root[data-cb] .diff-gone { box-shadow: -8px 0 0 var(--bg), -12px 0 0 var(--cb-del); background: color-mix(in srgb, var(--cb-del) 8%, transparent); }
+:root[data-cb] .diff-changed { box-shadow: -8px 0 0 var(--bg), -12px 0 0 var(--cb-chg); }
+:root[data-cb] pre.hist-diff .ins { background: color-mix(in srgb, var(--cb-add) 24%, transparent); text-decoration: underline dashed var(--cb-add); }
+:root[data-cb] pre.hist-diff .del { background: color-mix(in srgb, var(--cb-del) 22%, transparent); }
+:root[data-cb] .diffmap-mark.added { background: var(--cb-add); }
+:root[data-cb] .diffmap-mark.removed { background: var(--cb-del); }
+:root[data-cb] .diff-gone :is(.para, h2, h3) { text-decoration-color: var(--cb-del); }
+:root[data-cb] #md-body .ok { color: var(--cb-add); }
+:root[data-cb] #md-body .missing, :root[data-cb] .keyrow.conflict kbd { color: var(--cb-del); border-color: var(--cb-del); }
+:root[data-cb] #md-body input.need { border-color: var(--cb-del); box-shadow: 0 0 0 1px var(--cb-del); }

@@ -4,29 +4,30 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="token" content="__TOKEN__">
-<title>Paper editor</title>
+<title>Crypto Paper Reviewer</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Crect width=%2716%27 height=%2716%27 rx=%273%27 fill=%27%230b5fcc%27/%3E%3Ctext x=%278%27 y=%2712%27 font-size=%2711%27 text-anchor=%27middle%27 fill=%27white%27 font-family=%27serif%27%3E%C2%A7%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+<!-- One sticky block holds every bar: nothing can scroll between them. -->
+<div id="chrome">
 <header id="bar">
-  <span id="title">Paper editor</span>
+  <span id="title-wrap"><span id="title">Crypto Paper Reviewer</span><span id="sub"><span id="where" title="The main file being edited"></span><span id="dirty"></span><span id="build" aria-live="polite"></span></span></span>
   <span class="group">
-    <button id="openbtn" title="Open a paper directory">Open…</button>
-    <button id="save" title="Save edited files (Ctrl+S)">Save</button>
-    <button id="historybtn" title="Earlier versions: every save keeps the text it replaced">History…</button>
-    <span id="dirty"></span>
-  </span>
-  <span class="group">
-    <button id="cols" title="Switch between one and two columns">Two columns</button>
+    <button id="openbtn" title="Open a paper directory" aria-label="Open a paper"><i>⌂</i> Open</button>
+    <button id="save" title="Save edited files (Ctrl+S)" aria-label="Save"><i>⤓</i> Save</button>
+    <button id="historybtn" title="Earlier versions: every save keeps the text it replaced" aria-label="History"><i>⟲</i> History</button>
+    <button id="reloadbtn" title="Reload the document from disk (unsaved edits are kept unless you confirm)" aria-label="Reload from disk"><i>↻</i> Reload</button>
+    <button id="pdfbtn" title="Open the rendered PDF" aria-label="Open the PDF"><i>⎙</i> PDF</button>
   </span>
   <span class="group" id="ttsbar">
-    <button id="play" aria-label="Play or resume reading" title="Read aloud from the sentence at the cursor (Alt+R)">Read</button>
-    <button id="tts-prev" aria-label="Previous sentence" title="Previous sentence">Prev</button>
-    <button id="tts-next" aria-label="Next sentence" title="Next sentence">Next</button>
-    <button id="pause" aria-label="Pause or resume reading" title="Pause or resume">Pause</button>
-    <button id="stop" aria-label="Stop reading" title="Stop">Stop</button>
+    <button id="play" aria-label="Play or resume reading" title="Read aloud from the sentence at the cursor (Alt+R)"><i>▶</i> Read</button>
+    <button id="tts-prev" aria-label="Previous sentence" title="Previous sentence (Ctrl+Alt+Left)"><i>«</i> Prev</button>
+    <button id="tts-next" aria-label="Next sentence" title="Next sentence (Ctrl+Alt+Right)"><i>»</i> Next</button>
+    <button id="pause" aria-label="Pause or resume reading" title="Pause or resume (Alt+P)"><i>❚❚</i> Pause</button>
+    <button id="stop" aria-label="Stop reading" title="Stop (Alt+S)"><i>■</i> Stop</button>
     <select id="rate" aria-label="Reading speed" title="Speed">
       <option value="0.8">0.8×</option><option value="1" selected>1×</option>
       <option value="1.2">1.2×</option><option value="1.4">1.4×</option><option value="1.7">1.7×</option>
@@ -36,56 +37,59 @@
   </span>
   <span class="group">
     <select id="mainsel" title="Document of this project" hidden></select>
-    <button id="paperbtn" title="Metadata and conversion (source fields are detected automatically)">Paper…</button>
-    <button id="keysbtn" title="Keyboard shortcuts: see and change them">Keys</button>
-    <button id="theme" title="Colour scheme: follow the system, light or dark">Auto</button>
-    <button id="help" title="Keyboard shortcuts">?</button>
+    <button id="cols" title="Switch between one and two columns" aria-label="Two columns" aria-pressed="false"><i>◫</i> 2 columns</button>
+    <button id="paperbtn" title="Metadata and conversion (source fields are detected automatically)" aria-label="Paper metadata and conversion"><i>✎</i> Paper</button>
+    <button id="keysbtn" title="Keyboard shortcuts: see and change them" aria-label="Keys"><i>⌨</i> Keys</button>
+    <button id="theme" title="Colour scheme: follow the system, light or dark" aria-label="Colour scheme">Auto</button>
+    <button id="cbmode" title="Colour-blind friendly colours for changes and marks" aria-label="Colour-blind mode" aria-pressed="false"><i>◑</i> CB</button>
+    <button id="help" title="Help" aria-label="Help"><i>?</i> Help</button>
   </span>
-  <span id="build"></span>
 </header>
 <nav id="toolbar" aria-label="Editing">
-  <button data-act="bold" title="Bold \textbf (Ctrl+B)"><b>B</b></button>
-  <button data-act="emph" title="Emphasis \emph (Ctrl+I)"><i>I</i></button>
+  <button data-act="bold" title="Bold \textbf (Ctrl+B)" aria-label="Bold"><b>B</b></button>
+  <button data-act="emph" title="Emphasis \emph (Ctrl+I)" aria-label="Emphasis"><i class="em">I</i></button>
   <span class="sep"></span>
-  <button data-act="math" title="Inline maths (Ctrl+M or $)">$x$</button>
-  <button data-act="display" title="Displayed equation (Ctrl+Shift+M)">Equation</button>
+  <button data-act="math" title="Inline maths (Ctrl+M or $)" aria-label="Inline maths"><i>$x$</i> Math</button>
+  <button data-act="display" title="Displayed equation (Ctrl+Shift+M)" aria-label="Displayed equation"><i>$$</i> Equation</button>
   <span class="sep"></span>
-  <button data-act="cite" title="Cite: search references.bib and cryptobib (Ctrl+Alt+C)">Cite…</button>
-  <button data-act="ref" title="Reference a section, theorem, figure, table or equation (Ctrl+Alt+R)">Ref…</button>
-  <button data-act="latex" title="Insert any LaTeX (Ctrl+\)">LaTeX</button>
+  <button data-act="cite" title="Cite: search references.bib and cryptobib (Ctrl+Alt+C)" aria-label="Cite"><i>[1]</i> Cite</button>
+  <button data-act="ref" title="Reference a section, theorem, figure, table or equation (Ctrl+Alt+R)" aria-label="Reference"><i>→#</i> Ref</button>
+  <button data-act="latex" title="Insert any LaTeX (Ctrl+\)" aria-label="LaTeX"><i>\{}</i> LaTeX</button>
   <span class="sep"></span>
-  <button data-act="section" title="Section heading at the cursor (Ctrl+Alt+1)">Section</button>
-  <button data-act="subsection" title="Subsection heading at the cursor (Ctrl+Alt+2)">Subsection</button>
-  <button data-act="paragraph" title="\paragraph heading at the cursor (Ctrl+Alt+3)">Para heading</button>
-  <button data-act="splitsection" title="Split the current section at the cursor">Split section</button>
-  <button data-act="newpara" title="New paragraph at the cursor (Enter)">New para</button>
+  <button data-act="section" title="Section heading at the cursor (Ctrl+Alt+1)" aria-label="Section"><i>§</i> Section</button>
+  <button data-act="subsection" title="Subsection heading at the cursor (Ctrl+Alt+2)" aria-label="Subsection"><i>§§</i> Subsection</button>
+  <button data-act="paragraph" title="\paragraph heading at the cursor (Ctrl+Alt+3)" aria-label="Paragraph heading"><i>§§§</i> Para heading</button>
+  <button data-act="splitsection" title="Split the current section at the cursor" aria-label="Split section"><i>✂</i> Split section</button>
+  <button data-act="newpara" title="New paragraph at the cursor (Enter)" aria-label="New paragraph"><i>¶</i> New para</button>
   <span class="sep"></span>
-  <button data-act="find" title="Find (Ctrl+F), find and replace (Ctrl+H)">Find/Replace</button>
+  <button data-act="find" title="Find (Ctrl+F), find and replace (Ctrl+H)" aria-label="Find and replace"><i>⌕</i> Find</button>
   <span class="sep"></span>
-  <button data-act="diff" id="diffbtn" title="Show what changed (read-only while on)">Diff</button>
+  <button data-act="diff" id="diffbtn" title="Show what changed (read-only while on)" aria-label="Diff" aria-pressed="false"><i>±</i> Diff</button>
   <select id="diffbase" title="Compare with" hidden>
     <option value="save">since the last save</option>
     <option value="head">since the last commit</option>
   </select>
-  <span id="diffnav" hidden><button id="diffprev" title="Previous change">Prev</button><span id="diffcount"></span><button id="diffnext" title="Next change">Next</button></span>
-  <button data-act="undo" title="Undo (Ctrl+Z)">Undo</button>
-  <button data-act="redo" title="Redo (Ctrl+Shift+Z)">Redo</button>
+  <span id="diffnav" hidden><button id="diffprev" title="Previous change" aria-label="Previous change"><i>‹</i> Prev</button><span id="diffcount"></span><button id="diffnext" title="Next change" aria-label="Next change"><i>›</i> Next</button></span>
+  <button data-act="undo" title="Undo (Ctrl+Z)" aria-label="Undo"><i>↶</i> Undo</button>
+  <button data-act="redo" title="Redo (Ctrl+Shift+Z)" aria-label="Redo"><i>↷</i> Redo</button>
 </nav>
 <div id="findbar" hidden>
-  <input id="find-q" placeholder="Find" spellcheck="false">
+  <input id="find-q" placeholder="Find" spellcheck="false" title="Text only: maths and LaTeX chips are not searched">
   <input id="find-r" placeholder="Replace with" spellcheck="false">
   <label title="Regular expression"><input type="checkbox" id="find-re"> .*</label>
   <label title="Match case"><input type="checkbox" id="find-case"> Aa</label>
   <label title="Whole words"><input type="checkbox" id="find-word"> W</label>
   <span id="find-count"></span>
-  <button id="find-prev" title="Previous (Shift+Enter)">Prev</button>
-  <button id="find-next" title="Next (Enter)">Next</button>
-  <button id="find-one" title="Replace this match">Replace</button>
-  <button id="find-all" title="Replace every match">All</button>
-  <button id="find-close" title="Close (Esc)">Close</button>
+  <button id="find-prev" title="Previous (Shift+Enter)" aria-label="Previous match"><i>‹</i> Prev</button>
+  <button id="find-next" title="Next (Enter)" aria-label="Next match"><i>›</i> Next</button>
+  <button id="find-one" title="Replace this match"><i>⇄</i> Replace</button>
+  <button id="find-all" title="Replace every match"><i>⇉</i> All</button>
+  <button id="find-close" title="Close (Esc)" aria-label="Close find"><i>✕</i> Close</button>
   <span class="small">text only: maths and LaTeX chips are not searched</span>
 </div>
 <div id="banner" hidden></div>
+</div>
+<div id="toasts" aria-live="polite"></div>
 <div id="external" hidden role="dialog" aria-labelledby="external-title">
   <b id="external-title">Files changed outside the editor</b>
   <div id="external-files"></div>
@@ -149,7 +153,7 @@
     <span id="fv-title">Figure</span>
     <span class="fv-tabs">
       <button data-tab="image">Image</button><button data-tab="text">Text</button>
-      <button data-tab="games" id="fv-games-tab">Games</button><button data-tab="cells" id="fv-cells-tab">Cells</button><button data-tab="latex">LaTeX</button>
+      <button data-tab="games" id="fv-games-tab">Games</button><button data-tab="cells" id="fv-cells-tab">Cells</button><button data-tab="latex">LaTeX</button><button data-tab="changes" id="fv-changes-tab" title="What changed in this figure: since the last save, or the last commit while the diff view compares with it">Changes</button>
     </span>
     <span class="spacer"></span>
     <span id="fv-status" class="small" role="status" aria-live="polite"></span>
@@ -186,7 +190,7 @@
     <li><kbd>Ctrl</kbd>+<kbd>S</kbd> saves. Saving writes only the files you changed, applies the house rules, and rebuilds the PDF.</li>
   </ul>
   <h3>Reading aloud</h3>
-  <ul><li>Click in a sentence and press ▶ (or <kbd>Alt</kbd>+<kbd>R</kbd>); use ‹ and › to move between sentences. Maths is read as words.</li></ul>
+  <ul><li>Click in a sentence and press ▶ (or <kbd>Alt</kbd>+<kbd>R</kbd>); use « and » to move between sentences. Maths is read as words.</li></ul>
   <button id="helpclose">Close</button>
 </div>
 <script src="/static/latex.js"></script>

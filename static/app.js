@@ -20,15 +20,50 @@ window.addEventListener('unhandledrejection', (e) => {
 const L = window.LatexDoc;
 const TOKEN = document.querySelector('meta[name=token]').content;
 const $ = (s) => document.querySelector(s);
-// The header wraps on narrow screens.  Never hard-code its sticky height.
-const barObserver = new ResizeObserver(() => {
-  document.documentElement.style.setProperty('--bar-height',
-    Math.ceil($('#bar').getBoundingClientRect().height) + 'px');
-  document.documentElement.style.setProperty('--toolbar-height',
-    Math.ceil($('#toolbar').getBoundingClientRect().height) + 'px');
-});
-barObserver.observe($('#bar'));
-barObserver.observe($('#toolbar'));
+// Every bar lives in one sticky block (#chrome), so nothing can show between
+// them.  Its height, which wraps on narrow screens, is what scrolling must
+// keep text clear of (--chrome-height: scroll-padding, the diff map).
+function chromeBottom() { return Math.max(0, $('#chrome').getBoundingClientRect().bottom); }
+new ResizeObserver(() => {
+  document.documentElement.style.setProperty('--chrome-height', Math.ceil($('#chrome').getBoundingClientRect().height) + 'px');
+}).observe($('#chrome'));
+
+// Something happened: say so briefly, out of the way (bottom right).
+function toast(msg, kind = '') {
+  const box = $('#toasts');
+  if (!box || !msg) return;
+  const t = document.createElement('div');
+  t.className = 'toast' + (kind ? ' ' + kind : '');
+  t.textContent = msg;
+  box.append(t);
+  while (box.children.length > 4) box.firstChild.remove();
+  setTimeout(() => { t.classList.add('gone'); setTimeout(() => t.remove(), 400); }, kind === 'error' ? 6000 : 2600);
+  toast.last = Date.now();
+}
+// Every button answers a press visibly, even when what it does is elsewhere.
+document.addEventListener('click', (e) => {
+  const b = e.target.closest && e.target.closest('button');
+  if (!b || b.disabled) return;
+  b.classList.remove('flash'); void b.offsetWidth; b.classList.add('flash');
+  setTimeout(() => b.classList.remove('flash'), 450);
+}, true);
+// While a window (paper, history, keys, figure, help, open) is up, the paper
+// behind it does not scroll; closing one says so unless it said more itself.
+const MODALS = { paperbox: 'Paper', historybox: 'History', keysbox: 'Keys', figview: 'Figure', helpbox: 'Help', openbox: 'Open' };
+function syncModal() {
+  const open = Object.keys(MODALS).some((id) => { const e = document.getElementById(id); return e && !e.hidden; });
+  document.documentElement.classList.toggle('modal-open', open);
+}
+for (const id of Object.keys(MODALS)) {
+  const e = document.getElementById(id);
+  if (!e) continue;
+  let was = e.hidden;
+  new MutationObserver(() => {
+    syncModal();
+    if (e.hidden && !was) { const at = Date.now(); setTimeout(() => { if (!(toast.last >= at)) toast(MODALS[id] + ' closed'); }, 60); }
+    was = e.hidden;
+  }).observe(e, { attributes: true, attributeFilter: ['hidden'] });
+}
 
 let DOC = null;          // payload of /api/doc: files, aux, macros, bib, figs
 const FILES = {};        // name -> { text, base (hash on disk), disk (text on disk), segs }
@@ -61,6 +96,7 @@ async function load(keepScroll, discard = []) {
   restoreEditorState(caret);
   if (keepScroll) window.scrollTo(0, y);
   setBuild(DOC.build);
+  showWhere();
   if (new URLSearchParams(location.search).has('selftest')) selfTest();
 }
 
@@ -180,7 +216,7 @@ function render() {
     renderMathless(title.replace(/\\\\(\[[^\]]*\])?/g, ' '), h);
     doc.append(h);
     $('#title').textContent = h.textContent;
-    document.title = h.textContent + ' — editor';
+    showWhere();
   }
   const walk = (name) => {
     for (const seg of FILES[name].segs) {
@@ -1151,7 +1187,9 @@ $('#cols').onclick = () => {
   const caret = DOC ? captureEditorState() : null;
   const y = window.scrollY;
   const two = document.body.classList.toggle('two');
-  $('#cols').textContent = two ? 'One column' : 'Two columns';
+  $('#cols').setAttribute('aria-pressed', String(two));
+  $('#cols').title = two ? 'Two columns: on (click for one column)' : 'One column (click for two columns)';
+  if (DOC) toast(two ? 'Two columns' : 'One column');
   if (DOC) {
     render();
     restoreEditorState(caret);
@@ -1162,6 +1200,19 @@ $('#cols').onclick = () => {
 try { if (localStorage.getItem('cols') === '2') $('#cols').click(); } catch (e) { /* storage unavailable */ }
 $('#help').onclick = () => { $('#helpbox').hidden = false; };
 $('#save').onclick = () => save();
+$('#pdfbtn').onclick = async () => {
+  const r = await fetch('/pdf', { method: 'HEAD' }).catch(() => null);
+  if (r && r.status === 404) { toast('No PDF yet: save to build it', 'error'); return; }
+  window.open('/pdf?' + Date.now(), '_blank');
+  toast('Opened the PDF');
+};
+$('#reloadbtn').onclick = async () => {
+  const edited = editedFiles();
+  const discard = edited.length && confirm(`Reload from disk and drop your unsaved edits in ${edited.join(', ')}?\n(Cancel reloads the other files and keeps your edits.)`) ? edited : [];
+  toast('Reloading…');
+  await load(true, discard);
+  toast(discard.length || !edited.length ? 'Reloaded from disk' : 'Reloaded; your unsaved edits were kept', 'ok');
+};
 $('#helpclose').onclick = () => { $('#helpbox').hidden = true; };
 
 // ----------------------------------------------------------------- save
@@ -1198,7 +1249,7 @@ async function saveOnce() {
     }
   }
   const files = Object.keys(FILES).filter((n) => FILES[n].text !== FILES[n].disk);
-  if (!files.length) { setBuild({ state: 'idle', message: 'nothing to save' }); return; }
+  if (!files.length) { setBuild({ state: 'idle', message: 'nothing to save' }); toast('Nothing to save'); return; }
   const conflicts = [];
   let saved = 0;
   const batch = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);   // one entry of the history
@@ -1232,7 +1283,8 @@ async function saveOnce() {
     for (const seg of ORDER) if (seg.touched) { seg.src = segSource(seg, [], null, apply); seg.touched = false; }
     markEdited();
   }
-  if (saved) setBuild({ state: 'running', message: 'saved; rebuilding PDF' });
+  if (saved) { setBuild({ state: 'running', message: 'saved; rebuilding PDF' }); toast(`Saved ${saved} file${saved > 1 ? 's' : ''}; rebuilding the PDF`, 'ok'); }
+  if (conflicts.length) toast(`${conflicts.length} file${conflicts.length > 1 ? 's' : ''} not saved: changed on disk`, 'error');
   if (warnings.length && saved) banner('Saved. House rules: ' + [...new Set(warnings)].join('; '));
   if (conflicts.length) showExternal(conflicts, true);
   // a new \input names a file the page has not read yet
@@ -1248,6 +1300,18 @@ window.addEventListener('beforeunload', (e) => {
   try { edited = editedFiles().length > 0; } catch (err) { edited = false; }
   if (edited || SAVING) { e.preventDefault(); e.returnValue = ''; }
 });
+
+// Which file is open: the version (converted/llncs/...) and the folder.
+function showWhere() {
+  const w = $('#where');
+  if (!w || !DOC) return;
+  const root = (DOC.root || '').replace(/\/+$/, '');
+  const path = DOC.path || DOC.main;
+  const rel = root && path.startsWith(root + '/') ? path.slice(root.length + 1) : DOC.main;
+  w.textContent = (root ? root.split('/').pop() + '/' : '') + rel;
+  w.title = path;
+  document.title = ($('#title').textContent || 'Crypto Paper Reviewer') + ' — ' + rel;
+}
 
 function banner(msg) {
   const b = $('#banner');
@@ -2750,23 +2814,24 @@ function replacement(matchText) {
 
 function replaceOne() {
   const r = FIND.matches[FIND.cur];
-  if (!r) return;
+  if (!r) { toast('No match to replace'); return; }
   snapshot();
   replaceRange(r);
   markEditedSoon();
   runFind(true);
   paintFind(true);
+  toast(`Replaced 1 · ${FIND.matches.length} match${FIND.matches.length === 1 ? '' : 'es'} left (Ctrl+Z undoes)`);
 }
 
 function replaceAllMatches() {
-  if (!FIND.matches.length) return;
+  if (!FIND.matches.length) { toast('No match to replace'); return; }
   snapshot();
   const n = FIND.matches.length;
   // last to first, so earlier ranges stay valid
   for (const r of [...FIND.matches].reverse()) replaceRange(r);
   markEdited();
   runFind();
-  banner(`Replaced ${n} occurrence${n === 1 ? '' : 's'}.`);
+  toast(`Replaced ${n} occurrence${n === 1 ? '' : 's'} (Ctrl+Z undoes)`, 'ok');
 }
 
 function replaceRange(r) {
@@ -2809,7 +2874,9 @@ const THEMES = ['auto', 'light', 'dark'];
 function setTheme(t) {
   if (t === 'auto') document.documentElement.removeAttribute('data-theme');
   else document.documentElement.dataset.theme = t;
-  $('#theme').textContent = { auto: 'Auto', light: 'Light', dark: 'Dark' }[t];
+  $('#theme').textContent = { auto: '◐ Auto', light: '☀ Light', dark: '☾ Dark' }[t];
+  if (setTheme.ready) toast('Colours: ' + { auto: 'follow the system', light: 'light', dark: 'dark' }[t]);
+  setTheme.ready = true;
   try { localStorage.setItem('theme', t); } catch (e) { /* storage unavailable */ }
 }
 $('#theme').onclick = () => {
@@ -2817,6 +2884,22 @@ $('#theme').onclick = () => {
   setTheme(THEMES[(THEMES.indexOf(cur) + 1) % 3]);
 };
 try { setTheme(localStorage.getItem('theme') || 'auto'); } catch (e) { setTheme('auto'); }
+
+// Colour-blind palette (Okabe-Ito): additions blue, removals vermillion, and
+// shapes besides colour (dashed underline, strike-through). Remembered per browser.
+function setColourBlind(on) {
+  if (on) document.documentElement.dataset.cb = '1'; else delete document.documentElement.dataset.cb;
+  const b = document.getElementById('cbmode');
+  if (b) { b.setAttribute('aria-pressed', on ? 'true' : 'false'); b.classList.toggle('pressed', !!on); }
+  try { localStorage.setItem('colourblind', on ? '1' : ''); } catch (e) { /* storage unavailable */ }
+}
+{
+  const b = document.getElementById('cbmode');
+  if (b) b.addEventListener('click', () => { setColourBlind(!document.documentElement.dataset.cb); toast(document.documentElement.dataset.cb ? 'Colour-blind palette on' : 'Colour-blind palette off'); });
+  let on = false;
+  try { on = localStorage.getItem('colourblind') === '1'; } catch (e) { /* storage unavailable */ }
+  setColourBlind(on);
+}
 
 // -------------------------------------------------------------- toolbar
 
@@ -2836,6 +2919,39 @@ const ACTIONS = {
   find: () => openFind(false),
   undo, redo,
 };
+// Edits from the toolbar (and their keys) say what they did, or that there
+// was nothing to do: the page changing is the only other sign.
+let DOC_CHANGES = 0;
+new MutationObserver(() => { DOC_CHANGES++; }).observe($('#doc'), { childList: true, subtree: true, characterData: true });
+const SAID = { bold: 'Bold', emph: 'Emphasis', math: 'Inline maths', display: 'Displayed equation', section: 'Section heading',
+  subsection: 'Subsection heading', paragraph: 'Paragraph heading', splitsection: 'Section split', newpara: 'New paragraph',
+  undo: 'Undone', redo: 'Redone' };
+const NOTHING = { undo: 'Nothing to undo', redo: 'Nothing to redo' };
+function announced(name, fn) {
+  return (...args) => {
+    const n = DOC_CHANGES;
+    const r = fn(...args);
+    setTimeout(() => {
+      if (DOC_CHANGES !== n) toast(SAID[name]);
+      else toast(NOTHING[name] || SAID[name] + ': put the cursor in the text first');
+    }, 30);
+    return r;
+  };
+}
+// actions that open a window: if none opened, say why
+for (const name of ['cite', 'ref', 'latex']) {
+  const fn = ACTIONS[name];
+  ACTIONS[name] = (...args) => {
+    const r = fn(...args);
+    setTimeout(() => { if ($('#palette').hidden && $('#drawer').hidden) toast('Put the cursor in the text first', 'error'); }, 60);
+    return r;
+  };
+}
+for (const name of Object.keys(SAID)) {
+  const fn = ACTIONS[name];
+  ACTIONS[name] = announced(name, fn);
+  for (const keys of [TEXT_KEYS, GLOBAL_KEYS]) for (const k of Object.keys(keys)) if (keys[k] === fn) keys[k] = ACTIONS[name];
+}
 for (const b of document.querySelectorAll('#toolbar button')) {
   // keep the caret in the text when a button is pressed
   b.addEventListener('mousedown', (e) => e.preventDefault());
@@ -2845,12 +2961,6 @@ Object.assign(TEXT_KEYS, { 'C-M-c': citePalette, 'C-M-C': citePalette, 'C-M-r': 
 Object.assign(GLOBAL_KEYS, { 'C-f': () => openFind(false), 'C-h': () => openFind(true) });
 delete TEXT_KEYS['C-R'];
 
-// The toolbar and find bar stick below the header, whatever its height.
-new ResizeObserver(() => {
-  const h = $('#bar').offsetHeight;
-  $('#toolbar').style.top = h + 'px';
-  $('#findbar').style.top = (h + $('#toolbar').offsetHeight) + 'px';
-}).observe($('#bar'));
 
 // ?uitest: drive the palettes, find/replace and theme as a user would, and
 // log the resulting source changes (nothing is saved).
@@ -3198,7 +3308,8 @@ function diffOff() {
   document.body.classList.remove('diffing');
   $('#diffnav').hidden = true;
   $('#diffbase').hidden = true;
-  $('#diffbtn').textContent = 'Diff';
+  $('#diffbtn').setAttribute('aria-pressed', 'false');
+  $('#diffbtn').title = 'Show what changed (read-only while on)';
   const y = window.scrollY;
   render();
   window.scrollTo(0, y);
@@ -3228,7 +3339,8 @@ function diffStep(d) {
 ACTIONS.diff = () => {
   if (DIFF.on) return diffOff();
   DIFF.on = true;
-  $('#diffbtn').textContent = 'Leave diff';
+  $('#diffbtn').setAttribute('aria-pressed', 'true');
+  $('#diffbtn').title = 'Leave the diff view';
   $('#diffbase').hidden = false;
   diffOn();
 };
@@ -3838,6 +3950,7 @@ const ACTION_DEFS = [
   ['subsection', 'Subsection heading at the cursor', 'text', ['C-M-2'], () => headingAtCaret('subsection')],
   ['paragraph', '\\paragraph heading at the cursor', 'text', ['C-M-3'], () => headingAtCaret('paragraph')],
   ['splitsection', 'Split section at the cursor', 'text', [], () => splitSectionAtCaret()],
+  ['colourblind', 'Colour-blind palette on or off', 'global', ['C-M-k'], () => setColourBlind(!document.documentElement.dataset.cb)],
   ['linestart', 'Start of line', 'text', ['C-a'], () => getSelection().modify('move', 'backward', 'lineboundary')],
   ['lineend', 'End of line', 'text', ['C-e'], () => getSelection().modify('move', 'forward', 'lineboundary')],
   ['selstart', 'Select to start of line', 'text', ['C-A'], () => getSelection().modify('extend', 'backward', 'lineboundary')],
