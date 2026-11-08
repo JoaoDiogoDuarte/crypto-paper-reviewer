@@ -423,7 +423,12 @@ function previewTabular(src) {
       const tr = el('tr');
       for (const cell of r.cells) {
         const td = el('td');
-        renderTokens(L.tokenize(cell.content), td, {});
+        // \multicolumn{n}{spec}{x} spans n columns; \multirow{n}{w}{x} shows x
+        // in its top cell (the cells below it are empty in the source)
+        let content = cell.content, m;
+        if ((m = /^\s*\\multicolumn\{(\d+)\}\{[^{}]*\}\{([\s\S]*)\}\s*$/.exec(content))) { td.colSpan = +m[1]; content = m[2]; }
+        if ((m = /^\s*\\multirow\{[^{}]*\}(?:\[[^\]]*\])?\{[^{}]*\}\{([\s\S]*)\}\s*$/.exec(content))) content = m[1];
+        renderTokens(L.tokenize(content), td, {});
         tr.append(td);
       }
       table.append(tr);
@@ -468,6 +473,7 @@ function renderFloat(seg) {
 
 // Render tokens into parent.  Plain text stays editable; everything else is
 // an atomic chip that carries its source in data-src.
+const LIGATURES = { '---': '\u2014', '--': '\u2013', '``': '\u201c', "''": '\u201d' };
 function renderTokens(toks, parent, ctx) {
   toks.forEach((tok, i) => {
     if (tok.t !== 'env' || tok.mode !== 'begin') return;
@@ -477,7 +483,15 @@ function renderTokens(toks, parent, ctx) {
     }
   });
   for (const tok of toks) {
-    if (tok.t === 'text') { parent.append(document.createTextNode(L.decodeText(tok.s))); continue; }
+    if (tok.t === 'text') {
+      // TeX ligatures read as LaTeX prints them; the chip keeps the source
+      for (const piece of tok.s.split(/(---|--|``|'')/)) {
+        if (!piece) continue;
+        if (LIGATURES[piece]) parent.append(chip('char', piece, LIGATURES[piece]));
+        else parent.append(document.createTextNode(L.decodeText(piece)));
+      }
+      continue;
+    }
     if (tok.t === 'fmt') {
       const e = el(tok.name === 'textbf' || tok.name === 'paragraph' ? 'strong' : 'em',
         tok.name === 'paragraph' ? 'runin' : '');
@@ -508,7 +522,13 @@ function chip(cls, src, text) {
 const HIDDEN = new Set(['label', 'clearpage', 'newpage', 'maketitle', 'bibliographystyle', 'FloatBarrier',
   'vspace', 'noindent', 'centering', 'title', 'author', 'nonumber', 'medskip', 'smallskip', 'bigskip',
   'Needspace', 'raggedbottom', 'balance', 'IEEEauthorblockN', 'IEEEauthorblockA', 'leavevmode',
-  'protect']);
+  'protect', 'institute', 'inst', 'orcidID', 'email', 'date', 'titlerunning', 'authorrunning', 'thanks',
+  'affiliation', 'address', 'addauthor', 'authorrunning', 'keywords', 'IEEEoverridecommandlockouts',
+  'IEEEpeerreviewmaketitle', 'license', 'Copyright', 'EventEditors', 'EventNoEds', 'EventLongTitle',
+  'EventShortTitle', 'EventAcronym', 'EventYear', 'EventDate', 'EventLocation', 'EventLogo', 'SeriesVolume',
+  'ArticleNo', 'ccsdesc', 'relatedversion', 'funding', 'acknowledgements', 'nolinenumbers', 'hideLIPIcs',
+  'authorrunning', 'subjclass', 'category', 'supplement', 'copyrightyear', 'acmYear', 'acmDOI', 'acmConference',
+  'acmBooktitle', 'acmPrice', 'acmISBN', 'setcopyright', 'orcid', 'country', 'institution', 'city']);
 
 function renderChip(tok, ctx) {
   switch (tok.t) {
@@ -523,9 +543,12 @@ function renderChip(tok, ctx) {
   if (HIDDEN.has(name) || (name !== 'iff' && /^(newif|else|fi|if[a-zA-Z@]*|[a-zA-Z@]+(true|false))$/.test(name))) return chip('hidden', tok.s);
   if (/^[cC]ref$|^ref$|^eqref$|^autoref$/.test(name)) return chip('ref', tok.s, refText(name, arg()));
   if (name === 'cite') {
-    const nums = arg().split(',').map((k) => (DOC.aux.cites[k.trim()] || '?'));
-    const c = chip('cite', tok.s, '[' + nums.join(', ') + ']');
-    c.title = arg().split(',').map((k) => DOC.bib[k.trim()] || k).join('\n\n').replace(/\\[a-zA-Z]+|[{}]/g, '');
+    const cm = /^\\cite\s*(?:\[((?:[^\]{}]|\{[^{}]*\})*)\])?\s*\{([^{}]*)\}/.exec(tok.s);
+    const keys = cm ? cm[2] : arg();
+    const note = cm && cm[1] ? cm[1].replace(/\\S\s*/g, '§').replace(/~/g, '\u00a0').replace(/[{}]/g, '').trim() : '';
+    const nums = keys.split(',').map((k) => (DOC.aux.cites[k.trim()] || '?'));
+    const c = chip('cite', tok.s, '[' + nums.join(', ') + (note ? ', ' + note : '') + ']');
+    c.title = keys.split(',').map((k) => DOC.bib[k.trim()] || k).join('\n\n').replace(/\\[a-zA-Z]+|[{}]/g, '');
     return c;
   }
   if (name === 'ec' || name === 'texttt' || name === 'url' || name === 'nolinkurl') return chip('ec', tok.s, arg());
@@ -574,6 +597,16 @@ function renderChip(tok, ctx) {
     const c = chip('math macro', tok.s);
     typesetInto('$' + tok.s + '$', c, false);
     if (!c.classList.contains('bad')) return c;
+  }
+  // a text macro (\oracle -> \textbf{Oracle}\ ): show what it prints
+  const textMacro = body !== undefined && tok.s === '\\' + name &&
+    /^\s*\\(textbf|textit|textsf|textrm|texttt|textsc|emph|mbox|text)\{([^{}\\$]*)\}\s*(\\ |~|\\xspace)?\s*$/.exec(body);
+  if (textMacro) {
+    const c = chip('src textmacro', tok.s, textMacro[2] + (textMacro[3] ? ' ' : ''));
+    c.style.fontWeight = textMacro[1] === 'textbf' ? 'bold' : '';
+    c.style.fontStyle = /textit|emph/.test(textMacro[1]) ? 'italic' : '';
+    c.title = tok.s;
+    return c;
   }
   return chip('src', tok.s, tok.s.length > 40 ? tok.s.slice(0, 38) + '…' : tok.s);
 }
