@@ -3755,6 +3755,7 @@ async function openPaper() {
   MD.info = await (await fetch('/api/metadata')).json();
   MD.data = JSON.parse(JSON.stringify(MD.info.metadata));
   MD.dirty = false;
+  MD.rootOutput = false;
   drawPaper();
   $('#paperbox').hidden = false;
 }
@@ -3838,7 +3839,7 @@ function drawPaper() {
     del.onclick = () => {
       md.affiliations.splice(k, 1);
       for (const a of md.authors) a.affiliations = (a.affiliations || []).filter((j) => j !== k).map((j) => (j > k ? j - 1 : j));
-      drawPaper();
+      drawPaper(); metadataDirty();
     };
     r.append(del);
     body.append(r);
@@ -3876,7 +3877,7 @@ function drawPaper() {
   body.append(cv);
   refreshMissing();
   go.onclick = async () => {
-    await saveMetadata(true);
+    if (!(await saveMetadata(true))) return;
     result.textContent = 'Converting and building…';
     const send = (overwrite) => fetch('/api/convert', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
       body: JSON.stringify({ target: MD.target, anonymous: MD.anon, name: name.value, overwrite,
