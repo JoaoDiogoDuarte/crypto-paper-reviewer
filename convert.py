@@ -5,6 +5,8 @@ class's front matter written from the metadata, the old preamble with what
 the target cannot take removed or shimmed, and the old body (its \\input
 files unchanged).  See docs/styles.md for the differences handled here.
 """
+import difflib
+import hashlib
 import json
 import os
 import re
@@ -420,7 +422,7 @@ THEOREM_GUARD = r"""% paper-editor: \newtheorem skips environments the class alr
 
 
 def drop_class_theorems(preamble, names):
-    """Remove theorem/counter declarations already provided by the target class.
+    r"""Remove theorem/counter declarations already provided by the target class.
 
     In particular, aliascnt's \newaliascnt defines \c@lemma *before* a
     subsequent guarded \newtheorem can skip it.  Both commands must go.
@@ -493,7 +495,7 @@ def drop_package(preamble, name):
     return re.sub(r'\\usepackage(\[[^\]]*\])?\{([^}]*)\}[ \t]*\n?', sub, preamble)
 
 
-def convert(main_text, md, target, anonymous, theorems_used, resolve=None, all_text=''):
+def _convert(main_text, md, target, anonymous, theorems_used, resolve=None, all_text=''):
     r"""The new main file, and warnings.  resolve(name) gives the text of an
     \input file (or None); all_text is every file of the paper, to scan for
     the commands the body uses."""
@@ -598,6 +600,151 @@ def convert(main_text, md, target, anonymous, theorems_used, resolve=None, all_t
         warnings.append('Also check the text for self-citations in the first person and links to your repositories.')
     pre_fm, post_fm = front_matter(md, target, anonymous)
     out = ('% Converted by paper-editor from ' + md.get('source_class', '?') + (' (anonymous)' if anonymous else '') + '\n' +
-           (cls_anon if anonymous else cls_line) + '\n' + '\n'.join(pre_shims) + '\n' + preamble.strip('\n') + '\n' +
+           ''.join(line + '\n' for line in pre_class) + (cls_anon if anonymous else cls_line) + '\n' + '\n'.join(pre_shims) + '\n' + preamble.strip('\n') + '\n' +
            '\n'.join(shims) + '\n' + pre_fm + '\n\\begin{document}\n' + post_fm + '\n' + body.lstrip('\n'))
     return out, warnings
+
+
+# ------------------------------------------------------------------ round trips
+#
+# A converted main file ends, after \end{document} (where LaTeX stops
+# reading), with a comment record of the main file it came from:
+#
+#   %@paper-editor origin class=IEEEtran sha1=<of the original> (...)
+#   %|<each line of the original main file>
+#   %=<a> <b>           the converted text as written: lines a..b-1 of the original,
+#   %+<line>            or a line of its own
+#
+# Converting back to the original's class gives the original byte for byte;
+# edits made since in the converted text are carried over where they fall on
+# lines that were copied from the original (the body), and a chain of
+# conversions always starts again from the original, so shims never pile up.
+
+ORIGIN_TAG = '%@paper-editor origin '
+
+
+def _sha(t):
+    return hashlib.sha1(t.encode('utf-8', 'surrogatepass')).hexdigest()
+
+
+def _lines(t):
+    """Lines with their ends, so that ''.join(_lines(t)) == t, for any line ends."""
+    return re.findall(r'[^\n]*\n|[^\n]+$', t)
+
+
+def class_of_target(target):
+    return re.search(r'\{([^}]*)\}\s*$', TARGETS[target][1]).group(1)
+
+
+def origin_record(origin, converted):
+    """The record appended to a converted file (converted: the text before it)."""
+    o, c = _lines(origin), _lines(converted)
+    out = [f'{ORIGIN_TAG}class={doc_class(strip_comments(origin))} sha1={_sha(origin)} '
+           f'(the main file this was converted from, so that converting back restores it exactly)\n']
+    # the original, one line per line: '%|' + the line without its '\n'
+    out += ['%|' + line + '\n' for line in origin.split('\n')]
+    sm = difflib.SequenceMatcher(None, o, c, autojunk=False)
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == 'equal':
+            out.append(f'%={i1} {i2}\n')
+        elif j2 > j1:
+            out += ['%+' + line.rstrip('\n') + '\n' if line.endswith('\n') else '%-' + line + '\n' for line in c[j1:j2]]
+    return out
+
+
+def split_origin(text):
+    """(the text before the record, origin, the converted text as written,
+    alignment: for each line of it, the line of the origin it copies or None);
+    origin is None when there is no intact record."""
+    i = text.rfind('\n' + ORIGIN_TAG)
+    if i < 0:
+        return text, None, None, None
+    head, rec = text[:i + 1], text[i + 1:].split('\n')
+    m = re.match(re.escape(ORIGIN_TAG) + r'class=\S+ sha1=([0-9a-f]{40})', rec[0])
+    if not m:
+        return text, None, None, None
+    rows = rec[1:]
+    if rows and rows[-1] == '':
+        rows = rows[:-1]
+    k = 0
+    while k < len(rows) and rows[k].startswith('%|'):
+        k += 1
+    origin = '\n'.join(r[2:] for r in rows[:k])
+    if _sha(origin) != m.group(1):
+        return text, None, None, None
+    o = _lines(origin)
+    conv, align = [], []
+    for r in rows[k:]:
+        if r.startswith('%='):
+            a, b = map(int, r[2:].split())
+            if not 0 <= a <= b <= len(o):
+                return text, None, None, None
+            conv += o[a:b]
+            align += list(range(a, b))
+        elif r.startswith('%+'):
+            conv.append(r[2:] + '\n')
+            align.append(None)
+        elif r.startswith('%-'):         # a last line without '\n'
+            conv.append(r[2:])
+            align.append(None)
+        else:
+            return text, None, None, None
+    return head, origin, ''.join(conv), align
+
+
+def restore(text):
+    """The original main file a converted one came from, with the edits made
+    to the converted text since carried over; None when there is no record or
+    an edit cannot be placed in the original (front matter, preamble)."""
+    head, origin, conv, align = split_origin(text)
+    if origin is None:
+        return None
+    if head == conv:
+        return origin
+    o, c, h = _lines(origin), _lines(conv), _lines(head)
+    edits = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, c, h, autojunk=False).get_opcodes():
+        if tag == 'equal':
+            continue
+        if i2 > i1:
+            span = align[i1:i2]
+            if None in span or span != list(range(span[0], span[0] + len(span))):
+                return None
+            a, b = span[0], span[-1] + 1
+        elif i1 > 0 and align[i1 - 1] is not None:
+            a = b = align[i1 - 1] + 1
+        elif i1 < len(align) and align[i1] is not None:
+            a = b = align[i1]
+        else:
+            return None
+        edits.append((a, b, h[j1:j2]))
+    for a, b, new in sorted(edits, reverse=True):
+        o[a:b] = new
+    return ''.join(o)
+
+
+def convert(main_text, md, target, anonymous, theorems_used, resolve=None, all_text='', rel=None):
+    r"""The new main file, and warnings (rel: where the original's folder is,
+    from the folder the new file goes to, e.g. '../..').  A file converted before is converted
+    from the main file it came from (with the edits made since); converting it
+    back to that file's class gives that file again, exactly."""
+    warnings = []
+    head, origin, _, _ = split_origin(main_text)
+    source = main_text
+    if origin is not None:
+        root = restore(main_text)
+        if root is None:
+            warnings.append('Edits to the converted front matter or preamble cannot be carried back to the '
+                            'original; converted from this file instead.')
+            source = head
+        else:
+            source = root
+            if class_of_target(target) == doc_class(strip_comments(root)) and not anonymous:
+                return root, warnings + ['Restored the original main file, with the edits made since' +
+                                         (': its bibliography paths are relative to the original folder.' if rel and rel != '.' else '.')]
+    md = dict(md, source_class=doc_class(strip_comments(source)))
+    out, more = _convert(source, md, target, anonymous, theorems_used, resolve, all_text)
+    out = relocate_bibliography(out, rel)
+    if not out.endswith('\n'):
+        out += '\n'
+    return out + ''.join(origin_record(source, out)), warnings + more

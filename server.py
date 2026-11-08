@@ -70,6 +70,34 @@ def strip_comments(text):
     return re.sub(r'(?<!\\)%.*', '', text)
 
 
+def source_root():
+    """The folder of the paper a converted main file belongs to: for
+    <root>/converted/<venue>/x.tex, <root>; otherwise the main file's folder.
+    Its \\input files, figures and bibliography stay there."""
+    d = os.path.normpath(os.path.join(PAPER, os.path.dirname(MAIN)))
+    parts = d.split(os.sep)
+    for i in range(1, len(parts) - 1):
+        if parts[i] == 'converted' and parts[i + 1] in convert.TARGETS:
+            return os.sep.join(parts[:i]) or os.sep
+    return d
+
+
+def tex_env(*dirs):
+    """The environment for a LaTeX run: the given folders (searched with their
+    subfolders), the editor's bundled classes, then TeX's own path."""
+    env = dict(os.environ)
+    paths = [d for d in dirs if d] + [CLASSES]
+    for k in ('TEXINPUTS', 'BIBINPUTS', 'BSTINPUTS'):
+        env[k] = ':'.join(p + '//' for p in paths) + ':' + env.get(k, '')
+    return env
+
+
+def build_env():
+    """A build of the main file: a converted one also finds the original's files."""
+    root = source_root()
+    return tex_env(root) if root != os.path.normpath(PAPER) else tex_env()
+
+
 def resolve_input(name):
     """The file an \\input refers to, as a path relative to PAPER, or None.
     LaTeX looks in its working directory; a document compiled from the
@@ -79,6 +107,8 @@ def resolve_input(name):
     while ROOT and d != ROOT and d.startswith(ROOT) and os.path.dirname(d) != d:
         d = os.path.dirname(d)
         bases.append(d)
+    if source_root() not in bases:
+        bases.append(source_root())
     for base in bases:
         for cand in (name, name + '.tex'):
             f = os.path.join(base, cand)
@@ -482,9 +512,9 @@ def build_figures(log):
         tex = os.path.join(tmp, 'figs.tex')
         with open(tex, 'w', encoding='utf-8') as out:
             out.write('\n'.join(doc))
-        env = dict(os.environ, TEXINPUTS=PAPER + '//:' + os.path.dirname(PAPER) + '//:')
+        env = tex_env(PAPER, os.path.dirname(PAPER), source_root())
         cmd = ['latexmk', '-pdf', '-interaction=nonstopmode', '-halt-on-error', 'figs.tex']
-        r = subprocess.run(cmd, cwd=tmp, env=env, capture_output=True, text=True, timeout=600)
+        r = subprocess.run(cmd, cwd=tmp, env=env, capture_output=True, text=True, errors='replace', timeout=600)
         debug_capture('figures', cmd, r, [tex, os.path.join(tmp, 'figs.log'),
                                           os.path.join(tmp, 'figs.aux')], log)
         if r.returncode != 0 or not os.path.exists(os.path.join(tmp, 'figs.pdf')):
@@ -536,15 +566,18 @@ class Builder:
             return CONFIG['build']
         if os.path.isfile(os.path.join(PAPER, 'Makefile')):
             return ['make']
-        return ['latexmk', '-pdf', '-synctex=1', '-interaction=nonstopmode', '-halt-on-error', MAIN]
+        # LaTeX writes beside where it runs: a main file in a subfolder
+        # (converted/llncs/x.tex) keeps its .aux and .pdf beside it
+        out = ['-outdir=' + os.path.dirname(MAIN)] if os.path.dirname(MAIN) else []
+        return ['latexmk', '-pdf', '-synctex=1', '-interaction=nonstopmode', '-halt-on-error', *out, MAIN]
 
     def build_once(self):
         cmd = self.build_command()
         self.state = {'state': 'running', 'message': 'make' if cmd == ['make'] else 'latexmk', 'at': time.time()}
         log_files = [os.path.join(PAPER, stem() + suffix) for suffix in ('.log', '.aux', '.out', '.fdb_latexmk')]
         try:
-            r = subprocess.run(cmd, cwd=PAPER, capture_output=True, text=True, timeout=600,
-                               shell=isinstance(cmd, str))
+            r = subprocess.run(cmd, cwd=PAPER, capture_output=True, text=True, errors='replace', timeout=600,
+                               shell=isinstance(cmd, str), env=build_env())
             debug_capture('pdf-build', cmd, r, log_files, self.log)
             output = (r.stdout or '') + '\n' + (r.stderr or '')
             # Hyperref's .out is just as vulnerable to partial writes as .aux.
@@ -616,7 +649,7 @@ def doc_payload():
     for name, f in files.items():
         SESSION_START.setdefault(name, f['text'])
     return {'pages': synctex_pages(), 'docclass': docclass(),
-            'main': MAIN, 'mains': find_mains(PAPER), 'resolve': input_map(), 'files': files, 'aux': BUILDER.aux, 'auxver': BUILDER.auxver,
+            'main': MAIN, 'path': os.path.join(PAPER, MAIN), 'root': source_root(), 'mains': find_mains(PAPER), 'resolve': input_map(), 'files': files, 'aux': BUILDER.aux, 'auxver': BUILDER.auxver,
             'macros': load_macros(), 'theorems': load_theorems(), 'config': CONFIG,
             'bib': load_bib(), 'figs': figs, 'build': BUILDER.state,
             'tts': {}}
@@ -1163,7 +1196,7 @@ def load_keys():
 def metadata():
     """Metadata: what the front matter says, overridden by your edits
     (saved in .paper-editor/metadata.json)."""
-    extracted = convert.extract(read(MAIN))
+    extracted = convert.extract(original_main())
     saved = {}
     path = os.path.join(STATE, 'metadata.json')
     if os.path.exists(path):
@@ -1175,6 +1208,13 @@ def metadata():
     return {'metadata': merged, 'extracted': extracted, 'saved': bool(saved),
             'targets': {k: v[0] for k, v in convert.TARGETS.items()},
             'missing': {t: convert.missing(merged, t) for t in convert.TARGETS}}
+
+
+def original_main():
+    """The main file's text; for a converted file, the original it came from
+    (its front matter is where metadata lives: a converted one is lossy)."""
+    text = read(MAIN)
+    return convert.restore(text) or text
 
 
 def theorems_used():
@@ -1211,18 +1251,28 @@ def run_convert(target, anonymous, name, overwrite, root=False):
         f = resolve_input(item)
         return read(f) if f else None
     everything = '\n'.join(read(f) for f in paper_files() if f != MAIN)
-    text, warnings = convert.convert(read(MAIN), md, target, anonymous, theorems_used(), resolve_text, everything)
+    text, warnings = convert.convert(read(MAIN), md, target, anonymous, theorems_used(), resolve_text, everything,
+                                     rel=os.path.relpath(base_dir, out_dir))
+    # bibliography files that do not exist: say which (a broken link to a
+    # shared cryptobib is the usual reason for "undefined citations")
+    for m in re.finditer(r'(?m)^[^%\n]*\\bibliography\{([^}]*)\}', convert.split_origin(text)[0]):
+        for bib in m.group(1).split(','):
+            bib = bib.strip()
+            f = os.path.normpath(os.path.join(out_dir, bib if bib.endswith('.bib') else bib + '.bib'))
+            if bib and not os.path.exists(f):
+                link = next((p for p in [os.path.dirname(f), f] if os.path.islink(p)), None)
+                warnings.append(f'Bibliography file not found: {os.path.relpath(f, base_dir)}' +
+                                (f' ({os.path.relpath(link, base_dir)} is a broken link to {os.readlink(link)})' if link else '') +
+                                '; its citations stay undefined.')
     os.makedirs(out_dir, exist_ok=True)
     with open(path, 'w', encoding='utf-8', newline='') as f:
         f.write(text)
     # Resolve source-relative includes, bibliography and styles from the paper root.
-    env = dict(os.environ)
-    for k in ('TEXINPUTS', 'BIBINPUTS', 'BSTINPUTS'):
-        env[k] = base_dir + '//:' + env.get(k, '')
+    env = tex_env(base_dir)
     r = subprocess.run(['latexmk', '-pdf', '-interaction=nonstopmode', '-halt-on-error', name], cwd=out_dir,
-                       env=env, capture_output=True, text=True, timeout=600)
+                       env=env, capture_output=True, text=True, errors='replace', timeout=600)
     logfile = os.path.join(out_dir, name[:-4] + '.log')
-    log = open(logfile, errors='replace').read() if os.path.exists(logfile) else ''
+    log = open(logfile, errors='replace').read() if os.path.exists(logfile) else ''  # noqa: SIM115
     errors = [l for l in log.splitlines() if l.startswith('!')][:5]
     if r.returncode and not errors:
         errors = [tex_error(r)]
@@ -1343,7 +1393,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.send(400, {'error': 'expected a JSON object'})
             ensure_state()
             # Save only explicit differences; new metadata from LaTeX remains discoverable.
-            extracted = convert.extract(read(MAIN))
+            extracted = convert.extract(original_main())
             overrides = {k: v for k, v in md.items() if k != 'source_class'
                          and v != extracted.get(k)}
             with open(os.path.join(STATE, 'metadata.json'), 'w') as f:

@@ -14,6 +14,13 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, HERE)
 import convert  # noqa: E402
+
+
+def convert_latex(*args, **kw):
+    """The converted main file without its origin record (comment lines after
+    \\end{document}, for converting back): what LaTeX reads."""
+    out, warnings = convert.convert(*args, **kw)
+    return convert.split_origin(out)[0], warnings
 from convert_matrix import fill  # noqa: E402
 
 
@@ -104,7 +111,7 @@ class MetadataTortureTest(unittest.TestCase):
                 for anon in (False, True):
                     with self.subTest(seed=i, source=cls, target=target, anonymous=anon):
                         metadata = fill(convert.extract(source), target)
-                        result, warnings = convert.convert(
+                        result, warnings = convert_latex(
                             source, metadata, target, anon, [], None, '')
                         self.assertEqual(source, original, 'conversion mutated the input')
                         self.assertIsInstance(warnings, list)
@@ -128,7 +135,7 @@ class MetadataTortureTest(unittest.TestCase):
         for target in convert.TARGETS:
             with self.subTest(target=target):
                 md = fill(convert.extract(source), target)
-                output, _ = convert.convert(source, md, target, False,
+                output, _ = convert_latex(source, md, target, False,
                                             ['lemma', 'custom'], None, '')
                 if 'lemma' in convert.PREDEFINED_THEOREMS.get(target, ()):
                     self.assertNotIn(r'\newaliascnt{lemma}', output)

@@ -122,7 +122,15 @@ function parseFile(name, textOverride) {
       t = t.slice(end);
       front = false;
     }
+    // after \end{document} (LaTeX stops there; a converted file keeps the
+    // record of its original there): one hidden block
+    let tail = '';
+    if (name === DOC.main) {
+      const m = /(^|\n)[ \t]*\\end\{document\}/.exec(t);
+      if (m) { tail = t.slice(m.index + m[1].length); t = t.slice(0, m.index + m[1].length); }
+    }
     for (const s of L.segment(t)) segs.push({ ...s, file: name });
+    if (tail) segs.push({ kind: 'hidden', src: tail, file: name });
   }
   return segs;
 }
@@ -714,6 +722,7 @@ function segSource(seg, warnings, changes, applyRules = true) {
     case 'figure': case 'table':
       if (!seg.edit || !seg.parts) return seg.figSrc || seg.src;
       return seg.parts.prefix + fix(ser(seg.edit), seg.parts.caption) + seg.parts.suffix;
+    case 'hidden': return seg.patched !== undefined ? seg.patched : seg.src;
     default: return seg.src;
   }
 }

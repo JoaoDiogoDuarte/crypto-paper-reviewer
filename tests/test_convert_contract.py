@@ -10,6 +10,13 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, HERE)
 import convert  # noqa: E402
+
+
+def convert_latex(*args, **kw):
+    """The converted main file without its origin record (comment lines after
+    \\end{document}, for converting back): what LaTeX reads."""
+    out, warnings = convert.convert(*args, **kw)
+    return convert.split_origin(out)[0], warnings
 from convert_matrix import fill  # noqa: E402
 
 SOURCES = ('acm-ccs', 'adversarial-article', 'adversarial-bibliography', 'adversarial-comments',
@@ -44,7 +51,7 @@ class ConversionContractTest(unittest.TestCase):
 \end{document}
 """
         md = fill(convert.extract(source), 'llncs')
-        output, _ = convert.convert(source, md, 'llncs', False,
+        output, _ = convert_latex(source, md, 'llncs', False,
                                    ['lemma', 'custom'], None, '')
         preamble = output.split(r'\begin{document}', 1)[0]
         for command in (r'\newtheorem{theorem}', r'\newaliascnt{lemma}',
@@ -85,7 +92,7 @@ class ConversionContractTest(unittest.TestCase):
                 for anon in (False, True):
                     with self.subTest(source=source, target=target, anonymous=anon):
                         metadata = fill(convert.extract(original), target)
-                        output, _ = convert.convert(original, metadata, target, anon, sorted(used), resolve, everything)
+                        output, _ = convert_latex(original, metadata, target, anon, sorted(used), resolve, everything)
                         expected = anonymous if anon else normal
                         self.assertIn(expected, output)
                         self.assertEqual(output.count('\\documentclass'), 1)
