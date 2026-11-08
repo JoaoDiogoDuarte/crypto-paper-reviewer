@@ -345,6 +345,31 @@ function renderCode(seg) {
   return wrapSeg(seg, ta);
 }
 
+// Preview LaTeX tabulars without changing their source.  Cell editor remains
+// in the figure viewer; this is an accessible reading-only presentation.
+function previewTabular(src) {
+  const tables = L.parseTabulars(src);
+  if (!tables.length) return null;
+  const container = el('div', 'tabular-preview');
+  for (const t of tables) {
+    const table = el('table', 'tabular-render');
+    for (const r of t.rows) {
+      if (r.empty) continue;
+      const tr = el('tr');
+      for (const cell of r.cells) {
+        const td = el('td');
+        renderTokens(L.tokenize(cell.content), td, {});
+        tr.append(td);
+      }
+      table.append(tr);
+      if (/\\(midrule|toprule|bottomrule|hline)/.test(r.lead))
+        tr.classList.add('rule-above');
+    }
+    container.append(table);
+  }
+  return container;
+}
+
 function renderFloat(seg) {
   const box = el('div');
   seg.wide = /^\s*\\begin\{(figure|table)\*\}/.test(seg.src);
@@ -355,8 +380,7 @@ function renderFloat(seg) {
   } else if (DOC.figs[seg.src]) {
     const img = el('img'); img.src = DOC.figs[seg.src]; img.alt = 'Table'; box.append(img);
   } else {
-    const raw = /\\begin\{tabular\}[^]*?\\end\{tabular\}/.exec(seg.src);
-    if (raw) box.append(el('pre', 'rawsrc', raw[0]));
+    box.append(previewTabular(seg.src) || el('div', 'small', '(table preview is being rendered)'));
   }
   const cap = L.captionParts(seg.src);
   seg.parts = cap;
@@ -458,12 +482,24 @@ function renderChip(tok, ctx) {
   if (name === 'texorpdfstring') { const c = chip('', tok.s); renderTokens(L.tokenize(arg(0)), c, ctx); return c; }
   if (name === ',' || name === ' ' || name === ';' || name === '@') return chip('nl', tok.s, ' ');
   if (name === 'dots' || name === 'ldots') return chip('nl', tok.s, '…');
+  if (name === 'verbatim' && /^tabular(?:\*|x)?$/.test(tok.env)) {
+    const c = chip('tabular-inline', tok.s);
+    c.append(previewTabular(tok.s) || el('code', '', tok.s));
+    return c;
+  }
   if (name === 'verbatim') return chip('src', tok.s, '[' + tok.env + ']');
   // characters typed into the text are saved as these commands; show them as
   // the characters
   if (name === 'textasciitilde') return chip('char', tok.s, '~');
   if (name === 'textasciicircum') return chip('char', tok.s, '^');
   if (name === 'textbackslash') return chip('char', tok.s, '\\');
+  // Text accents belong to Unicode in the reading view, but keep their exact
+  // LaTeX source in data-src so editing/saving still round-trips losslessly.
+  const accents = { c: '\u0327', "'": '\u0301', '`': '\u0300', '"': '\u0308',
+    '^': '\u0302', '~': '\u0303', '=': '\u0304', '.': '\u0307',
+    u: '\u0306', v: '\u030c', H: '\u030b', r: '\u030a', k: '\u0328' };
+  if (Object.prototype.hasOwnProperty.call(accents, name) && arg().length === 1)
+    return chip('char', tok.s, (arg() + accents[name]).normalize('NFC'));
   // a macro of the document used in text: show it typeset when its body is
   // maths (\ensuremath{...}, \mathsf{...}, \mathcal...)
   const body = DOC.macros['\\' + name];
@@ -529,6 +565,16 @@ const katexMacros = () => ({ ...KATEX_SHIMS, ...DOC.macros });
 function typesetInto(src, node, display) {
   let [body, disp] = mathBody(src);
   body = body.replace(/\\label\{[^}]*\}/g, '').replace(/\\(nonumber|notag)\b/g, '');
+  // KaTeX cannot parse amsmath's multline/multline* directly.  A display
+  // aligned environment handles line breaks, alignment marks and spacing.
+    if (node.classList.contains('bad')) node.title = 'Math preview unsupported by KaTeX: ' + node.textContent;
+    else node.removeAttribute('title');
+  // Only the preview changes; data-src always remains the original LaTeX.
+  body = body.replace(/\\begin\{multline\*?\}/g, '\\begin{aligned}')
+    .replace(/\\end\{multline\*?\}/g, '\\end{aligned}')
+    node.title = 'Math preview error: ' + e.message;
+    .replace(/\\begin\{split\}/g, '\\begin{aligned}')
+    .replace(/\\end\{split\}/g, '\\end{aligned}');
   try {
     const key = (display || disp ? 'D' : 'I') + body;
     let html = KATEX_CACHE.get(key);

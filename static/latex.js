@@ -11,7 +11,7 @@
     'multline', 'multline*', 'eqnarray', 'eqnarray*', 'displaymath']);
   const THM_ENVS = new Set(['theorem', 'lemma', 'corollary', 'definition', 'proposition']);
   const VERBATIM_ENVS = new Set(['lstlisting', 'verbatim', 'tikzpicture', 'games', 'algorithmic',
-    'tabular', 'tabular*']);
+    'tabular', 'tabular*', 'tabularx']);
   const FMT_CMDS = new Set(['emph', 'textbf', 'textit', 'paragraph']);
   const TEXT_ESCAPES = '%&_#${}';
 

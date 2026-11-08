@@ -495,6 +495,23 @@ const TESTS = {
     await page.waitFor(`!$('#external').hidden`, 8000, 'the conflict dialog after a refused save');
   },
 
+  async 'render: multline and text accents keep their original LaTeX'(env, page) {
+    const src = String.raw`\begin{multline*}x=1\\y=2\end{multline*}`;
+    const accented = String.raw`\c{C}`;
+    const result = await page.eval(`(() => {
+      const m = mathChip(${JSON.stringify(src)}, true);
+      const c = renderChip(L.tokenize(${JSON.stringify(accented)})[0], {});
+      return { bad: m.classList.contains('bad'), katex: !!m.querySelector('.katex'),
+        original: m.dataset.src, accent: c.textContent, accentSource: c.dataset.src };
+    })()`);
+    eq(result.bad, false, 'multline must render without a KaTeX error');
+    eq(result.katex, true, 'multline must contain typeset KaTeX');
+    eq(result.original, src, 'math source must be unchanged');
+    eq(result.accent, 'Ç', 'text accent must be typeset');
+    eq(result.accentSource, accented, 'accent source must be unchanged');
+    untouched(env, 'main.tex', 'sections/body.tex');
+  },
+
   async 'wrap: $ around a selection makes it maths and keeps the text'(env, page) {
     await page.select('brown');
     await page.key('$', { shift: true });
@@ -842,6 +859,24 @@ Object.assign(TESTS, {
     }
     await page.key('r', { alt: true }); await page.key('p', { alt: true }); await page.key('s', { alt: true });
     await page.key('ArrowRight', { ctrl: true, alt: true }); await page.key('ArrowLeft', { ctrl: true, alt: true });
+  async 'render: tabular preview keeps LaTeX source'(env, page) {
+    const src = String.raw`\begin{tabular}{lr} A&B\\ C&D\end{tabular}`;
+    const result = await page.eval(`(() => {
+      const src = ${JSON.stringify(src)};
+      const table = previewTabular(src);
+      const token = L.tokenize(src)[0];
+      const node = renderChip(token, {});
+      return { rows: table.querySelectorAll('tr').length,
+        cells: table.querySelectorAll('td').length,
+        html: !!node.querySelector('table'), source: node.dataset.src };
+    })()`);
+    eq(result.rows, 2, 'two HTML table rows');
+    eq(result.cells, 4, 'four HTML cells');
+    eq(result.html, true, 'standalone tabular is not raw LaTeX');
+    eq(result.source, src, 'tabular source is preserved');
+    untouched(env, 'main.tex', 'sections/body.tex');
+  },
+
     await page.key('s', { alt: true });
     await sleep(300);
     eq(await unsaved(page), 0, 'reading edits nothing');
