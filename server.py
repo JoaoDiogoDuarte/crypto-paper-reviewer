@@ -1128,13 +1128,21 @@ def synctex_pages():
                     page = int(line[1:].strip() or 0)
                 elif line.startswith('Input:'):
                     tag, _, name = line[6:].rstrip('\n').partition(':')
+    os.makedirs(out_dir, exist_ok=True)
                     full = os.path.normpath(os.path.join(PAPER, name))
                     inputs[tag] = os.path.relpath(full, PAPER)
+    # Relative \input, \bibliography, \includegraphics must resolve from the
+    # original source tree even when the converted main is in a subfolder.
+    env = dict(os.environ)
+    for k in ('TEXINPUTS', 'BIBINPUTS', 'BSTINPUTS'):
+        env[k] = base_dir + '//:' + env.get(k, '')
                 elif page and c in 'xhvkg$([':
                     m = re.match(r'.(\d+),(\d+)', line)
                     if m:
                         key = (m.group(1), int(m.group(2)))
                         if key not in best:
+    if r.returncode and not errors:
+        errors = [tex_error(r)]
                             best[key] = page
     except (OSError, EOFError, ValueError):
         return {}
@@ -1185,31 +1193,43 @@ def theorems_used():
     return sorted(used - {'proof'})
 
 
-def run_convert(target, anonymous, name, overwrite):
+def run_convert(target, anonymous, name, overwrite, root=False):
     if target not in convert.TARGETS:
         raise ValueError('unknown target')
     if not re.fullmatch(r'[A-Za-z0-9._-]+\.tex', name or ''):
         raise ValueError('the file name must end in .tex, without folders')
-    out_dir = os.path.join(PAPER, os.path.dirname(MAIN))
+    # A missing class is an installation problem, not a failed conversion.
+    # Fail before writing an unusable .tex file.
+    target_class = {'ieee': 'IEEEtran', 'llncs': 'llncs', 'iacrcc': 'iacrcc',
+                    'iacrtrans': 'iacrtrans', 'acmart': 'acmart',
+                    'lipics': 'lipics-v2021', 'article': 'article'}.get(target, target)
+    class_name = target_class + '.cls'
+    found = shutil.which('kpsewhich')
+    installed = subprocess.run(['kpsewhich', class_name], capture_output=True, text=True).stdout.strip() if found else ''
+    if not installed and not os.path.isfile(os.path.join(PAPER, class_name)):
+        raise ValueError(f'{class_name} is not installed. Install that LaTeX class (check with '
+                         f'`kpsewhich {class_name}`), then retry conversion.')
+    base_dir = os.path.join(PAPER, os.path.dirname(MAIN))
+    out_dir = base_dir if root else os.path.join(base_dir, 'converted', target)
     path = os.path.join(out_dir, name)
     if os.path.exists(path) and not overwrite:
-        raise FileExistsError(name)
+        raise FileExistsError(os.path.relpath(path, PAPER))
     md = metadata()['metadata']
-    def resolve_text(name):
-        f = resolve_input(name)
+    def resolve_text(item):
+        f = resolve_input(item)
         return read(f) if f else None
     everything = '\n'.join(read(f) for f in paper_files() if f != MAIN)
     text, warnings = convert.convert(read(MAIN), md, target, anonymous, theorems_used(), resolve_text, everything)
     with open(path, 'w', encoding='utf-8', newline='') as f:
         f.write(text)
     r = subprocess.run(['latexmk', '-pdf', '-interaction=nonstopmode', '-halt-on-error', name], cwd=out_dir,
-                       capture_output=True, text=True, timeout=600)
-    log = os.path.join(out_dir, name[:-4] + '.log')
-    log = open(log, errors='replace').read() if os.path.exists(log) else ''
+                       env=env, capture_output=True, text=True, timeout=600)
+    logfile = os.path.join(out_dir, name[:-4] + '.log')
+    log = open(logfile, errors='replace').read() if os.path.exists(logfile) else ''
     errors = [l for l in log.splitlines() if l.startswith('!')][:5]
     undefined = len(re.findall(r'(Citation|Reference) .* undefined', log))
-    return {'file': name, 'built': r.returncode == 0, 'errors': errors, 'undefined': undefined,
-            'warnings': warnings, 'missing': convert.missing(md, target)}
+    return {'file': os.path.relpath(path, PAPER), 'built': r.returncode == 0, 'errors': errors,
+            'undefined': undefined, 'warnings': warnings, 'missing': convert.missing(md, target)}
 
 
 def html_escape(t):
@@ -1336,11 +1356,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.send(400, {'error': 'expected a JSON object'})
             with PROJECT_LOCK:
                 name = req.get('main', '')
-                if name not in find_mains(os.path.join(PAPER, os.path.dirname(MAIN))):
+                if not isinstance(name, str):
+                    return self.send(400, {'error': 'invalid main document'})
+                norm = os.path.normpath(name)
+                if os.path.isabs(name) or norm.startswith('..') or not name.endswith('.tex'):
+                    return self.send(400, {'error': 'invalid main document'})
+                folder = os.path.dirname(norm)
+                if os.path.basename(norm) not in find_mains(os.path.join(PAPER, folder)):
                     return self.send(400, {'error': 'not a document of this project'})
-                # another document of the same project: same directory for LaTeX,
-                # same settings and caches
-                open_paper(os.path.join(PAPER, os.path.dirname(MAIN), name), cwd=PAPER, state=STATE)
+                open_paper(os.path.join(PAPER, norm), cwd=PAPER, state=STATE)
                 ensure_state()
                 BUILDER.aux = load_aux()
                 BUILDER.auxver += 1

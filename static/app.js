@@ -3735,14 +3735,17 @@ function drawPaper() {
   const an = el('input'); an.type = 'checkbox'; an.checked = MD.anon;
   an.onchange = () => { MD.anon = an.checked; drawPaper(); };
   const al = el('label', '', ' anonymous (no authors, affiliations or acknowledgements)'); al.prepend(an);
+  const rootOutput = el('input'); rootOutput.type = 'checkbox'; rootOutput.checked = false;
+  const rootLabel = el('label', '', ' Put converted document beside original (rather than converted/<venue>/)');
+  rootLabel.prepend(rootOutput);
   const name = el('input'); name.type = 'text'; name.style.width = '16em';
   name.value = DOC.main.split('/').pop().replace(/\.tex$/, '') + '-' + MD.target + (MD.anon ? '-anon' : '') + '.tex';
   const go = el('button', '', 'Convert and build');
   r.append(sel, al);
   cv.append(r);
   r = el('div', 'row');
-  const nl = el('label', '', 'New main file '); nl.append(name);
-  r.append(nl, go);
+  const nl = el('label', '', 'Converted document filename '); nl.append(name);
+  r.append(nl, rootLabel, go);
   cv.append(r);
   const miss = el('div', 'missingbox');
   cv.append(miss);
@@ -3754,7 +3757,8 @@ function drawPaper() {
     await saveMetadata(true);
     result.textContent = 'Converting and building…';
     const send = (overwrite) => fetch('/api/convert', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
-      body: JSON.stringify({ target: MD.target, anonymous: MD.anon, name: name.value, overwrite }) });
+      body: JSON.stringify({ target: MD.target, anonymous: MD.anon, name: name.value, overwrite,
+        root: rootOutput.checked }) });
     let resp = await send(false);
     if (resp.status === 409 && confirm(`${name.value} exists. Overwrite it?`)) resp = await send(true);
     const res = await resp.json();
@@ -3766,7 +3770,8 @@ function drawPaper() {
     for (const w of res.warnings) result.append(el('p', 'small', '• ' + w));
     const open = el('button', '', 'Open it in the editor');
     open.onclick = async () => {
-      await fetch('/api/open', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN }, body: JSON.stringify({ main: res.file }) });
+      const opened = await fetch('/api/open', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN }, body: JSON.stringify({ main: res.file }) });
+      if (!opened.ok) { banner('Could not open converted file: ' + (await opened.json()).error); return; }
       for (const k of Object.keys(FILES)) delete FILES[k];
       $('#paperbox').hidden = true;
       await load(false);
