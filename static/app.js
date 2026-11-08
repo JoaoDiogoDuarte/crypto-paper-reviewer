@@ -3195,7 +3195,7 @@ document.addEventListener('beforeinput', (e) => { if (DIFF.on) e.preventDefault(
 // Double-click a figure or table: its image, its text (from the typeset
 // figure), its LaTeX, and for pseudocode a structured game editor.
 
-const FV = { seg: null, src: '', tab: 'image', games: null };
+const FV = { seg: null, src: '', tab: 'image', games: null, undo: [], redo: [], lastEditor: null, dragIndex: -1 };
 const GAME_ENVS = ['gameenv', 'algorithmic'];
 const BLOCK_OPEN = new Set(['If', 'For', 'ForAll', 'While', 'Repeat', 'Loop', 'Procedure', 'Function']);
 const BLOCK_CLOSE = new Set(['EndIf', 'EndFor', 'EndWhile', 'Until', 'EndLoop', 'EndProcedure', 'EndFunction']);
@@ -3219,6 +3219,7 @@ function openFigure(seg) {
   FV.src = segSource(seg, [], null, false);   // with any caption edit made since
   FV.games = parseGames(FV.src);
   FV.tables = L.parseTabulars(FV.src);
+  FV.undo = []; FV.redo = []; FV.lastEditor = null; FV.dragIndex = -1;
   $('#fv-title').textContent = (seg.kind === 'figure' ? 'Figure ' : 'Table ') + (seg.el.querySelector('.capnum')?.textContent || '');
   $('#fv-games-tab').hidden = !FV.games.length;
   $('#fv-cells-tab').hidden = !FV.tables.length;
@@ -3228,6 +3229,7 @@ function openFigure(seg) {
 
 function showFigTab(tab) {
   FV.tab = tab;
+  updateGameActions();
   for (const b of document.querySelectorAll('.fv-tabs button')) b.classList.toggle('on', b.dataset.tab === tab);
   const body = $('#fv-body');
   body.textContent = '';
@@ -3254,6 +3256,55 @@ function showFigTab(tab) {
     renderCells(body);
   }
 }
+
+// Draft-only undo history: source remains untouched until Apply, then Save.
+function updateGameActions() {
+  const editing = !!FV.seg && FV.tab === 'games';
+  for (const id of ['#fv-undo', '#fv-redo', '#fv-add-game']) $(id).hidden = !editing;
+  $('#fv-undo').disabled = !editing || !FV.undo.length;
+  $('#fv-redo').disabled = !editing || !FV.redo.length;
+  $('#fv-add-game').disabled = !editing || !FV.games.some((g) => g.kind === 'algo' && g.env === 'gameenv');
+}
+function gameCheckpoint(editor = null) {
+  if (editor && FV.lastEditor === editor) return;
+  const current = figureWithEdits();
+  if (FV.undo[FV.undo.length - 1] !== current) {
+    FV.undo.push(current);
+    if (FV.undo.length > 100) FV.undo.shift();
+  }
+  FV.redo = [];
+  FV.lastEditor = editor;
+  updateGameActions();
+}
+function setGameDraft(src) {
+  FV.src = src;
+  FV.games = parseGames(src);
+  FV.tables = L.parseTabulars(src);
+  FV.latexEdited = false;
+  FV.lastEditor = null;
+  showFigTab('games');
+}
+function undoGame() {
+  if (!FV.undo.length) return;
+  FV.redo.push(figureWithEdits());
+  setGameDraft(FV.undo.pop());
+}
+function redoGame() {
+  if (!FV.redo.length) return;
+  FV.undo.push(figureWithEdits());
+  setGameDraft(FV.redo.pop());
+}
+function changeGameSource(transform) {
+  const current = figureWithEdits();
+  const games = parseGames(current);
+  const next = transform(current, games);
+  if (next === current || typeof next !== 'string') return false;
+  gameCheckpoint();
+  setGameDraft(next);
+  return true;
+}
+$('#fv-undo').onclick = undoGame;
+$('#fv-redo').onclick = redoGame;
 
 function renderGames(body) {
   const grid = el('div', 'games-grid');
