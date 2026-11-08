@@ -25,19 +25,26 @@ let DOC = null;          // payload of /api/doc: files, aux, macros, bib, figs
 const FILES = {};        // name -> { text, base (hash on disk), disk (text on disk), segs }
 let ORDER = [];          // display order: segments, each with .file and .el
 let lastTyping = 0;
+// The diff view rewrites the editable blocks with its own marks: while it is
+// shown, the page is not the document, and nothing may read it back.
+let DIFF_SHOWN = false;
 
 // ---------------------------------------------------------------- loading
 
-async function load(keepScroll) {
+// Read the document from the server and render it.  Unsaved edits are kept,
+// file by file, unless the file is in `discard`: a file edited here keeps its
+// old base hash, so that saving it after it changed on disk is refused (and
+// asks) instead of overwriting the other version.
+async function load(keepScroll, discard = []) {
   const y = window.scrollY;
   const caret = captureEditorState();
   const oldMacros = DOC && JSON.stringify(DOC.macros);
   DOC = await (await fetch('/api/doc')).json();
   if (oldMacros !== JSON.stringify(DOC.macros)) KATEX_CACHE.clear();
+  if (DOC) commit();   // typing while the document was being fetched
   for (const [name, f] of Object.entries(DOC.files)) {
     const cur = FILES[name];
-    // keep unsaved edits of a file that did not change on disk
-    if (cur && cur.text !== cur.disk && cur.base === f.hash) continue;
+    if (cur && cur.text !== cur.disk && !discard.includes(name)) continue;
     FILES[name] = { text: f.text, disk: f.text, base: f.hash };
   }
   render();
@@ -58,13 +65,18 @@ function captureEditorState() {
   const before = document.createRange();
   before.selectNodeContents(seg.edit);
   before.setEnd(range.startContainer, range.startOffset);
-  return { file: seg.file, src: seg.src, offset: before.toString().length };
+  const segs = (FILES[seg.file] && FILES[seg.file].segs) || [];
+  return { file: seg.file, index: segs.indexOf(seg), src: seg.src, offset: before.toString().length };
 }
 
+// Put the caret back at the same character of the same block after a
+// re-render (the block is found by its place in its file, or by its source).
 function restoreEditorState(state) {
   if (!state) return;
-  const seg = ORDER.find((item) => item.file === state.file && item.src === state.src && item.edit);
-  if (!seg) return;
+  const segs = (FILES[state.file] && FILES[state.file].segs) || [];
+  let seg = segs[state.index];
+  if (!seg || !seg.edit || seg.edit.tagName === 'TEXTAREA') seg = ORDER.find((item) => item.file === state.file && item.src === state.src && item.edit);
+  if (!seg || !seg.edit || seg.edit.tagName === 'TEXTAREA') return;
   const walker = document.createTreeWalker(seg.edit, NodeFilter.SHOW_TEXT);
   let node, offset = state.offset;
   while ((node = walker.nextNode())) {
@@ -136,6 +148,7 @@ let HEADS = {};
 // ---------------------------------------------------------------- rendering
 
 function render() {
+  DIFF_SHOWN = false;
   const speech = typeof TTS !== 'undefined' ? TTS.capture() : null;
   if (typeof TTS !== 'undefined') TTS.reset();
   const doc = $('#doc');
@@ -206,15 +219,19 @@ function layoutPages(doc) {
 // changed (typing, a chip edit, find and replace, a join); untouched blocks
 // are not re-serialized.
 let EDIT_OBSERVER = null;
+function markTouched(records) {
+  for (const r of records) {
+    const n = r.target.nodeType === 1 ? r.target : r.target.parentElement;
+    const seg = n && segOf(n);
+    if (seg) seg.touched = true;
+  }
+}
+// The observer reports changes later (a microtask): code that changes the
+// page and reads it back at once takes the pending reports first.
+function flushEdits() { if (EDIT_OBSERVER) markTouched(EDIT_OBSERVER.takeRecords()); }
 function watchEdits() {
   if (EDIT_OBSERVER) EDIT_OBSERVER.disconnect();
-  EDIT_OBSERVER = new MutationObserver((records) => {
-    for (const r of records) {
-      const n = r.target.nodeType === 1 ? r.target : r.target.parentElement;
-      const seg = n && segOf(n);
-      if (seg) seg.touched = true;
-    }
-  });
+  EDIT_OBSERVER = new MutationObserver(markTouched);
   EDIT_OBSERVER.observe($('#doc'), { subtree: true, childList: true, characterData: true });
 }
 
@@ -638,6 +655,8 @@ function segSource(seg, warnings, changes, applyRules = true) {
 function commit(applyRules = true) {
   const warnings = [];
   HOUSE_RULE_CHANGES = [];
+  if (DIFF_SHOWN) return warnings;   // the texts were committed when the diff opened
+  flushEdits();
   for (const [name, f] of Object.entries(FILES)) {
     if (!f.segs) continue;
     f.text = f.segs.map((s) => segSource(s, warnings, HOUSE_RULE_CHANGES, applyRules)).join('');
@@ -651,6 +670,7 @@ function editedFiles() {
 }
 
 function markEdited() {
+  flushEdits();
   const files = editedFiles();
   $('#dirty').textContent = files.length ? files.length + ' file' + (files.length > 1 ? 's' : '') + ' edited' : '';
   $('#save').classList.toggle('has-changes', files.length > 0);
@@ -663,6 +683,7 @@ function markEdited() {
 
 // Commit, apply a change to the segment lists, re-render from the texts.
 function structural(change) {
+  if (leaveDiff()) return;   // the blocks of the diff view are not the document
   commit();
   // every segment of every file takes its current source first, so that the
   // texts rebuilt below keep the edits of files the change does not touch
@@ -1745,13 +1766,14 @@ doc.addEventListener('beforeinput', () => {
   typingSnap = setTimeout(() => { typingSnap = null; }, 1200);
 });
 function restore(from, to) {
+  leaveDiff();
   commit();
   const cur = Object.fromEntries(Object.entries(FILES).map(([n, f]) => [n, f.text]));
   let texts = from.pop();
   while (texts && Object.keys(texts).every((n) => texts[n] === cur[n])) texts = from.pop();
   if (!texts) return;
   to.push(cur);
-  for (const [n, t] of Object.entries(texts)) FILES[n].text = t;
+  for (const [n, t] of Object.entries(texts)) if (FILES[n]) FILES[n].text = t;
   const y = window.scrollY;
   render();
   window.scrollTo(0, y);
@@ -2894,6 +2916,7 @@ async function diffOn() {
   const ref = $('#diffbase').value;
   DIFF.marks = [];
   document.body.classList.add('diffing');
+  DIFF_SHOWN = true;
   for (const e of document.querySelectorAll('#doc [contenteditable="true"]')) e.contentEditable = 'false';
   for (const ta of document.querySelectorAll('#doc textarea')) ta.readOnly = true;
   const names = Object.keys(FILES).filter((n) => FILES[n].segs);
@@ -2955,6 +2978,16 @@ function diffOff() {
   const y = window.scrollY;
   render();
   window.scrollTo(0, y);
+}
+
+// Leave the diff view if it is on (the page is rendered again from the
+// texts).  Returns true when a structure edit should not go on: its block
+// was one of the diff view's.
+function leaveDiff() {
+  if (!DIFF.on && !DIFF_SHOWN) return false;
+  diffOff();
+  banner('Left the diff view.');
+  return true;
 }
 
 function diffStep(d) {
@@ -3556,7 +3589,7 @@ async function openSelectedProject() {
   if (!r.ok) { banner('Could not open it: ' + (await r.json()).error); return; }
   $('#openbox').hidden = true;
   OPEN_PROJECT = null;
-  for (const k of Object.keys(FILES)) delete FILES[k];
+  forgetDocument();
   await load(false);
   AUXVER = DOC.auxver;
 }
@@ -3564,6 +3597,14 @@ async function openSelectedProject() {
 $('#openbtn').onclick = chooseProjectDirectory;
 $('#open-confirm').onclick = openSelectedProject;
 $('#open-cancel').onclick = () => { OPEN_PROJECT = null; $('#openbox').hidden = true; };
+
+// Before another document or project is opened: nothing of this one stays.
+function forgetDocument() {
+  for (const k of Object.keys(FILES)) delete FILES[k];
+  HISTORY.undo = []; HISTORY.redo = [];
+  for (const k of Object.keys(IGNORED_EXTERNAL)) delete IGNORED_EXTERNAL[k];
+  PENDING_EXTERNAL = null; $('#external').hidden = true;
+}
 
 function fillMains() {
   const sel = $('#mainsel');
@@ -3578,7 +3619,7 @@ $('#mainsel').onchange = async () => {
   const r = await fetch('/api/open', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
     body: JSON.stringify({ main: $('#mainsel').value }) });
   if (!r.ok) { banner('Could not open it: ' + (await r.json()).error); return; }
-  for (const k of Object.keys(FILES)) delete FILES[k];
+  forgetDocument();
   await load(false);
 };
 

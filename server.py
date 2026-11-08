@@ -1245,7 +1245,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 name = req.get('main', '')
                 if name not in find_mains(os.path.join(PAPER, os.path.dirname(MAIN))):
                     return self.send(400, {'error': 'not a document of this project'})
-                open_paper(os.path.join(PAPER, os.path.dirname(MAIN), name))
+                # another document of the same project: same directory for LaTeX,
+                # same settings and caches
+                open_paper(os.path.join(PAPER, os.path.dirname(MAIN), name), cwd=PAPER, state=STATE)
                 ensure_state()
                 BUILDER.aux = load_aux()
                 BUILDER.auxver += 1
