@@ -194,15 +194,18 @@ function render() {
 // two columns typing rebalances one page, not the whole paper.
 const CHARS_PER_PAGE = { IEEEtran: 6500, llncs: 2700, iacrcc: 3000, acmart: 6000, article: 3300 };
 function layoutPages(doc) {
-  const exact = DOC.pages && Object.keys(DOC.pages).length > 0;
+  // Two-column review mode flows the source naturally, rather than copying
+  // SyncTeX page breaks whose figures and columns can leave blank halves.
+  const flowing = document.body.classList.contains('two');
+  const exact = !flowing && DOC.pages && Object.keys(DOC.pages).length > 0;
   const cls = (DOC.docclass || 'article').split('/')[0];
   const twoCol = cls === 'IEEEtran' || /twocolumn/.test(DOC.docclass || '');
-  const perPage = CHARS_PER_PAGE[cls] || 3300;
+  const perPage = Math.round((CHARS_PER_PAGE[cls] || 3300) * (flowing ? 1.55 : 1));
   let page = 1, chars = 0, last = 0, box = null;
   const startPage = (n) => {
     box = el('section', 'page');
     box.dataset.page = n;
-    box.append(el('div', 'pagemark', (exact ? 'page ' : '≈ page ') + n));
+    box.append(el('div', 'pagemark', flowing ? 'review spread ' + n : (exact ? 'page ' : 'approx. page ') + n));
     doc.append(box);
   };
   for (const seg of ORDER) {
@@ -1122,8 +1125,18 @@ function caretAtStart(editable) {
 }
 
 $('#cols').onclick = () => {
+  // This handler also restores the remembered mode before the first load().
+  // No document exists yet in that case, so defer any rerender.
+  if (DOC) commit();
+  const caret = DOC ? captureEditorState() : null;
+  const y = window.scrollY;
   const two = document.body.classList.toggle('two');
   $('#cols').textContent = two ? 'One column' : 'Two columns';
+  if (DOC) {
+    render();
+    restoreEditorState(caret);
+    window.scrollTo(0, y);
+  }
   try { localStorage.setItem('cols', two ? '2' : '1'); } catch (e) { /* storage unavailable */ }
 };
 try { if (localStorage.getItem('cols') === '2') $('#cols').click(); } catch (e) { /* storage unavailable */ }
@@ -2217,7 +2230,7 @@ function closeCurrentMenu() {
   if (!$('#historybox').hidden) { $('#historybox').hidden = true; return; }
   if (!$('#palette').hidden) { closePalette(); return; }
   if (!$('#keysbox').hidden) { RECORDING = null; $('#keysbox').hidden = true; return; }
-  if (!$('#paperbox').hidden) { $('#paperbox').hidden = true; return; }
+  if (!$('#paperbox').hidden) { $('#md-close').click(); return; }
   if (!$('#figview').hidden) { closeFigure(); return; }
   if (!$('#drawer').hidden) { closeDrawer(); return; }
   if (!$('#findbar').hidden) { closeFind(); return; }
@@ -3186,7 +3199,7 @@ document.addEventListener('beforeinput', (e) => { if (DIFF.on) e.preventDefault(
 // Double-click a figure or table: its image, its text (from the typeset
 // figure), its LaTeX, and for pseudocode a structured game editor.
 
-const FV = { seg: null, src: '', tab: 'image', games: null };
+const FV = { seg: null, src: '', tab: 'image', games: null, undo: [], redo: [], lastEditor: null, dragIndex: -1 };
 const GAME_ENVS = ['gameenv', 'algorithmic'];
 const BLOCK_OPEN = new Set(['If', 'For', 'ForAll', 'While', 'Repeat', 'Loop', 'Procedure', 'Function']);
 const BLOCK_CLOSE = new Set(['EndIf', 'EndFor', 'EndWhile', 'Until', 'EndLoop', 'EndProcedure', 'EndFunction']);
@@ -3210,6 +3223,7 @@ function openFigure(seg) {
   FV.src = segSource(seg, [], null, false);   // with any caption edit made since
   FV.games = parseGames(FV.src);
   FV.tables = L.parseTabulars(FV.src);
+  FV.undo = []; FV.redo = []; FV.lastEditor = null; FV.dragIndex = -1;
   $('#fv-title').textContent = (seg.kind === 'figure' ? 'Figure ' : 'Table ') + (seg.el.querySelector('.capnum')?.textContent || '');
   $('#fv-games-tab').hidden = !FV.games.length;
   $('#fv-cells-tab').hidden = !FV.tables.length;
@@ -3219,6 +3233,7 @@ function openFigure(seg) {
 
 function showFigTab(tab) {
   FV.tab = tab;
+  updateGameActions();
   for (const b of document.querySelectorAll('.fv-tabs button')) b.classList.toggle('on', b.dataset.tab === tab);
   const body = $('#fv-body');
   body.textContent = '';
@@ -3246,6 +3261,132 @@ function showFigTab(tab) {
   }
 }
 
+// Draft-only undo history: source remains untouched until Apply, then Save.
+function updateGameActions() {
+  const editing = !!FV.seg && FV.tab === 'games';
+  for (const id of ['#fv-undo', '#fv-redo', '#fv-add-game']) $(id).hidden = !editing;
+  $('#fv-undo').disabled = !editing || !FV.undo.length;
+  $('#fv-redo').disabled = !editing || !FV.redo.length;
+  $('#fv-add-game').disabled = !editing || !FV.games.some((g) => g.kind === 'algo' && g.env === 'gameenv');
+  $('#fv-status').textContent = editing && FV.undo.length ? 'Draft changed - Apply to use edits' : '';
+}
+function gameCheckpoint(editor = null) {
+  if (editor && FV.lastEditor === editor) return;
+  const current = figureWithEdits();
+  if (FV.undo[FV.undo.length - 1] !== current) {
+    FV.undo.push(current);
+    if (FV.undo.length > 100) FV.undo.shift();
+  }
+  FV.redo = [];
+  FV.lastEditor = editor;
+  updateGameActions();
+}
+function setGameDraft(src) {
+  FV.src = src;
+  FV.games = parseGames(src);
+  FV.tables = L.parseTabulars(src);
+  FV.latexEdited = false;
+  FV.lastEditor = null;
+  showFigTab('games');
+}
+function undoGame() {
+  if (!FV.undo.length) return;
+  FV.redo.push(figureWithEdits());
+  setGameDraft(FV.undo.pop());
+}
+function redoGame() {
+  if (!FV.redo.length) return;
+  FV.undo.push(figureWithEdits());
+  setGameDraft(FV.redo.pop());
+}
+function changeGameSource(transform) {
+  const current = figureWithEdits();
+  const games = parseGames(current);
+  const next = transform(current, games);
+  if (next === current || typeof next !== 'string') return false;
+  gameCheckpoint();
+  setGameDraft(next);
+  return true;
+}
+$('#fv-undo').onclick = undoGame;
+$('#fv-redo').onclick = redoGame;
+
+function gameSpan(g) {
+  return g && Number.isInteger(g.start) && Number.isInteger(g.end) && g.end > g.start;
+}
+function gameMove(from, to) {
+  return changeGameSource((src, games) => {
+    if (from < 0 || to < 0 || from >= games.length || to >= games.length || from === to) return src;
+    const lo = Math.min(from, to), hi = Math.max(from, to);
+    const selected = games.slice(lo, hi + 1);
+    if (selected.some((g) => !gameSpan(g) || g.kind !== 'algo' || g.env !== 'gameenv')) {
+      banner('Game movement requires sibling gameenv blocks.');
+      return src;
+    }
+    const blocks = selected.map((g) => src.slice(g.start, g.end));
+    const gaps = selected.slice(1).map((g, i) => src.slice(selected[i].end, g.start));
+    if (gaps.some((x) => !/^(?:\s|%[^\n]*\n)*$/.test(x))) {
+      banner('A LaTeX layout command separates the games; source order is unchanged.');
+      return src;
+    }
+    const moved = blocks.splice(from - lo, 1)[0];
+    blocks.splice(to - lo, 0, moved);
+    let replacement = blocks[0];
+    for (let i = 0; i < gaps.length; i++) replacement += gaps[i] + blocks[i + 1];
+    return src.slice(0, selected[0].start) + replacement + src.slice(selected[selected.length - 1].end);
+  });
+}
+function gameInsert(after) {
+  return changeGameSource((src, games) => {
+    const g = games[after];
+    if (!gameSpan(g) || g.kind !== 'algo' || g.env !== 'gameenv') return src;
+    const fresh = ['\\begin{gameenv}{New game}', '  \\State $x \\gets y$', '\\end{gameenv}'].join('\n');
+    return src.slice(0, g.end) + '\n' + fresh + src.slice(g.end);
+  });
+}
+function gameDuplicate(index) {
+  return changeGameSource((src, games) => {
+    const g = games[index];
+    if (!gameSpan(g) || g.kind !== 'algo' || g.env !== 'gameenv') return src;
+    return src.slice(0, g.end) + '\n' + src.slice(g.start, g.end) + src.slice(g.end);
+  });
+}
+function gameRemove(index) {
+  if (!confirm('Delete this game block? Undo works until Apply.')) return;
+  return changeGameSource((src, games) => {
+    const g = games[index];
+    if (!gameSpan(g)) return src;
+    return src.slice(0, g.start) + src.slice(g.end);
+  });
+}
+$('#fv-add-game').onclick = () => gameInsert(FV.games.length - 1);
+
+const GAME_COLORS = {
+  none: 'No mark',
+  'yellow!20': 'Yellow (change)',
+  'cyan!20': 'Cyan (alternative)',
+  'green!20': 'Green (checked)',
+  'magenta!15': 'Magenta (important)',
+};
+function colorMarked(line) {
+  return /^\\colorbox\{(yellow!20|cyan!20|green!20|magenta!15)\}\{([\s\S]*)\}$/.exec(line.content);
+}
+function gameChangeColor(line, color) {
+  if (!line || line.raw || !Object.prototype.hasOwnProperty.call(GAME_COLORS, color)) return;
+  const match = colorMarked(line);
+  const bare = match ? match[2] : line.content;
+  if (color !== 'none' && !Object.values(FILES).some((f) =>
+    /\\usepackage(?:\[[^\]]*\])?\{[^}]*xcolor[^}]*\}/.test(f.text))) {
+    banner('Colour marking requires \\usepackage{xcolor} in the paper preamble.');
+    return;
+  }
+  const result = color === 'none' ? bare : '\\colorbox{' + color + '}{' + bare + '}';
+  if (result === line.content) return;
+  gameCheckpoint();
+  line.content = result;
+  showFigTab('games');
+}
+
 function renderGames(body) {
   const grid = el('div', 'games-grid');
   FV.games.forEach((g, gi) => {
@@ -3254,9 +3395,37 @@ function renderGames(body) {
     if (g.title !== null) {
       const t = el('span'); t.contentEditable = 'true';
       renderTokens(L.tokenize(g.title), t, {});
-      t.addEventListener('input', () => { g.newTitle = ser(t); });
+      t.addEventListener('input', () => { gameCheckpoint(t); g.newTitle = ser(t); });
+      t.addEventListener('blur', () => { FV.lastEditor = null; });
       head.append(t);
     } else head.append(el('span', 'small', g.kind === 'proc' ? 'procedure' : g.env));
+    const actions = el('span', 'game-actions');
+    const handle = el('span', 'game-drag', 'Drag');
+    handle.title = 'Drag a game onto another panel to move it; unsafe LaTeX boundaries block moving';
+    handle.draggable = true;
+    handle.addEventListener('dragstart', (e) => {
+      FV.dragIndex = gi;
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', String(gi));
+    });
+    handle.addEventListener('dragend', () => { FV.dragIndex = -1; });
+    const action = (label, title, fn) => {
+      const b = el('button', '', label); b.type = 'button'; b.title = title;
+      b.onclick = fn; actions.append(b); return b;
+    };
+    action('Left', 'Move game to previous position if source is a safe sibling', () => gameMove(gi, gi - 1)).disabled = gi === 0;
+    action('Right', 'Move game to next position if source is a safe sibling', () => gameMove(gi, gi + 1)).disabled = gi === FV.games.length - 1;
+    action('Copy', 'Duplicate this game block', () => gameDuplicate(gi)).disabled = g.kind !== 'algo' || g.env !== 'gameenv';
+    action('Delete', 'Remove this game block', () => gameRemove(gi));
+    actions.append(handle);
+    head.append(actions);
+    box.addEventListener('dragover', (e) => { if (FV.dragIndex >= 0) e.preventDefault(); });
+    box.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const from = FV.dragIndex;
+      FV.dragIndex = -1;
+      if (from >= 0) gameMove(from, gi);
+    });
     box.append(head);
     let depth = 0;
     g.lines.forEach((l, li) => {
@@ -3268,12 +3437,34 @@ function renderGames(body) {
     grid.append(box);
   });
   body.append(grid);
-  body.append(el('p', 'small', 'Edit a line in place; ＋ adds a statement below, ⊕ an if-block, ✕ deletes. ' +
-    'Lines you do not touch are kept exactly. Apply, then save, to write the file; the image updates after the build.'));
+  body.append(el('p', 'small', 'Add: insert common statements, conditions and loops. Up/Down or Alt+Up/Down: reorder safe statements. ' +
+    'Mark: coloured xcolor boxes. Ctrl+Z/Ctrl+Shift+Z: undo/redo; Ctrl+Enter: Apply; Ctrl+S: Apply and Save. ' +
+    'Drag game headers to reorder compatible sibling gameenv blocks. Changes are not written until Apply, then Save.'));
+}
+
+function gameMoveLine(g, index, offset) {
+  const line = g.lines[index];
+  let otherIndex = index + offset;
+  while (g.lines[otherIndex] && g.lines[otherIndex].raw && !g.lines[otherIndex].prefix.trim())
+    otherIndex += offset;
+  const other = g.lines[otherIndex];
+  if (!line || !other || line.raw || other.raw ||
+      BLOCK_OPEN.has(line.cmd) || BLOCK_CLOSE.has(line.cmd) ||
+      BLOCK_OPEN.has(other.cmd) || BLOCK_CLOSE.has(other.cmd) ||
+      ['Else', 'ElsIf'].includes(line.cmd) || ['Else', 'ElsIf'].includes(other.cmd)) {
+    banner('Only ordinary statements can move without breaking control-flow blocks.');
+    return false;
+  }
+  gameCheckpoint();
+  const [moved] = g.lines.splice(index, 1);
+  g.lines.splice(otherIndex, 0, moved);
+  showFigTab('games');
+  return true;
 }
 
 function algoLine(g, l, li, depth) {
   const row = el('div', 'gline');
+  row.dataset.game = String(FV.games.indexOf(g)); row.dataset.line = String(li);
   row.append(el('span', 'gno', String(li + 1)));
   const pad = el('span'); pad.style.width = (depth * 1.4) + 'em'; pad.style.flex = 'none';
   row.append(pad);
@@ -3282,8 +3473,19 @@ function algoLine(g, l, li, depth) {
   } else {
     if (KW[l.kind]) row.append(el('span', 'gkw', KW[l.kind]));
     const t = el('span', 'gtext'); t.contentEditable = 'true';
-    renderTokens(L.tokenize(l.content), t, {});
-    t.addEventListener('input', () => { l.content = ser(t); row.classList.add('edited'); });
+    const existingMark = colorMarked(l);
+    if (existingMark) {
+      row.classList.add('game-marked');
+      row.dataset.mark = existingMark[1];
+      renderTokens(L.tokenize(existingMark[2]), t, {});
+    } else renderTokens(L.tokenize(l.content), t, {});
+    t.addEventListener('input', () => {
+      gameCheckpoint(t);
+      const newText = ser(t);
+      l.content = existingMark ? '\\colorbox{' + existingMark[1] + '}{' + newText + '}' : newText;
+      row.classList.add('edited');
+    });
+    t.addEventListener('blur', () => { FV.lastEditor = null; });
     row.append(t);
     if (/\\Comment/.test(l.suffix)) {
       const c = /\\Comment\s*\{([^]*)\}/.exec(l.suffix);
@@ -3291,16 +3493,46 @@ function algoLine(g, l, li, depth) {
     }
   }
   const tools = el('span', 'gtools');
-  const indentOf = (x) => /^\s*/.exec(x.prefix)[0];
-  const add = (lines) => { g.lines.splice(li + 1, 0, ...lines.map(parseGameLine)); showFigTab('games'); };
-  const inner = indentOf(l) + (BLOCK_OPEN.has(l.cmd) || l.cmd === 'Else' || l.cmd === 'ElsIf' ? '  ' : '');
-  const b1 = el('button', '', '+'); b1.title = 'Add a statement below';
-  b1.onclick = () => add([inner + '\\State $x \\gets y$']);
-  const b2 = el('button', '', '+ if'); b2.title = 'Add an if-block below';
-  b2.onclick = () => add([inner + '\\If{$c$}', inner + '  \\State $x \\gets y$', inner + '\\EndIf']);
-  const b3 = el('button', '', 'Delete'); b3.title = 'Delete this line';
-  b3.onclick = () => { g.lines.splice(li, 1); showFigTab('games'); };
-  tools.append(b1, b2, b3);
+  const indent = /^\s*/.exec(l.prefix)[0];
+  const inner = indent + (BLOCK_OPEN.has(l.cmd) || l.cmd === 'Else' || l.cmd === 'ElsIf' ? '  ' : '');
+  const choices = {
+    State: [inner + '\\State $x \\gets y$'],
+    If: [inner + '\\If{$c$}', inner + '  \\State $x \\gets y$', inner + '\\EndIf'],
+    While: [inner + '\\While{$c$}', inner + '  \\State $x \\gets y$', inner + '\\EndWhile'],
+    For: [inner + '\\For{$i=0$ to $n$}', inner + '  \\State $x \\gets y$', inner + '\\EndFor'],
+    Repeat: [inner + '\\Repeat', inner + '  \\State $x \\gets y$', inner + '\\Until{$c$}'],
+    Else: [inner + '\\Else', inner + '  \\State $x \\gets y$'],
+    Return: [inner + '\\State \\Return $x$'],
+    Comment: [inner + '\\State \\Comment{explain the change}'],
+    Assert: [inner + '\\State \\textbf{assert} $P$'],
+  };
+  const addChoice = el('select', 'g-insert');
+  addChoice.title = 'Choose a statement or control-flow block to insert after this line';
+  for (const label of Object.keys(choices)) {
+    const option = el('option', '', label); option.value = label; addChoice.append(option);
+  }
+  const add = el('button', '', '+ Add');
+  add.title = 'Insert the selected command after this line';
+  add.onclick = () => {
+    gameCheckpoint();
+    g.lines.splice(li + 1, 0, ...choices[addChoice.value].map(parseGameLine));
+    showFigTab('games');
+  };
+  const up = el('button', '', 'Up'); up.title = 'Move one ordinary statement up';
+  up.disabled = li === 0; up.onclick = () => gameMoveLine(g, li, -1);
+  const down = el('button', '', 'Down'); down.title = 'Move one ordinary statement down';
+  down.disabled = li === g.lines.length - 1; down.onclick = () => gameMoveLine(g, li, 1);
+  const mark = el('select', 'g-mark');
+  mark.title = 'Wrap this line in a reversible coloured LaTeX box (xcolor required)';
+  for (const [color, label] of Object.entries(GAME_COLORS)) {
+    const option = el('option', '', label); option.value = color; mark.append(option);
+  }
+  mark.value = colorMarked(l) ? colorMarked(l)[1] : 'none';
+  mark.disabled = l.raw;
+  mark.onchange = () => gameChangeColor(l, mark.value);
+  const del = el('button', '', 'Delete'); del.title = 'Delete this line; Undo restores it';
+  del.onclick = () => { gameCheckpoint(); g.lines.splice(li, 1); showFigTab('games'); };
+  tools.append(addChoice, add, up, down, mark, del);
   row.append(tools);
   return row;
 }
@@ -3314,11 +3546,12 @@ function procLine(g, l, li) {
     try { katex.render(l.content.replace(/\\\\\s*$/, ''), prev, { throwOnError: false, macros: { ...katexMacros(), ...CRYPTOCODE_MACROS } }); }
     catch (e) { prev.textContent = l.content; }
   };
-  ta.oninput = () => { l.content = ta.value; show(); };
+  ta.oninput = () => { gameCheckpoint(ta); l.content = ta.value; show(); };
+  ta.onblur = () => { FV.lastEditor = null; };
   show();
   const tools = el('div', 'gtools'); tools.style.opacity = 1;
-  const b1 = el('button', '', '+ line'); b1.onclick = () => { g.lines.splice(li + 1, 0, { prefix: '', content: '', suffix: l.suffix || ' \\\\\n' }); if (!l.suffix) l.suffix = ' \\\\\n'; showFigTab('games'); };
-  const b3 = el('button', '', 'Delete'); b3.onclick = () => { g.lines.splice(li, 1); showFigTab('games'); };
+  const b1 = el('button', '', '+ line'); b1.onclick = () => { gameCheckpoint(); g.lines.splice(li + 1, 0, { prefix: '', content: '', suffix: l.suffix || ' \\\\\n' }); if (!l.suffix) l.suffix = ' \\\\\n'; showFigTab('games'); };
+  const b3 = el('button', '', 'Delete'); b3.onclick = () => { gameCheckpoint(); g.lines.splice(li, 1); showFigTab('games'); };
   tools.append(b1, b3);
   row.append(ta, prev, tools);
   return row;
@@ -3413,21 +3646,53 @@ function applyFigure() {
   if (seg.edit && seg.parts.caption !== undefined) { seg.edit.textContent = ''; renderTokens(L.tokenize(seg.parts.caption), seg.edit, {}); }
   markEdited();
   banner('Figure updated; save to write the file. The image updates after the build.');
-  closeFigure();
+  closeFigure(true);
 }
 
-function closeFigure() { $('#figview').hidden = true; FV.seg = null; FV.latexEdited = false; }
+function closeFigure(force = false) {
+  if (!FV.seg) return;
+  if (!force && figureWithEdits() !== FV.src &&
+      !confirm('Discard pending figure/game changes? Undo and redo here will be lost.')) return;
+  $('#figview').hidden = true;
+  FV.seg = null; FV.latexEdited = false; FV.lastEditor = null;
+}
 
 for (const b of document.querySelectorAll('.fv-tabs button')) b.onclick = () => showFigTab(b.dataset.tab);
+document.addEventListener('keydown', (e) => {
+  if ($('#figview').hidden || FV.tab !== 'games' || !e.altKey || e.ctrlKey || e.metaKey) return;
+  if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+  const row = e.target.closest('.gline');
+  if (!row || !e.target.closest('.gtext')) return;
+  const game = FV.games[+row.dataset.game];
+  if (!game) return;
+  e.preventDefault(); e.stopPropagation();
+  gameMoveLine(game, +row.dataset.line, e.key === 'ArrowUp' ? -1 : 1);
+}, true);
+
 $('#fv-apply').onclick = applyFigure;
-$('#fv-close').onclick = closeFigure;
+$('#fv-close').onclick = () => closeFigure();
+// While editing a figure, Ctrl+S applies its draft before saving the paper.
+// Ctrl+Z/Y in Games operates on game drafts, not the document history.
+document.addEventListener('keydown', (e) => {
+  if ($('#figview').hidden || !(e.ctrlKey || e.metaKey) || e.altKey) return;
+  const key = e.key.toLowerCase();
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault(); e.stopPropagation(); applyFigure();
+  } else if (FV.tab === 'games' && (key === 'z' || key === 'y')) {
+    e.preventDefault(); e.stopPropagation();
+    if (key === 'y' || e.shiftKey) redoGame(); else undoGame();
+  } else if (key === 's') {
+    e.preventDefault(); e.stopPropagation();
+    applyFigure(); save();
+  }
+}, true);
 doc.addEventListener('dblclick', (e) => {
   const box = e.target.closest('.seg.figure, .seg.table');
   if (!box || e.target.closest('.caption')) return;
   e.preventDefault();
   openFigure(box.seg);
 });
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#figview').hidden) closeFigure(); });
+// The global Escape handler closes the viewer, with one confirmation if dirty.
 {
   const q = new URLSearchParams(location.search);
   if (q.has('gametest')) {

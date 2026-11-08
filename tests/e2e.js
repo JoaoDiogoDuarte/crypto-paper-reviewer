@@ -830,6 +830,38 @@ Object.assign(TESTS, {
     onlyChange(env, 'main.tex', 'lazy dog.', 'lazy dog saved.');
   },
 
+  async 'layout: remembered two-column mode opens in a fresh tab'(env, page) {
+    await page.click('#cols');
+    const fresh = await env.openPage(CHROME);
+    eq(await fresh.eval('document.body.classList.contains("two")'), true, 'two-column preference restored');
+    eq(await fresh.eval('ORDER.length > 0'), true, 'document loads with stored two-column mode');
+    await fresh.click('#cols');
+    untouched(env, 'main.tex', 'sections/body.tex');
+  },
+
+  async 'layout: table preview cannot overflow a narrow review column'(env, page) {
+    await page.click('#cols');
+    eq(await page.eval('document.body.classList.contains("two")'), true, 'two columns active');
+    const bounds = await page.eval('(async () => {' +
+      ' const host = document.querySelector("#doc .page");' +
+      ' const box = document.createElement("div"); box.className = "seg table";' +
+      ' const inner = document.createElement("div"); const img = document.createElement("img");' +
+      ' img.setAttribute("width", "2400"); img.setAttribute("height", "600");' +
+      ' img.src = "data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%222400%22 height=%22600%22/%3E";' +
+      ' inner.append(img); box.append(inner); host.append(box);' +
+      ' await img.decode(); await new Promise(requestAnimationFrame);' +
+      ' const outer = box.getBoundingClientRect().width;' +
+      ' const width = img.getBoundingClientRect().width;' +
+      ' const label = host.querySelector(".pagemark").textContent;' +
+      ' const columns = getComputedStyle(host).columnCount;' +
+      ' box.remove(); return { outer, width, label, columns }; })()');
+    eq(bounds.columns, '2', 'CSS columns applied');
+    has(bounds.label, 'review spread', 'two-column view uses reading-flow spreads');
+    eq(bounds.width > 0 && bounds.width <= bounds.outer + 2, true, 'large raster scales inside the column: ' + JSON.stringify(bounds));
+    await page.click('#cols');
+    untouched(env, 'main.tex', 'sections/body.tex');
+  },
+
   async 'two columns, then editing and saving still work'(env, page) {
     await page.click('#cols');
     eq(await page.eval(`document.body.classList.contains('two')`), true, 'two columns');
@@ -1282,6 +1314,41 @@ Object.assign(TESTS, {
     await page.waitFor(`$('#figview').hidden`);
     await page.save();
     untouched(env, 'main.tex');
+  },
+
+  async 'game editor: loops colours undo and game blocks'(env, page) {
+    await page.click("js:ORDER.find((s) => s.kind === 'figure').el.querySelector('div.small, img')", { count: 2 });
+    await page.waitFor(visible('#figview'));
+    const src = ['\\begin{figure}', '\\begin{gameenv}{Game A}', '  \\State $x \\gets y$',
+      '\\end{gameenv}', '\\begin{gameenv}{Game B}', '  \\State $z \\gets w$',
+      '\\end{gameenv}', '\\end{figure}'].join('\n');
+    const state = await page.eval('(() => { const src = ' + JSON.stringify(src) +
+      '; FV.src = src; FV.games = parseGames(src); FV.tables = L.parseTabulars(src);' +
+      ' showFigTab("games"); return { count: FV.games.length, spans: FV.games.map((g) => [g.start, g.end]) }; })()');
+    eq(state.count, 2, 'both gameenv blocks parsed');
+    eq(state.spans.every(([a, b]) => b > a), true, 'whole game spans available');
+    await page.eval('(() => { const menu = document.querySelector("#fv-body .g-insert");' +
+      ' menu.value = "While"; menu.parentElement.querySelector("button").click(); })()');
+    has(await page.eval('figureWithEdits()'), '\\While{$c$}', 'inserted while block');
+    has(await page.eval('figureWithEdits()'), '\\EndWhile', 'while loop has an end');
+    await page.click('#fv-undo');
+    eq(await page.eval('figureWithEdits()'), src, 'undo restores exact source');
+    await page.click('#fv-redo');
+    has(await page.eval('figureWithEdits()'), '\\While{$c$}', 'redo restores while block');
+    await page.eval('(() => { FILES[DOC.main].text += String.fromCharCode(92) + "usepackage{xcolor}";' +
+      ' const menu = document.querySelector("#fv-body select.g-mark:not(:disabled)");' +
+      ' menu.value = "yellow!20"; menu.dispatchEvent(new Event("change")); })()');
+    has(await page.eval('figureWithEdits()'), '\\colorbox{yellow!20}', 'colour mark emits LaTeX');
+    await page.eval('gameMove(0, 1)');
+    eq(await page.eval('FV.games[0].title'), 'Game B', 'game blocks were reordered');
+    await page.click('#fv-undo');
+    eq(await page.eval('FV.games[0].title'), 'Game A', 'reorder can be undone');
+    await page.click('#fv-add-game');
+    eq(await page.eval('FV.games.length'), 3, 'game created');
+    await page.click('#fv-undo');
+    eq(await page.eval('FV.games.length'), 2, 'creation undone');
+    await page.click('#fv-close');
+    untouched(env, 'main.tex', 'sections/body.tex');
   },
 
   // ---- combinations
