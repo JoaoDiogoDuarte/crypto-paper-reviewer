@@ -1,0 +1,39 @@
+\documentclass[twocolumn]{article}
+\usepackage{amsmath,amssymb,tikz}
+\usepackage[n,advantage,operators,sets,adversary,landau,probability,notions,logic,ff,mm,primitives,events,complexity,asymptotics,keys]{cryptocode}
+\usepackage{cleveref}
+\begin{document}
+\section{Games in cryptocode}\label{sec:cc}
+\Cref{fig:cc} shows two games side by side; \cref{fig:tikz} is a picture.
+
+\begin{figure*}[t]
+\centering
+\procedure[linenumbering]{$\mathsf{IND}^{\adv}(n)$}{
+  b \sample \bin \\
+  (k) \sample \kgen(n) \\
+  b' \sample \adv(\pk) \\
+  \pcreturn b = b'
+}
+\hfill
+\procedure{$\mathsf{Oracle}(m)$}{
+  c \gets \enc(k, m) \\
+  \pcreturn c
+}
+\caption{Two cryptocode procedures, spanning both columns.}\label{fig:cc}
+\end{figure*}
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+  \node[draw,circle] (a) {$v_1$};
+  \node[draw,circle,right=of a] (b) {$v_2$};
+  \draw[->] (a) -- (b) node[midway,above] {swap};
+\end{tikzpicture}
+\caption{A TikZ picture with maths $v_1\to v_2$.}\label{fig:tikz}
+\end{figure}
+
+A long paragraph to fill the first column. Sentence number 1 talks about imaginary games and their hops. Sentence number 2 talks about imaginary games and their hops. Sentence number 3 talks about imaginary games and their hops. Sentence number 4 talks about imaginary games and their hops. Sentence number 5 talks about imaginary games and their hops. Sentence number 6 talks about imaginary games and their hops. Sentence number 7 talks about imaginary games and their hops. Sentence number 8 talks about imaginary games and their hops. Sentence number 9 talks about imaginary games and their hops. Sentence number 10 talks about imaginary games and their hops. Sentence number 11 talks about imaginary games and their hops. Sentence number 12 talks about imaginary games and their hops. Sentence number 13 talks about imaginary games and their hops. Sentence number 14 talks about imaginary games and their hops. Sentence number 15 talks about imaginary games and their hops. Sentence number 16 talks about imaginary games and their hops. Sentence number 17 talks about imaginary games and their hops. Sentence number 18 talks about imaginary games and their hops. Sentence number 19 talks about imaginary games and their hops. Sentence number 20 talks about imaginary games and their hops. Sentence number 21 talks about imaginary games and their hops. Sentence number 22 talks about imaginary games and their hops. Sentence number 23 talks about imaginary games and their hops. Sentence number 24 talks about imaginary games and their hops. Sentence number 25 talks about imaginary games and their hops. Sentence number 26 talks about imaginary games and their hops. Sentence number 27 talks about imaginary games and their hops. Sentence number 28 talks about imaginary games and their hops. Sentence number 29 talks about imaginary games and their hops. Sentence number 30 talks about imaginary games and their hops. Sentence number 31 talks about imaginary games and their hops. Sentence number 32 talks about imaginary games and their hops. Sentence number 33 talks about imaginary games and their hops. Sentence number 34 talks about imaginary games and their hops. Sentence number 35 talks about imaginary games and their hops. Sentence number 36 talks about imaginary games and their hops. Sentence number 37 talks about imaginary games and their hops. Sentence number 38 talks about imaginary games and their hops. Sentence number 39 talks about imaginary games and their hops. Sentence number 40 talks about imaginary games and their hops. Sentence number 41 talks about imaginary games and their hops. Sentence number 42 talks about imaginary games and their hops. Sentence number 43 talks about imaginary games and their hops. Sentence number 44 talks about imaginary games and their hops. Sentence number 45 talks about imaginary games and their hops. Sentence number 46 talks about imaginary games and their hops. Sentence number 47 talks about imaginary games and their hops. Sentence number 48 talks about imaginary games and their hops. Sentence number 49 talks about imaginary games and their hops. Sentence number 50 talks about imaginary games and their hops. Sentence number 51 talks about imaginary games and their hops. Sentence number 52 talks about imaginary games and their hops. Sentence number 53 talks about imaginary games and their hops. Sentence number 54 talks about imaginary games and their hops. Sentence number 55 talks about imaginary games and their hops. Sentence number 56 talks about imaginary games and their hops. Sentence number 57 talks about imaginary games and their hops. Sentence number 58 talks about imaginary games and their hops. Sentence number 59 talks about imaginary games and their hops.
+
+\section{More}
+Another paragraph after the figures, with $\pcreturn$ in maths.
+\end{document}

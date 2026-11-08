@@ -1,0 +1,10 @@
+\documentclass{article}
+\usepackage{amsmath,subfiles}
+\input{../shared/macros}
+\begin{document}
+\section{Top}
+The shared macro $\Shared$ is defined one directory up.
+\input{chapters/one}
+\include{appendix}
+\subfile{parts/subpart}
+\end{document}

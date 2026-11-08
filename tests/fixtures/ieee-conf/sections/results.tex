@@ -1,0 +1,34 @@
+\section{Results}\label{sec:results}
+
+\begin{theorem}[Main]\label{thm:main}
+For every $\Adv$ making $\qq$ queries, $\Pr[\G{0}^{\Adv}=1]\le \qq^2/2^n$.
+\end{theorem}
+\begin{proof}
+Combine \cref{lem:one} with \eqref{eq:hop}.
+\end{proof}
+
+\begin{table}[t]
+\caption{Bounds, with a \textbf{bold} word and $\qq$ in the caption.}\label{tab:bounds}
+\centering
+\begin{tabular}{@{}lcr@{}}
+\toprule
+Setting & Bound & Tight? \\
+\midrule
+Classical & $\qq/N$ & yes \\
+Quantum & $\qq^2/N$ & \multicolumn{1}{c}{no} \\
+\multirow{2}{*}{Both} & $2\qq/N$ & \\
+ & $3\qq/N$ & maybe \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{corollary}
+The bound of \cref{thm:main} is tight; see \cref{tab:bounds,fig:games}.
+\end{corollary}
+
+\subsection{A subsection with $\mathsf{math}$}\label{sec:sub}
+Text with a displayed formula
+\[
+  \sum_{i=1}^{\qq} \frac{i}{2^n} \le \frac{\qq^2}{2^n}
+\]
+and more text after it, then a line break\\ and a new line.
