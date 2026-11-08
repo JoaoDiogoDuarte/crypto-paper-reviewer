@@ -859,6 +859,11 @@ Object.assign(TESTS, {
     }
     await page.key('r', { alt: true }); await page.key('p', { alt: true }); await page.key('s', { alt: true });
     await page.key('ArrowRight', { ctrl: true, alt: true }); await page.key('ArrowLeft', { ctrl: true, alt: true });
+    await page.key('s', { alt: true });
+    await sleep(300);
+    eq(await unsaved(page), 0, 'reading edits nothing');
+  },
+
   async 'render: tabular preview keeps LaTeX source'(env, page) {
     const src = String.raw`\begin{tabular}{lr} A&B\\ C&D\end{tabular}`;
     const result = await page.eval(`(() => {
@@ -875,11 +880,6 @@ Object.assign(TESTS, {
     eq(result.html, true, 'standalone tabular is not raw LaTeX');
     eq(result.source, src, 'tabular source is preserved');
     untouched(env, 'main.tex', 'sections/body.tex');
-  },
-
-    await page.key('s', { alt: true });
-    await sleep(300);
-    eq(await unsaved(page), 0, 'reading edits nothing');
   },
 
   async 'Keys dialog: a new shortcut works, is saved in the config, and the old one stops'(env, page) {
