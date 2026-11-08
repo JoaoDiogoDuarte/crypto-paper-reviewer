@@ -24,6 +24,9 @@ jobs:
           node --check tests/e2e.js
       - name: Backend tests
         run: python -m unittest tests.backend_test tests.test_convert_contract
+      - name: LaTeX serialization torture (seeded)
+        run: node tests/torture.js --seeds=1,7,42 --cases=120
+
       - name: Browser review smoke tests
         run: |
           command -v google-chrome || command -v chromium || command -v chromium-browser
