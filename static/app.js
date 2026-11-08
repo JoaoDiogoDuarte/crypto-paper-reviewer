@@ -2226,7 +2226,7 @@ function closeCurrentMenu() {
   if (!$('#historybox').hidden) { $('#historybox').hidden = true; return; }
   if (!$('#palette').hidden) { closePalette(); return; }
   if (!$('#keysbox').hidden) { RECORDING = null; $('#keysbox').hidden = true; return; }
-  if (!$('#paperbox').hidden) { $('#paperbox').hidden = true; return; }
+  if (!$('#paperbox').hidden) { $('#md-close').click(); return; }
   if (!$('#figview').hidden) { closeFigure(); return; }
   if (!$('#drawer').hidden) { closeDrawer(); return; }
   if (!$('#findbar').hidden) { closeFind(); return; }
@@ -3437,8 +3437,29 @@ function renderGames(body) {
     'Apply, then Save, to write LaTeX and rebuild its image.'));
 }
 
+function gameMoveLine(g, index, offset) {
+  const line = g.lines[index];
+  let otherIndex = index + offset;
+  while (g.lines[otherIndex] && g.lines[otherIndex].raw && !g.lines[otherIndex].prefix.trim())
+    otherIndex += offset;
+  const other = g.lines[otherIndex];
+  if (!line || !other || line.raw || other.raw ||
+      BLOCK_OPEN.has(line.cmd) || BLOCK_CLOSE.has(line.cmd) ||
+      BLOCK_OPEN.has(other.cmd) || BLOCK_CLOSE.has(other.cmd) ||
+      ['Else', 'ElsIf'].includes(line.cmd) || ['Else', 'ElsIf'].includes(other.cmd)) {
+    banner('Only ordinary statements can move without breaking control-flow blocks.');
+    return false;
+  }
+  gameCheckpoint();
+  const [moved] = g.lines.splice(index, 1);
+  g.lines.splice(otherIndex, 0, moved);
+  showFigTab('games');
+  return true;
+}
+
 function algoLine(g, l, li, depth) {
   const row = el('div', 'gline');
+  row.dataset.game = String(FV.games.indexOf(g)); row.dataset.line = String(li);
   row.append(el('span', 'gno', String(li + 1)));
   const pad = el('span'); pad.style.width = (depth * 1.4) + 'em'; pad.style.flex = 'none';
   row.append(pad);
@@ -3492,20 +3513,10 @@ function algoLine(g, l, li, depth) {
     g.lines.splice(li + 1, 0, ...choices[addChoice.value].map(parseGameLine));
     showFigTab('games');
   };
-  const moveLine = (offset) => {
-    const other = g.lines[li + offset];
-    if (!other || l.raw || other.raw || BLOCK_OPEN.has(l.cmd) || BLOCK_CLOSE.has(l.cmd) ||
-        BLOCK_OPEN.has(other.cmd) || BLOCK_CLOSE.has(other.cmd) ||
-        ['Else', 'ElsIf'].includes(l.cmd) || ['Else', 'ElsIf'].includes(other.cmd)) return;
-    gameCheckpoint();
-    const [line] = g.lines.splice(li, 1);
-    g.lines.splice(li + offset, 0, line);
-    showFigTab('games');
-  };
   const up = el('button', '', 'Up'); up.title = 'Move one ordinary statement up';
-  up.disabled = li === 0; up.onclick = () => moveLine(-1);
+  up.disabled = li === 0; up.onclick = () => gameMoveLine(g, li, -1);
   const down = el('button', '', 'Down'); down.title = 'Move one ordinary statement down';
-  down.disabled = li === g.lines.length - 1; down.onclick = () => moveLine(1);
+  down.disabled = li === g.lines.length - 1; down.onclick = () => gameMoveLine(g, li, 1);
   const mark = el('select', 'g-mark');
   mark.title = 'Wrap this line in a reversible coloured LaTeX box (xcolor required)';
   for (const [color, label] of Object.entries(GAME_COLORS)) {
@@ -3642,6 +3653,17 @@ function closeFigure(force = false) {
 }
 
 for (const b of document.querySelectorAll('.fv-tabs button')) b.onclick = () => showFigTab(b.dataset.tab);
+document.addEventListener('keydown', (e) => {
+  if ($('#figview').hidden || FV.tab !== 'games' || !e.altKey || e.ctrlKey || e.metaKey) return;
+  if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+  const row = e.target.closest('.gline');
+  if (!row || !e.target.closest('.gtext')) return;
+  const game = FV.games[+row.dataset.game];
+  if (!game) return;
+  e.preventDefault(); e.stopPropagation();
+  gameMoveLine(game, +row.dataset.line, e.key === 'ArrowUp' ? -1 : 1);
+}, true);
+
 $('#fv-apply').onclick = applyFigure;
 $('#fv-close').onclick = () => closeFigure();
 // While editing a figure, Ctrl+S applies its draft before saving the paper.
@@ -3649,7 +3671,9 @@ $('#fv-close').onclick = () => closeFigure();
 document.addEventListener('keydown', (e) => {
   if ($('#figview').hidden || !(e.ctrlKey || e.metaKey) || e.altKey) return;
   const key = e.key.toLowerCase();
-  if (FV.tab === 'games' && (key === 'z' || key === 'y')) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault(); e.stopPropagation(); applyFigure();
+  } else if (FV.tab === 'games' && (key === 'z' || key === 'y')) {
     e.preventDefault(); e.stopPropagation();
     if (key === 'y' || e.shiftKey) redoGame(); else undoGame();
   } else if (key === 's') {
@@ -3663,7 +3687,7 @@ doc.addEventListener('dblclick', (e) => {
   e.preventDefault();
   openFigure(box.seg);
 });
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#figview').hidden) closeFigure(); });
+// The global Escape handler closes the viewer, with one confirmation if dirty.
 {
   const q = new URLSearchParams(location.search);
   if (q.has('gametest')) {
