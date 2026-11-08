@@ -197,7 +197,7 @@ More intensive runs:
     node tests/e2e.js
 
 The parser fuzzer generates valid and incomplete LaTeX and checks exact
-token/segment/DOM round-trips, including accents, equations, tables and
+token and segment round-trips, including accents, equations, tables and
 games. A failure prints the seed, case and reproducing source. The metadata
 fuzzer generates seven kinds of front matter and verifies titles, authors,
 affiliations, keywords, abstract, running title and acknowledgements.
