@@ -16,14 +16,15 @@ jobs:
         with:
           node-version: '22'
       - name: Compile Python
-        run: python -m py_compile server.py convert.py tests/backend_test.py tests/test_convert_contract.py
+        run: python -m py_compile server.py convert.py tests/backend_test.py tests/test_convert_contract.py tests/torture_conversion.py
       - name: Parse JavaScript
         run: |
           node --check static/app.js
           node --check static/latex.js
           node --check tests/e2e.js
+          node --check tests/torture.js
       - name: Backend tests
-        run: python -m unittest tests.backend_test tests.test_convert_contract
+        run: python -m unittest tests.backend_test tests.test_convert_contract tests.torture_conversion
       - name: LaTeX serialization torture (seeded)
         run: node tests/torture.js --seeds=1,7,42 --cases=120
 
