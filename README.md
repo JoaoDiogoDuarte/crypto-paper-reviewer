@@ -11,6 +11,14 @@ A local reading editor for a LaTeX paper: the paper rendered as text with
 typeset maths, edited in place, read aloud, and saved back to the `.tex`
 sources, with the PDF rebuilt after each save.
 
+![The editor on the ieee-conf test fixture, light theme](docs/screenshots/editor-light.png)
+
+<details><summary>Dark theme</summary>
+
+![The editor on the ieee-conf test fixture, dark theme](docs/screenshots/editor-dark.png)
+
+</details>
+
 The **Open…** button can choose a paper directory through the operating
 system's folder picker and then lets you select which detected document is the
 main file. The same project can contain several main documents.
@@ -208,11 +216,16 @@ preflight, root/subdirectory output and overwrites. Browser fuzzing simulates
 editing, undo, save conflicts and outside changes, printing the seed and
 operation trace on a failure.
 
-GitHub Actions > Torture tests (scheduled and manual) > Run workflow starts
-the deep suite on demand. It also runs weekly (Sunday, 03:17 UTC), records
-reproducible logs for 14 days and installs TeX to attempt real named and
-anonymous IEEEtran/LNCS/article PDF conversions. The faster PR checks do not
-claim to validate every venue PDF. Some less-common proprietary venue classes
+CI has two workflows. **CI** (`smoke.yml`) is the fast gate on every PR and
+push to main: syntax checks, backend and conversion tests, seeded LaTeX
+round-trips and a browser smoke subset, in a few minutes; a newer push to a
+PR cancels the older run. **Deep torture** (`torture.yml`) runs weekly
+(Sunday, 03:17 UTC) and from Actions > Deep torture > Run workflow; it is not
+triggered by pushes, so run it by hand before merging risky harness or
+fixture changes. It runs every campaign even when one fails, keeps logs for
+14 days and installs TeX to attempt real named and anonymous
+IEEEtran/LNCS/article PDF conversions. The fast gate does not claim to
+validate every venue PDF. Some less-common proprietary venue classes
 must be installed separately; failures and omissions are reported explicitly.
 
 ## Conversion between venues
