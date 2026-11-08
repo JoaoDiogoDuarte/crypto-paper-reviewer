@@ -1321,6 +1321,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
             n = int(self.headers.get('Content-Length', 0))
             BUILDER.log('page: ' + self.rfile.read(n).decode(errors='replace')[:200000])
             return self.send(200, {})
+        if urllib.parse.urlparse(self.path).path == '/api/history/delete':
+            req = self.json_body()
+            if not isinstance(req, dict):
+                return self.send(400, {'error': 'expected an object'})
+            if req.get('all') is True and 'batch' not in req:
+                batch = None
+            elif isinstance(req.get('batch'), str) and 0 < len(req['batch']) <= 40 and not req.get('all'):
+                batch = req['batch']
+            else:
+                return self.send(400, {'error': 'specify all:true or an existing save batch'})
+            try:
+                removed = history_delete(batch)
+            except OSError as e:
+                return self.send(500, {'error': str(e)})
+            BUILDER.log(f'history: deleted {removed} snapshot(s)')
+            return self.send(200, {'removed': removed, 'saves': history_list()})
         if urllib.parse.urlparse(self.path).path == '/api/metadata':
             md = self.json_body()
             if not isinstance(md, dict):
@@ -1626,6 +1642,34 @@ def history_record(batch, name, before, after):
             for b in os.listdir(d):
                 if b not in used:
                     os.unlink(os.path.join(d, b))
+
+
+def history_delete(batch=None):
+    """Discard a save batch, or all save snapshots; never touches paper files.
+
+    Retained content blobs are garbage-collected after the log is updated.
+    Serialize with history_record so a concurrent save cannot be lost.
+    """
+    with _history_lock:
+        entries = history_entries()
+        keep = [e for e in entries if e['batch'] != batch] if batch is not None else []
+        removed = len(entries) - len(keep)
+        if not removed:
+            return 0
+        directory = history_dir()
+        os.makedirs(directory, exist_ok=True)
+        log = os.path.join(directory, 'log.jsonl')
+        tmp = log + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as out:
+            out.writelines(json.dumps(e) + '\n' for e in keep)
+        os.replace(tmp, log)
+        used = {e['before'] for e in keep} | {e['after'] for e in keep}
+        blobs = os.path.join(directory, 'blobs')
+        if os.path.isdir(blobs):
+            for name in os.listdir(blobs):
+                if name not in used and re.fullmatch(r'[0-9a-f]{40}', name):
+                    os.unlink(os.path.join(blobs, name))
+        return removed
 
 
 def history_list(limit=300):
