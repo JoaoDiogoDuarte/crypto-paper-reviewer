@@ -105,6 +105,12 @@
           const name = s.slice(i + 1, k);
           if ((name === 'begin' || name === 'end') && s[k] === '{') {
             const ge = groupEnd(s, k);
+            // A user may be halfway through typing \\begin{...}. Do not
+            // move the cursor backwards (ge === -1), which loops forever.
+            if (ge < 0) {
+              push({ t: 'cmd', name, s: s.slice(i, k) });
+              i = k; continue;
+            }
             const env = s.slice(k + 1, ge - 1);
             if (name === 'begin' && (MATH_ENVS.has(env) || VERBATIM_ENVS.has(env))) {
               const ee = envEnd(s, i, env);
