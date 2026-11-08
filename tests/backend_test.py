@@ -168,6 +168,71 @@ class BackendTest(unittest.TestCase):
         self.assertEqual(builder.state['state'], 'error')
         self.assertIn('failed', builder.state['message'])
 
+    def test_broken_hyperref_bookmarks_get_one_clean_retry(self):
+        p = os.path.join(self.tmp, 'main.out')
+        with open(p, 'w') as f:
+            f.write('\\BOOKMARK{partial')
+        builder = server.Builder.__new__(server.Builder)
+        builder.aux = {}
+        builder.auxver = 1
+        builder.state = {'state': 'idle', 'message': '', 'at': 0}
+        builder.log = lambda message: None
+        config = server.CONFIG
+        server.CONFIG = {'build': ['latexmk', '-pdf', 'main.tex']}
+        failed = server.subprocess.CompletedProcess([], 12,
+            stdout='! File ended while scanning use of \\@@BOOKMARK.', stderr='')
+        success = server.subprocess.CompletedProcess([], 0, stdout='', stderr='')
+        try:
+            with mock.patch('server.subprocess.run', side_effect=[failed, success]) as run:
+                builder.build_once()
+        finally:
+            server.CONFIG = config
+        self.assertEqual(builder.state['state'], 'ok')
+        self.assertEqual(run.call_count, 2)
+        self.assertFalse(os.path.exists(p))
+        self.assertTrue(os.listdir(os.path.join(server.CACHE, 'bad-aux')))
+
+    def test_corrupt_aux_is_backed_up_and_retried_once(self):
+    def test_missing_class_does_not_write_converted_file(self):
+        with mock.patch('server.shutil.which', return_value=None):
+            with self.assertRaisesRegex(ValueError, 'iacrcc.cls is not installed'):
+                server.run_convert('iacrcc', True, 'conversion.tex', False)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, 'converted', 'iacrcc', 'conversion.tex')))
+
+        aux_path = os.path.join(self.tmp, 'main.aux')
+        with open(aux_path, 'w') as out:
+            out.write('\\newlabel{bad}{{1}')
+        builder = server.Builder.__new__(server.Builder)
+        builder.aux = {}
+        builder.auxver = 1
+        builder.state = {'state': 'idle', 'message': '', 'at': 0}
+        builder.log = lambda message: None
+        old_config = server.CONFIG
+        server.CONFIG = {'build': ['latexmk', '-pdf', 'main.tex']}
+        failed = server.subprocess.CompletedProcess([], 1,
+            stdout='! File ended while scanning use of \\@newl@bel.', stderr='')
+        passed = server.subprocess.CompletedProcess([], 0, stdout='', stderr='')
+        try:
+            with mock.patch('server.subprocess.run', side_effect=[failed, passed]) as run:
+                builder.build_once()
+        finally:
+            server.CONFIG = old_config
+        self.assertEqual(builder.state['state'], 'ok')
+        self.assertEqual(builder.auxver, 2)
+        self.assertEqual(run.call_count, 2)
+        self.assertIn('-g', run.call_args.args[0])
+        self.assertTrue(os.listdir(os.path.join(server.CACHE, 'bad-aux')))
+
+    def test_multiline_aux_labels_are_not_truncated(self):
+        data = ('\\newlabel{thm:one}{{1}{2}{A long title\ncontinued}{theorem.1}{}}\n'
+                '\\bibcite{a}{{12}{2026}}\n'
+                '\\newlabel{broken}{{1}{2}')
+        with mock.patch('server.aux_text', return_value=data):
+            definitions = server.aux_label_lines()
+        self.assertEqual(len(definitions), 2)
+        self.assertIn('continued}{theorem.1}', definitions[0])
+        self.assertIn('\\bibcite{a}{{12}{2026}}', definitions[1])
+
     @mock.patch('server.shutil.which', return_value='/usr/bin/google-chrome')
     @mock.patch('server.subprocess.Popen')
     def test_chrome_app_launch(self, popen, which):
