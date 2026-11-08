@@ -132,10 +132,15 @@ h4 { font-size: 1em; }
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) .seg.figure img,
-  :root:not([data-theme="light"]) .seg.table img { filter: invert(.88) hue-rotate(180deg); }
+  :root:not([data-theme="light"]) .seg.table img { filter: invert(.96) hue-rotate(180deg); }
 }
 :root[data-theme="dark"] .seg.figure img,
-:root[data-theme="dark"] .seg.table img { filter: invert(.88) hue-rotate(180deg); }
+:root[data-theme="dark"] .seg.table img { filter: invert(.96) hue-rotate(180deg); }
+/* Figures are rendered on white, which glares on the grey light-theme page.
+   Dim the white to about the page tone; black ink stays black. (Blending
+   cannot do this: content-visibility on .page and .seg isolates it.) The
+   dark-theme invert rules above are more specific and still win. */
+.seg.figure img, .seg.table img { filter: brightness(.9); }
 body.two .seg.figure img, body.two .seg.table img { max-height: min(64vh, 46rem); }
 
 .caption { font-size: .9em; text-align: justify; outline: none; white-space: pre-wrap; }
