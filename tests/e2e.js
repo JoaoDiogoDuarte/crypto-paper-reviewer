@@ -1302,8 +1302,12 @@ Object.assign(TESTS, {
     eq(await page.eval(`FV.games.length`), 2, 'undo add game');
     await page.click('#fv-redo');
     eq(await page.eval(`FV.games.length`), 3, 'redo add game');
-    await page.click('#fv-apply');
-    await page.save();
+    await page.key('z', { ctrl: true });
+    eq(await page.eval(`FV.games.length`), 2, 'Ctrl+Z stays inside the game dialog');
+    await page.key('z', { ctrl: true, shift: true });
+    eq(await page.eval(`FV.games.length`), 3, 'Ctrl+Shift+Z redoes inside the game dialog');
+    await page.key('s', { ctrl: true });
+    await page.waitFor(`$('#figview').hidden && !SAVING`, 8000, 'Ctrl+S applies and saves');
     const written = env.read('main.tex');
     has(written, String.raw`\While{$c$}`, 'saved loop');
     has(written, String.raw`\gamechange{two}{`, 'saved color macro');
@@ -1331,6 +1335,11 @@ Object.assign(TESTS, {
     eq(await imageOk(), true, 'one-column table has no horizontal overflow');
     await page.click('#cols');
     eq(await imageOk(), true, 'two-column table has no horizontal overflow');
+    eq(await page.eval(`document.querySelector('.pagemark').textContent.includes('approx. page')`), true,
+      'flowing two-column mode marks approximate reading pages');
+    await page.eval(`document.documentElement.dataset.theme = 'dark'`);
+    eq(await page.eval(`getComputedStyle(document.querySelector('.seg.table img')).filter !== 'none'`), true,
+      'table image matches dark theme instead of leaking a white background');
   },
 
   async 'figure viewer: edit the LaTeX, Apply, save'(env, page) {
