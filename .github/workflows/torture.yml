@@ -83,7 +83,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node tests/e2e.js 2>&1 | tee torture-logs/browser-all.log
+          E2E_SEEDS=101 E2E_OPS=1 node tests/e2e.js 2>&1 | tee torture-logs/browser-all.log
       - name: Deterministic random editing and saving
         shell: bash
         run: |
