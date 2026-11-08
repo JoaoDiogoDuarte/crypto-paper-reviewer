@@ -327,16 +327,16 @@ function renderHeading(seg, ctx) {
   node.append(t);
   seg.edit = t;
   seg.parts = h;
-  const del = el('button', '', '✕');
+  const del = el('button', '', 'Delete');
   del.title = 'Delete this heading (keeps the text under it)';
   del.onclick = (e) => { e.stopPropagation(); if (confirm('Delete this heading?')) structural(() => removeSeg(seg)); };
-  const up = el('button', '', '↑');
+  const up = el('button', '', 'Up');
   up.title = 'Move this section up';
   up.onclick = (e) => { e.stopPropagation(); moveSection(seg, -1); };
-  const down = el('button', '', '↓');
+  const down = el('button', '', 'Down');
   down.title = 'Move this section down';
   down.onclick = (e) => { e.stopPropagation(); moveSection(seg, 1); };
-  const merge = el('button', '', '⇐');
+  const merge = el('button', '', 'Merge');
   merge.title = 'Combine this section with the previous one';
   merge.onclick = (e) => { e.stopPropagation(); if (confirm('Combine this section with the previous one?')) structural(() => removeSeg(seg)); };
   return wrapSeg(seg, node, [up, down, merge, del]);
@@ -574,14 +574,9 @@ const katexMacros = () => ({ ...KATEX_SHIMS, ...DOC.macros });
 function typesetInto(src, node, display) {
   let [body, disp] = mathBody(src);
   body = body.replace(/\\label\{[^}]*\}/g, '').replace(/\\(nonumber|notag)\b/g, '');
-  // KaTeX cannot parse amsmath's multline/multline* directly.  A display
-  // aligned environment handles line breaks, alignment marks and spacing.
-    if (node.classList.contains('bad')) node.title = 'Math preview unsupported by KaTeX: ' + node.textContent;
-    else node.removeAttribute('title');
-  // Only the preview changes; data-src always remains the original LaTeX.
+  // Only the preview changes; the original source remains on the chip.
   body = body.replace(/\\begin\{multline\*?\}/g, '\\begin{aligned}')
     .replace(/\\end\{multline\*?\}/g, '\\end{aligned}')
-    node.title = 'Math preview error: ' + e.message;
     .replace(/\\begin\{split\}/g, '\\begin{aligned}')
     .replace(/\\end\{split\}/g, '\\end{aligned}');
   try {
@@ -594,9 +589,12 @@ function typesetInto(src, node, display) {
     }
     node.innerHTML = html;
     node.classList.toggle('bad', !!node.querySelector('.katex-error'));
+    if (node.classList.contains('bad')) node.title = 'KaTeX could not preview this formula';
+    else node.removeAttribute('title');
   } catch (e) {
     node.textContent = src;
     node.classList.add('bad');
+    node.title = 'Math preview error: ' + e.message;
   }
 }
 
@@ -2945,8 +2943,6 @@ async function fuzzTest(n, seed) {
   fetch('/api/log', { method: 'POST', headers: { 'X-Token': TOKEN },
     body: 'FUZZ ' + JSON.stringify({ rounds: n, fails: fails.slice(0, 30), nfails: fails.length, hashes, edited }) });
 }
-{
-  const q = new URLSearchParams(location.search);
 function updateDiffMap() {
   if (!DIFF.on || !DIFF.marks.length) return;
   const map = $('#diffmap');
@@ -2985,6 +2981,8 @@ function fillDiffMap() {
 }
 addEventListener('scroll', updateDiffMap, { passive: true });
 addEventListener('resize', updateDiffMap);
+{
+  const q = new URLSearchParams(location.search);
   if (q.has('fuzz')) {
     const t = setInterval(() => { if (ORDER.length) { clearInterval(t); setTimeout(() => fuzzTest(+q.get('fuzz') || 200, +q.get('seed') || 1), 500); } }, 200);
   }
@@ -3066,8 +3064,13 @@ async function diffOn() {
   const names = Object.keys(FILES).filter((n) => FILES[n].segs);
   let changedFiles = 0;
   for (const name of names) {
-    const r = await fetch(`/api/baseline?name=${encodeURIComponent(name)}&ref=${ref}`);
-    const base = r.ok ? (await r.json()).text : null;
+    // Last save is the editor's disk snapshot; Git HEAD is fetched separately.
+    let base;
+    if (ref === 'save') base = FILES[name].disk;
+    else {
+      const r = await fetch(`/api/baseline?name=${encodeURIComponent(name)}&ref=${ref}`);
+      base = r.ok ? (await r.json()).text : null;
+    }
     const cur = FILES[name].segs.filter((sg) => sg.el && !sg.removed);
     if (base === null) { cur.forEach((sg) => { sg.el.classList.add('diff-new'); DIFF.marks.push(sg.el); }); changedFiles++; continue; }
     if (base === FILES[name].text) continue;
@@ -3093,7 +3096,6 @@ async function diffOn() {
           DIFF.marks.push(b.el);
         } else { b.el.classList.add('diff-new'); DIFF.marks.push(b.el); }
       }
-  fillDiffMap();
       for (const d of dels) {   // deleted blocks, shown where they were
         const ghost = renderSeg({ ...d }, {});
         if (!ghost) continue;
@@ -3102,21 +3104,22 @@ async function diffOn() {
         if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(ghost, anchor);
         else if (cur.length && cur[cur.length - 1].el) cur[cur.length - 1].el.after(ghost);
         DIFF.marks.push(ghost);
-  $('#diffmap').hidden = true;
       }
       i = j - 1;
     }
   }
   DIFF.marks.sort((a, b) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
   DIFF.cur = -1;
+  fillDiffMap();
   $('#diffnav').hidden = false;
   $('#diffcount').textContent = DIFF.marks.length ? `${DIFF.marks.length} changes` : 'no changes';
-  banner(DIFF.marks.length ? `${DIFF.marks.length} changed blocks in ${changedFiles} file(s), compared with ${ref === 'head' ? 'the last commit' : 'when the editor opened'}. The page is read-only until you leave diff mode.`
+  banner(DIFF.marks.length ? `${DIFF.marks.length} changed blocks in ${changedFiles} file(s), compared with ${ref === 'save' ? 'the last save' : 'the last commit'}. The page is read-only until you leave diff mode.`
     : 'No changes.');
 }
 
 function diffOff() {
   DIFF.on = false;
+  $('#diffmap').hidden = true;
   document.body.classList.remove('diffing');
   $('#diffnav').hidden = true;
   $('#diffbase').hidden = true;
@@ -3130,7 +3133,6 @@ function diffOff() {
 // texts).  Returns true when a structure edit should not go on: its block
 // was one of the diff view's.
 function leaveDiff() {
-  updateDiffMap();
   if (!DIFF.on && !DIFF_SHOWN) return false;
   diffOff();
   banner('Left the diff view.');
@@ -3145,6 +3147,7 @@ function diffStep(d) {
   e.classList.add('diff-current');
   e.scrollIntoView({ block: 'center', behavior: 'smooth' });
   $('#diffcount').textContent = `${DIFF.cur + 1} of ${DIFF.marks.length}`;
+  updateDiffMap();
 }
 
 ACTIONS.diff = () => {
@@ -3293,9 +3296,9 @@ function algoLine(g, l, li, depth) {
   const inner = indentOf(l) + (BLOCK_OPEN.has(l.cmd) || l.cmd === 'Else' || l.cmd === 'ElsIf' ? '  ' : '');
   const b1 = el('button', '', '+'); b1.title = 'Add a statement below';
   b1.onclick = () => add([inner + '\\State $x \\gets y$']);
-  const b2 = el('button', '', '⊕'); b2.title = 'Add an if-block below';
+  const b2 = el('button', '', '+ if'); b2.title = 'Add an if-block below';
   b2.onclick = () => add([inner + '\\If{$c$}', inner + '  \\State $x \\gets y$', inner + '\\EndIf']);
-  const b3 = el('button', '', '✕'); b3.title = 'Delete this line';
+  const b3 = el('button', '', 'Delete'); b3.title = 'Delete this line';
   b3.onclick = () => { g.lines.splice(li, 1); showFigTab('games'); };
   tools.append(b1, b2, b3);
   row.append(tools);
@@ -3315,7 +3318,7 @@ function procLine(g, l, li) {
   show();
   const tools = el('div', 'gtools'); tools.style.opacity = 1;
   const b1 = el('button', '', '+ line'); b1.onclick = () => { g.lines.splice(li + 1, 0, { prefix: '', content: '', suffix: l.suffix || ' \\\\\n' }); if (!l.suffix) l.suffix = ' \\\\\n'; showFigTab('games'); };
-  const b3 = el('button', '', '✕'); b3.onclick = () => { g.lines.splice(li, 1); showFigTab('games'); };
+  const b3 = el('button', '', 'Delete'); b3.onclick = () => { g.lines.splice(li, 1); showFigTab('games'); };
   tools.append(b1, b3);
   row.append(ta, prev, tools);
   return row;
@@ -3342,20 +3345,20 @@ function renderCells(body) {
       });
       for (let k = r.cells.length; k < ncols; k++) tr.append(el('td'));
       const tools = el('td', 'rowtools');
-      const add = el('button', '', '＋ row'); add.title = 'Add an empty row below';
+      const add = el('button', '', '+ row'); add.title = 'Add an empty row below';
       add.onclick = () => {
         const nr = { lead: '', empty: false, rawRest: '', sep: r.sep || ' \\\\\n',
           cells: Array.from({ length: ncols }, (_, k) => ({ lead: k ? ' ' : '', content: '', trail: ' ' })) };
         if (!r.sep) r.sep = ' \\\\\n';
         t.rows.splice(ri + 1, 0, nr); showFigTab('cells');
       };
-      const del = el('button', '', '✕'); del.title = 'Delete this row';
+      const del = el('button', '', 'Delete'); del.title = 'Delete this row';
       del.onclick = () => { t.rows.splice(ri, 1); showFigTab('cells'); };
       tools.append(add, del);
       tr.append(tools);
       tbl.append(tr);
     });
-    const col = el('button', '', '＋ column');
+    const col = el('button', '', '+ column');
     col.title = 'Add a column at the right (the column spec gets the same type as the last column)';
     col.onclick = () => {
       for (const r of t.rows) if (!r.empty && r.cells.length) {
@@ -3599,6 +3602,7 @@ async function openHistory() {
 function drawHistoryList() {
   const list = $('#history-list');
   list.textContent = '';
+  $('#history-delete').disabled = !HIST.cur || !HIST.list.some((b) => b.batch === HIST.cur.batch);
   if (!HIST.list.length) { list.append(el('p', 'small', 'No saves yet.')); return; }
   for (const b of HIST.list) {
     const row = el('div', 'hist-item' + (HIST.cur === b ? ' active' : ''));
@@ -3678,7 +3682,30 @@ async function restoreHistory(b, which) {
     (missing.length ? ` Not restored (no longer part of the document): ${missing.join(', ')}.` : ''));
 }
 
+async function deleteHistory(all) {
+  const selected = HIST.cur;
+  if (!all && !selected) return;
+  const message = all
+    ? 'Permanently delete ALL editor save-history snapshots for this paper? This does not affect your LaTeX files or Git commits.'
+    : 'Permanently delete this editor save-history entry? This does not affect the current paper or Git.';
+  if (!confirm(message)) return;
+  const req = all ? { all: true } : { batch: selected.batch };
+  const response = await fetch('/api/history/delete', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
+    body: JSON.stringify(req),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) { banner('Could not delete save history: ' + (result.error || response.status)); return; }
+  HIST.list = result.saves;
+  HIST.cur = null;
+  $('#history-detail').textContent = 'Select a save to inspect and restore it.';
+  drawHistoryList();
+  banner('Deleted ' + result.removed + ' save snapshot(s). Manuscript and Git history unchanged.');
+}
+
 $('#historybtn').onclick = openHistory;
+$('#history-delete').onclick = () => deleteHistory(false);
+$('#history-clear').onclick = () => deleteHistory(true);
 $('#history-close').onclick = () => { $('#historybox').hidden = true; };
 
 // ======================================================= main switcher
@@ -3747,9 +3774,8 @@ $('#mainsel').onchange = async () => {
 // Metadata (extracted from the front matter, edited here, saved in the
 // project's .paper-editor/metadata.json), and conversion to another class.
 
-const MD = { data: null, info: null, target: 'llncs', anon: false, dirty: false };
+const MD = { data: null, info: null, target: 'llncs', anon: false, dirty: false, rootOutput: false };
 function metadataDirty() {
-  MD.dirty = false;
   MD.dirty = true;
   const status = $('#md-status'); if (status) status.textContent = 'Unsaved metadata changes';
 }
@@ -3757,6 +3783,8 @@ function metadataDirty() {
 async function openPaper() {
   MD.info = await (await fetch('/api/metadata')).json();
   MD.data = JSON.parse(JSON.stringify(MD.info.metadata));
+  MD.dirty = false;
+  MD.rootOutput = false;
   drawPaper();
   $('#paperbox').hidden = false;
 }
@@ -3809,7 +3837,7 @@ function drawPaper() {
     const c = el('div', 'card');
     r = el('div', 'row');
     r.append(field(a, 'name', 'Name', where, '16em'), field(a, 'email', 'Email', where), field(a, 'orcid', 'ORCID', where, '11em'));
-    const del = el('button', '', '✕'); del.title = 'Remove this author';
+    const del = el('button', '', 'Delete'); del.title = 'Remove this author';
     del.onclick = () => { md.authors.splice(i, 1); drawPaper(); metadataDirty(); };
     r.append(del);
     c.append(r);
@@ -3827,7 +3855,7 @@ function drawPaper() {
     c.append(r);
     body.append(c);
   });
-  const addA = el('button', '', '＋ author');
+  const addA = el('button', '', '+ author');
   addA.onclick = () => { md.authors.push({ name: '', email: '', orcid: '', affiliations: [] }); drawPaper(); metadataDirty(); };
   body.append(addA);
   body.append(el('h4', '', 'Affiliations'));
@@ -3836,16 +3864,16 @@ function drawPaper() {
     r = el('div', 'row card');
     r.append(el('b', '', (k + 1) + '.'), field(af, 'name', 'Name', where, '18em'), field(af, 'department', 'Department', where, '10em'),
       field(af, 'city', 'City', where, '8em'), field(af, 'country', 'Country', where, '8em'), field(af, 'ror', 'ROR id', where, '8em'));
-    const del = el('button', '', '✕');
+    const del = el('button', '', 'Delete');
     del.onclick = () => {
       md.affiliations.splice(k, 1);
       for (const a of md.authors) a.affiliations = (a.affiliations || []).filter((j) => j !== k).map((j) => (j > k ? j - 1 : j));
-      drawPaper();
+      drawPaper(); metadataDirty();
     };
     r.append(del);
     body.append(r);
   });
-  const addF = el('button', '', '＋ affiliation');
+  const addF = el('button', '', '+ affiliation');
   addF.onclick = () => { md.affiliations.push({ name: '', department: '', city: '', country: '', ror: '' }); drawPaper(); metadataDirty(); };
   body.append(addF);
   // conversion
@@ -3858,7 +3886,8 @@ function drawPaper() {
   const an = el('input'); an.type = 'checkbox'; an.checked = MD.anon;
   an.onchange = () => { MD.anon = an.checked; drawPaper(); };
   const al = el('label', '', ' anonymous (no authors, affiliations or acknowledgements)'); al.prepend(an);
-  const rootOutput = el('input'); rootOutput.type = 'checkbox'; rootOutput.checked = false;
+  const rootOutput = el('input'); rootOutput.type = 'checkbox'; rootOutput.checked = MD.rootOutput;
+  rootOutput.onchange = () => { MD.rootOutput = rootOutput.checked; };
   const rootLabel = el('label', '', ' Put converted document beside original (rather than converted/<venue>/)');
   rootLabel.prepend(rootOutput);
   const name = el('input'); name.type = 'text'; name.style.width = '16em';
@@ -3877,7 +3906,7 @@ function drawPaper() {
   body.append(cv);
   refreshMissing();
   go.onclick = async () => {
-    await saveMetadata(true);
+    if (!(await saveMetadata(true))) return;
     result.textContent = 'Converting and building…';
     const send = (overwrite) => fetch('/api/convert', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
       body: JSON.stringify({ target: MD.target, anonymous: MD.anon, name: name.value, overwrite,
@@ -3932,20 +3961,26 @@ function refreshMissing() {
     : `Everything ${MD.info.targets[MD.target]} needs is filled in.`;
 }
 
-  if (!r.ok) { const msg = 'Metadata save failed (' + r.status + ')';
-    const status = $('#md-status'); if (status) status.textContent = msg;
-    banner(msg); return;
-  }
 async function saveMetadata(quiet) {
   const r = await fetch('/api/metadata', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
     body: JSON.stringify(MD.data) });
+  if (!r.ok) {
+    const msg = 'Metadata save failed (' + r.status + ')';
+    const status = $('#md-status'); if (status) status.textContent = msg;
+    banner(msg);
+    return false;
+  }
   MD.info = await r.json();
   MD.dirty = false;
   const status = $('#md-status');
   if (status) status.textContent = 'Saved locally at ' + new Date().toLocaleTimeString();
   if (!quiet) banner('Metadata saved successfully in .paper-editor/metadata.json.');
+  return true;
 }
 
 $('#paperbtn').onclick = openPaper;
 $('#md-save').onclick = () => saveMetadata(false);
-$('#md-close').onclick = () => { $('#paperbox').hidden = true; };
+$('#md-close').onclick = () => {
+  if (MD.dirty && !confirm('Discard unsaved metadata changes?')) return;
+  $('#paperbox').hidden = true;
+};

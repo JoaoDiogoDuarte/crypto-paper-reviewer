@@ -140,6 +140,32 @@ class BackendTest(unittest.TestCase):
         self.assertEqual(md['affiliations'][0]['country'], 'Portugal')
         self.assertEqual(md['keywords'], ['crypto', 'proofs'])
 
+    def test_history_delete_selected_and_all_keeps_paper(self):
+        with open(self.main) as f:
+            original = f.read()
+        server.history_record('one', 'main.tex', 'version one', 'version two')
+        server.history_record('two', 'main.tex', 'version two', 'version three')
+        self.assertEqual(len(server.history_entries()), 2)
+        code, result = self.post('/api/history/delete', {'batch': 'one'})
+        self.assertEqual(code, 200)
+        self.assertEqual(result['removed'], 1)
+        self.assertEqual(len(result['saves']), 1)
+        self.assertEqual(result['saves'][0]['batch'], 'two')
+        self.assertIsNone(server.history_get(server.sha('version one')))
+        self.assertEqual(server.history_get(server.sha('version two')), 'version two')
+        code, result = self.post('/api/history/delete', {'all': True})
+        self.assertEqual(code, 200)
+        self.assertEqual(result['removed'], 1)
+        self.assertFalse(server.history_entries())
+        self.assertIsNone(server.history_get(server.sha('version two')))
+        with open(self.main) as f:
+            self.assertEqual(f.read(), original)
+
+    def test_history_delete_rejects_invalid_requests(self):
+        for request in ({}, {'all': 'yes'}, {'batch': ''}, {'all': True, 'batch': 'one'}):
+            status, _ = self.post('/api/history/delete', request)
+            self.assertEqual(status, 400)
+
     def test_makefile_is_default_build_command(self):
         with open(os.path.join(self.tmp, 'Makefile'), 'w') as f:
             f.write('all:\n\t@true\n')
@@ -192,13 +218,13 @@ class BackendTest(unittest.TestCase):
         self.assertFalse(os.path.exists(p))
         self.assertTrue(os.listdir(os.path.join(server.CACHE, 'bad-aux')))
 
-    def test_corrupt_aux_is_backed_up_and_retried_once(self):
     def test_missing_class_does_not_write_converted_file(self):
         with mock.patch('server.shutil.which', return_value=None):
             with self.assertRaisesRegex(ValueError, 'iacrcc.cls is not installed'):
                 server.run_convert('iacrcc', True, 'conversion.tex', False)
         self.assertFalse(os.path.exists(os.path.join(self.tmp, 'converted', 'iacrcc', 'conversion.tex')))
 
+    def test_corrupt_aux_is_backed_up_and_retried_once(self):
         aux_path = os.path.join(self.tmp, 'main.aux')
         with open(aux_path, 'w') as out:
             out.write('\\newlabel{bad}{{1}')

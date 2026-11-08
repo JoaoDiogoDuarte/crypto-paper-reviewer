@@ -43,13 +43,6 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
   box-shadow: 0 8px 26px rgba(0,0,0,.2); font: 14px/1.4 system-ui, sans-serif; }
 #open-path { margin: .4em 0 .7em; color: var(--muted); overflow-wrap: anywhere; }
 #open-main { width: 100%; margin: .3em 0 .8em; }
-#newfilebox { position: fixed; z-index: 35; top: 5em; left: 50%; transform: translateX(-50%); width: min(42em, 92vw);
-  padding: .8em 1em; background: var(--bg); border: 1px solid var(--accent); border-radius: 6px;
-  box-shadow: 0 8px 26px rgba(0,0,0,.2); font: 14px/1.4 system-ui, sans-serif; }
-#newfilebox label { display: block; margin-top: .6em; }
-#newfile-name, #newfile-text { width: 100%; margin-top: .25em; padding: .35em .5em; background: var(--math); color: var(--fg);
-  border: 1px solid var(--line); border-radius: 4px; font: 13px ui-monospace, monospace; }
-#newfile-text { min-height: 10em; resize: vertical; }
 #tts-state { color: var(--muted); min-width: 4.5em; }
 #ttsbar button:disabled { opacity: .45; cursor: default; }
 
