@@ -603,7 +603,7 @@ class Builder:
                         os.unlink(path)
                 self.log('build: saved damaged aux/out/build state in %s; rebuilding once' % backup_dir)
                 retry = cmd + ['-g']
-                r = subprocess.run(retry, cwd=PAPER, capture_output=True, text=True, timeout=600)
+                r = subprocess.run(retry, cwd=PAPER, capture_output=True, text=True, errors='replace', timeout=600, env=build_env())
                 debug_capture('pdf-retry', retry, r, log_files, self.log)
             if r.returncode == 0:
                 self.aux = load_aux()
@@ -1135,7 +1135,7 @@ def baseline(name, ref):
         if prefix.returncode != 0:
             return SESSION_START.get(name)
         r = subprocess.run(['git', 'show', 'HEAD:' + prefix.stdout.strip() + name], cwd=PAPER,
-                           capture_output=True, text=True, timeout=20)
+                           capture_output=True, text=True, errors='replace', timeout=20)
         return r.stdout if r.returncode == 0 else None
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -1389,7 +1389,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send(403, {'error': 'bad token'})
         if urllib.parse.urlparse(self.path).path == '/api/log':
             n = int(self.headers.get('Content-Length', 0))
-            BUILDER.log('page: ' + self.rfile.read(n).decode(errors='replace')[:200000])
+            msg = self.rfile.read(n).decode(errors='replace')[:200000]
+            BUILDER.log('page: ' + msg)
+            # errors of the page are kept (the console of an app window is
+            # rarely open): <state>/debug/page-errors.log, last 1 MB
+            if msg.startswith('JSERROR'):
+                try:
+                    os.makedirs(os.path.join(STATE, 'debug'), exist_ok=True)
+                    f = os.path.join(STATE, 'debug', 'page-errors.log')
+                    if os.path.exists(f) and os.path.getsize(f) > 1 << 20:
+                        os.replace(f, f + '.1')
+                    with open(f, 'a', encoding='utf-8') as out:
+                        out.write(time.strftime('%Y-%m-%d %H:%M:%S ') + msg.replace('\n', '\n    ') + '\n')
+                except OSError:
+                    pass
             return self.send(200, {})
         if urllib.parse.urlparse(self.path).path == '/api/history/delete':
             req = self.json_body()
@@ -1588,7 +1601,7 @@ def open_paper(path, cwd=None, state=None):
     PAPER = os.path.abspath(cwd) if cwd else os.path.dirname(path)
     MAIN = os.path.relpath(path, PAPER)
     r = subprocess.run(['git', 'rev-parse', '--show-toplevel'], cwd=os.path.dirname(path),
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, errors='replace')
     ROOT = r.stdout.strip() if r.returncode == 0 else PAPER
     STATE = os.path.abspath(state) if state else os.path.join(os.path.dirname(path), '.paper-editor')
     CACHE = os.path.join(STATE, 'cache')
@@ -1800,7 +1813,7 @@ def choose_directory():
         if not shutil.which(command[0]):
             continue
         try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=300)
+            result = subprocess.run(command, capture_output=True, text=True, errors='replace', timeout=300)
         except (OSError, subprocess.TimeoutExpired):
             continue
         if result.returncode == 0 and result.stdout.strip():
