@@ -25,6 +25,36 @@ def main_path(source):
 
 
 class ConversionContractTest(unittest.TestCase):
+    def test_llncs_drops_predefined_theorem_counters_but_keeps_custom(self):
+        source = r"""\documentclass{IEEEtran}
+\usepackage{amsthm}
+\usepackage{aliascnt}
+\newtheorem{theorem}{Theorem}
+\newaliascnt{lemma}{theorem}
+\newtheorem{lemma}[lemma]{Lemma}
+\aliascntresetthe{lemma}
+\newaliascnt{corollary}{theorem}
+\newtheorem{corollary}[corollary]{Corollary}
+\aliascntresetthe{corollary}
+\newtheorem{custom}{Custom}
+\begin{document}
+\title{Counter conversion}
+\begin{lemma}Statement.\end{lemma}
+\begin{custom}Other.\end{custom}
+\end{document}
+"""
+        md = fill(convert.extract(source), 'llncs')
+        output, _ = convert.convert(source, md, 'llncs', False,
+                                   ['lemma', 'custom'], None, '')
+        preamble = output.split(r'\begin{document}', 1)[0]
+        for command in (r'\newtheorem{theorem}', r'\newaliascnt{lemma}',
+                        r'\newtheorem{lemma}', r'\aliascntresetthe{lemma}',
+                        r'\newaliascnt{corollary}', r'\newtheorem{corollary}',
+                        r'\aliascntresetthe{corollary}'):
+            self.assertNotIn(command, preamble)
+        self.assertIn(r'\newtheorem{custom}', preamble)
+        self.assertIn(r'\begin{lemma}', output)
+
     def test_all_sources_and_targets(self):
         for source in SOURCES:
             main = main_path(source)
