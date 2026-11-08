@@ -574,14 +574,9 @@ const katexMacros = () => ({ ...KATEX_SHIMS, ...DOC.macros });
 function typesetInto(src, node, display) {
   let [body, disp] = mathBody(src);
   body = body.replace(/\\label\{[^}]*\}/g, '').replace(/\\(nonumber|notag)\b/g, '');
-  // KaTeX cannot parse amsmath's multline/multline* directly.  A display
-  // aligned environment handles line breaks, alignment marks and spacing.
-    if (node.classList.contains('bad')) node.title = 'Math preview unsupported by KaTeX: ' + node.textContent;
-    else node.removeAttribute('title');
-  // Only the preview changes; data-src always remains the original LaTeX.
+  // Only the preview changes; the original source remains on the chip.
   body = body.replace(/\\begin\{multline\*?\}/g, '\\begin{aligned}')
     .replace(/\\end\{multline\*?\}/g, '\\end{aligned}')
-    node.title = 'Math preview error: ' + e.message;
     .replace(/\\begin\{split\}/g, '\\begin{aligned}')
     .replace(/\\end\{split\}/g, '\\end{aligned}');
   try {
@@ -594,9 +589,12 @@ function typesetInto(src, node, display) {
     }
     node.innerHTML = html;
     node.classList.toggle('bad', !!node.querySelector('.katex-error'));
+    if (node.classList.contains('bad')) node.title = 'KaTeX could not preview this formula';
+    else node.removeAttribute('title');
   } catch (e) {
     node.textContent = src;
     node.classList.add('bad');
+    node.title = 'Math preview error: ' + e.message;
   }
 }
 
@@ -2945,8 +2943,6 @@ async function fuzzTest(n, seed) {
   fetch('/api/log', { method: 'POST', headers: { 'X-Token': TOKEN },
     body: 'FUZZ ' + JSON.stringify({ rounds: n, fails: fails.slice(0, 30), nfails: fails.length, hashes, edited }) });
 }
-{
-  const q = new URLSearchParams(location.search);
 function updateDiffMap() {
   if (!DIFF.on || !DIFF.marks.length) return;
   const map = $('#diffmap');
@@ -2985,6 +2981,8 @@ function fillDiffMap() {
 }
 addEventListener('scroll', updateDiffMap, { passive: true });
 addEventListener('resize', updateDiffMap);
+{
+  const q = new URLSearchParams(location.search);
   if (q.has('fuzz')) {
     const t = setInterval(() => { if (ORDER.length) { clearInterval(t); setTimeout(() => fuzzTest(+q.get('fuzz') || 200, +q.get('seed') || 1), 500); } }, 200);
   }
@@ -3093,7 +3091,6 @@ async function diffOn() {
           DIFF.marks.push(b.el);
         } else { b.el.classList.add('diff-new'); DIFF.marks.push(b.el); }
       }
-  fillDiffMap();
       for (const d of dels) {   // deleted blocks, shown where they were
         const ghost = renderSeg({ ...d }, {});
         if (!ghost) continue;
@@ -3102,13 +3099,13 @@ async function diffOn() {
         if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(ghost, anchor);
         else if (cur.length && cur[cur.length - 1].el) cur[cur.length - 1].el.after(ghost);
         DIFF.marks.push(ghost);
-  $('#diffmap').hidden = true;
       }
       i = j - 1;
     }
   }
   DIFF.marks.sort((a, b) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
   DIFF.cur = -1;
+  fillDiffMap();
   $('#diffnav').hidden = false;
   $('#diffcount').textContent = DIFF.marks.length ? `${DIFF.marks.length} changes` : 'no changes';
   banner(DIFF.marks.length ? `${DIFF.marks.length} changed blocks in ${changedFiles} file(s), compared with ${ref === 'head' ? 'the last commit' : 'when the editor opened'}. The page is read-only until you leave diff mode.`
@@ -3117,6 +3114,7 @@ async function diffOn() {
 
 function diffOff() {
   DIFF.on = false;
+  $('#diffmap').hidden = true;
   document.body.classList.remove('diffing');
   $('#diffnav').hidden = true;
   $('#diffbase').hidden = true;
@@ -3130,7 +3128,6 @@ function diffOff() {
 // texts).  Returns true when a structure edit should not go on: its block
 // was one of the diff view's.
 function leaveDiff() {
-  updateDiffMap();
   if (!DIFF.on && !DIFF_SHOWN) return false;
   diffOff();
   banner('Left the diff view.');
@@ -3145,6 +3142,7 @@ function diffStep(d) {
   e.classList.add('diff-current');
   e.scrollIntoView({ block: 'center', behavior: 'smooth' });
   $('#diffcount').textContent = `${DIFF.cur + 1} of ${DIFF.marks.length}`;
+  updateDiffMap();
 }
 
 ACTIONS.diff = () => {
@@ -3747,9 +3745,8 @@ $('#mainsel').onchange = async () => {
 // Metadata (extracted from the front matter, edited here, saved in the
 // project's .paper-editor/metadata.json), and conversion to another class.
 
-const MD = { data: null, info: null, target: 'llncs', anon: false, dirty: false };
+const MD = { data: null, info: null, target: 'llncs', anon: false, dirty: false, rootOutput: false };
 function metadataDirty() {
-  MD.dirty = false;
   MD.dirty = true;
   const status = $('#md-status'); if (status) status.textContent = 'Unsaved metadata changes';
 }
@@ -3757,6 +3754,7 @@ function metadataDirty() {
 async function openPaper() {
   MD.info = await (await fetch('/api/metadata')).json();
   MD.data = JSON.parse(JSON.stringify(MD.info.metadata));
+  MD.dirty = false;
   drawPaper();
   $('#paperbox').hidden = false;
 }
@@ -3858,7 +3856,8 @@ function drawPaper() {
   const an = el('input'); an.type = 'checkbox'; an.checked = MD.anon;
   an.onchange = () => { MD.anon = an.checked; drawPaper(); };
   const al = el('label', '', ' anonymous (no authors, affiliations or acknowledgements)'); al.prepend(an);
-  const rootOutput = el('input'); rootOutput.type = 'checkbox'; rootOutput.checked = false;
+  const rootOutput = el('input'); rootOutput.type = 'checkbox'; rootOutput.checked = MD.rootOutput;
+  rootOutput.onchange = () => { MD.rootOutput = rootOutput.checked; };
   const rootLabel = el('label', '', ' Put converted document beside original (rather than converted/<venue>/)');
   rootLabel.prepend(rootOutput);
   const name = el('input'); name.type = 'text'; name.style.width = '16em';
@@ -3932,20 +3931,26 @@ function refreshMissing() {
     : `Everything ${MD.info.targets[MD.target]} needs is filled in.`;
 }
 
-  if (!r.ok) { const msg = 'Metadata save failed (' + r.status + ')';
-    const status = $('#md-status'); if (status) status.textContent = msg;
-    banner(msg); return;
-  }
 async function saveMetadata(quiet) {
   const r = await fetch('/api/metadata', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
     body: JSON.stringify(MD.data) });
+  if (!r.ok) {
+    const msg = 'Metadata save failed (' + r.status + ')';
+    const status = $('#md-status'); if (status) status.textContent = msg;
+    banner(msg);
+    return false;
+  }
   MD.info = await r.json();
   MD.dirty = false;
   const status = $('#md-status');
   if (status) status.textContent = 'Saved locally at ' + new Date().toLocaleTimeString();
   if (!quiet) banner('Metadata saved successfully in .paper-editor/metadata.json.');
+  return true;
 }
 
 $('#paperbtn').onclick = openPaper;
 $('#md-save').onclick = () => saveMetadata(false);
-$('#md-close').onclick = () => { $('#paperbox').hidden = true; };
+$('#md-close').onclick = () => {
+  if (MD.dirty && !confirm('Discard unsaved metadata changes?')) return;
+  $('#paperbox').hidden = true;
+};
