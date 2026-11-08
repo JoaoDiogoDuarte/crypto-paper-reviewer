@@ -1238,6 +1238,11 @@ def html_escape(t):
 
 # ------------------------------------------------------------------ HTTP
 
+            # Persist only intentional overrides.  New values discovered in
+            # the source front matter then populate fields automatically.
+            extracted = convert.extract(read(MAIN))
+            overrides = {k: v for k, v in md.items() if k != 'source_class'
+                         and v != extracted.get(k)}
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
@@ -1328,14 +1333,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.send(400, {'error': 'expected a JSON object'})
             ensure_state()
             with open(os.path.join(STATE, 'metadata.json'), 'w') as f:
-                json.dump(md, f, indent=2, ensure_ascii=False)
+                json.dump(overrides, f, indent=2, ensure_ascii=False)
             return self.send(200, metadata())
         if urllib.parse.urlparse(self.path).path == '/api/convert':
             req = self.json_body()
             if not isinstance(req, dict):
                 return self.send(400, {'error': 'expected a JSON object'})
             try:
-                res = run_convert(req.get('target'), bool(req.get('anonymous')), req.get('name'), bool(req.get('overwrite')))
+                res = run_convert(req.get('target'), bool(req.get('anonymous')), req.get('name'), bool(req.get('overwrite')), bool(req.get('root')))
             except FileExistsError as e:
                 return self.send(409, {'error': f'{e} exists'})
             except Exception as e:

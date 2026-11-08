@@ -3651,7 +3651,12 @@ $('#mainsel').onchange = async () => {
 // Metadata (extracted from the front matter, edited here, saved in the
 // project's .paper-editor/metadata.json), and conversion to another class.
 
-const MD = { data: null, info: null, target: 'llncs', anon: false };
+const MD = { data: null, info: null, target: 'llncs', anon: false, dirty: false };
+function metadataDirty() {
+  MD.dirty = false;
+  MD.dirty = true;
+  const status = $('#md-status'); if (status) status.textContent = 'Unsaved metadata changes';
+}
 
 async function openPaper() {
   MD.info = await (await fetch('/api/metadata')).json();
@@ -3668,18 +3673,37 @@ function drawPaper() {
     const i = el('input'); i.type = 'text'; i.value = obj[key] || ''; i.placeholder = label;
     i.style.width = width || '14em';
     if (need.has(where + '|' + key)) i.classList.add('need');
-    i.oninput = () => { obj[key] = i.value; refreshMissing(); };
+    i.oninput = () => {
+      obj[key] = i.value;
+      metadataDirty();
+      if (key === 'name' && md.affiliations.includes(obj)) {
+        const afid = md.affiliations.indexOf(obj);
+        document.querySelectorAll(`[data-afflink="${afid}"]`).forEach((node) =>
+          node.textContent = `${afid + 1}. ${(i.value || '?').slice(0, 30)}`);
+      }
+      refreshMissing();
+    };
     const l = el('label', '', label + ' '); l.append(i);
     return l;
   };
-  body.append(el('div', 'small', `Read from the front matter (${md.source_class})${MD.info.saved ? ', with your saved edits' : ''}. Names keep their LaTeX (accents, macros).`));
+  const origin = el('div', 'small', `Detected from ${md.source_class} front matter${MD.info.saved ? '; manual overrides applied' : ''}. Metadata is saved separately; the LaTeX is never rewritten.`);
+  const reset = el('button', '', 'Restore detected fields');
+  reset.title = 'Replace saved metadata overrides with values detected from the LaTeX source';
+  reset.onclick = () => {
+    if (!confirm('Replace your metadata edits with values found in the LaTeX source?')) return;
+    MD.data = structuredClone(MD.info.extracted);
+    drawPaper(); metadataDirty();
+  };
+  const status = el('span', 'small', MD.dirty ? 'Unsaved metadata changes' : 'Metadata loaded');
+  status.id = 'md-status'; status.setAttribute('role', 'status');
+  body.append(origin, reset, status);
   body.append(el('h4', '', 'Paper'));
   let r = el('div', 'row');
   r.append(field(md, 'title', 'Title', 'paper', '30em'), field(md, 'running_title', 'Running title', 'paper'));
   body.append(r);
   r = el('div', 'row');
   const kw = el('input'); kw.type = 'text'; kw.value = (md.keywords || []).join(', '); kw.style.width = '30em';
-  kw.oninput = () => { md.keywords = kw.value.split(',').map((x) => x.trim()).filter(Boolean); };
+  kw.oninput = () => { md.keywords = kw.value.split(',').map((x) => x.trim()).filter(Boolean); metadataDirty(); };
   const kl = el('label', '', 'Keywords (comma-separated) '); kl.append(kw);
   r.append(kl, field(md, 'license', 'Licence (e.g. CC-by)', 'paper', '9em'));
   body.append(r);
@@ -3690,22 +3714,25 @@ function drawPaper() {
     r = el('div', 'row');
     r.append(field(a, 'name', 'Name', where, '16em'), field(a, 'email', 'Email', where), field(a, 'orcid', 'ORCID', where, '11em'));
     const del = el('button', '', '✕'); del.title = 'Remove this author';
-    del.onclick = () => { md.authors.splice(i, 1); drawPaper(); };
+    del.onclick = () => { md.authors.splice(i, 1); drawPaper(); metadataDirty(); };
     r.append(del);
     c.append(r);
     r = el('div', 'row');
     r.append(el('span', need.has(where + '|affiliation') ? 'missing' : '', 'Affiliations:'));
     md.affiliations.forEach((af, k) => {
       const cb = el('input'); cb.type = 'checkbox'; cb.checked = (a.affiliations || []).includes(k);
-      cb.onchange = () => { a.affiliations = md.affiliations.map((_, j) => j).filter((j) => (j === k ? cb.checked : (a.affiliations || []).includes(j))); refreshMissing(); };
-      const l = el('label', '', ' ' + (k + 1) + '. ' + (af.name || '?').slice(0, 30)); l.prepend(cb);
+      cb.onchange = () => { a.affiliations = md.affiliations.map((_, j) => j).filter((j) => (j === k ? cb.checked : (a.affiliations || []).includes(j))); refreshMissing(); metadataDirty(); };
+      const l = el('label', '');
+      const txt = el('span', '', (k + 1) + '. ' + (af.name || '?').slice(0, 30));
+      txt.dataset.afflink = k;
+      l.append(cb, txt);
       r.append(l);
     });
     c.append(r);
     body.append(c);
   });
   const addA = el('button', '', '＋ author');
-  addA.onclick = () => { md.authors.push({ name: '', email: '', orcid: '', affiliations: [] }); drawPaper(); };
+  addA.onclick = () => { md.authors.push({ name: '', email: '', orcid: '', affiliations: [] }); drawPaper(); metadataDirty(); };
   body.append(addA);
   body.append(el('h4', '', 'Affiliations'));
   md.affiliations.forEach((af, k) => {
@@ -3723,7 +3750,7 @@ function drawPaper() {
     body.append(r);
   });
   const addF = el('button', '', '＋ affiliation');
-  addF.onclick = () => { md.affiliations.push({ name: '', department: '', city: '', country: '', ror: '' }); drawPaper(); };
+  addF.onclick = () => { md.affiliations.push({ name: '', department: '', city: '', country: '', ror: '' }); drawPaper(); metadataDirty(); };
   body.append(addF);
   // conversion
   const cv = el('div', 'convert');
@@ -3809,11 +3836,18 @@ function refreshMissing() {
     : `Everything ${MD.info.targets[MD.target]} needs is filled in.`;
 }
 
+  if (!r.ok) { const msg = 'Metadata save failed (' + r.status + ')';
+    const status = $('#md-status'); if (status) status.textContent = msg;
+    banner(msg); return;
+  }
 async function saveMetadata(quiet) {
   const r = await fetch('/api/metadata', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
     body: JSON.stringify(MD.data) });
   MD.info = await r.json();
-  if (!quiet) banner('Metadata saved in .paper-editor/metadata.json.');
+  MD.dirty = false;
+  const status = $('#md-status');
+  if (status) status.textContent = 'Saved locally at ' + new Date().toLocaleTimeString();
+  if (!quiet) banner('Metadata saved successfully in .paper-editor/metadata.json.');
 }
 
 $('#paperbtn').onclick = openPaper;

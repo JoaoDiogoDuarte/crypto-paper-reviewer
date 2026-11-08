@@ -149,8 +149,10 @@ def extract(text):
         m = re.search(r'\\license\s*\{([^}]*)\}', t)
         md['license'] = m.group(1) if m else ''
     elif cls == 'IEEEtran':
-        m = re.search(r'\\author\s*\{', t)
-        if m:
+        # \ifanon often encloses two independent \author blocks.  The first
+        # one is anonymous even when the paper is being prepared for review;
+        # metadata still needs to expose the real author for conversion.
+        for m in re.finditer(r'\\author\s*\{', t):
             body = group(t, m.end() - 1)[0]
             names = [name_of(group(body, x.end() - 1)[0]) for x in re.finditer(r'\\IEEEauthorblockN\s*\{', body)]
             addrs = [group(body, x.end() - 1)[0] for x in re.finditer(r'\\IEEEauthorblockA\s*\{', body)]
@@ -161,7 +163,7 @@ def extract(text):
                 email = re.search(r'[\w.+-]+@[\w.-]+', a)
                 lines = [clean(x) for x in re.split(r'\\\\', a) if clean(x) and '@' not in x]
                 md['authors'].append({'name': n, 'email': email.group(0) if email else '', 'orcid': '',
-                                      'affiliations': [aff(', '.join(lines))] if lines else []})
+                                      'affiliations': affiliation_ids})
     elif cls == 'acmart':
         for m in re.finditer(r'\\author\s*\{', t):
             name, k = group(t, m.end() - 1)
@@ -177,12 +179,19 @@ def extract(text):
         for m in re.finditer(r'\\author\s*\{', t):
             a, _ = args_after(t, m.end() - 1, 5)
             if len(a) >= 2:
+            if not names:  # Some papers use simple \author{Name}.
+                names = [name_of(body)]
                 orcid = re.search(r'\d{4}-\d{4}-\d{4}-\d{3}[\dX]', a[3] if len(a) > 3 else '')
                 md['authors'].append({'name': name_of(a[0]), 'email': a[2] if len(a) > 2 else '',
                                       'orcid': orcid.group(0) if orcid else '', 'affiliations': [aff(a[1])]})
         m = re.search(r'\\Copyright\s*\{([^}]*)\}', t)
         md['license'] = 'CC-BY-4.0' if m else ''
     else:   # llncs, iacrtrans, svjour3, article: \author{A\inst{1} \and B}, \institute{X \and Y}
+                city, country = '', ''
+                if lines and ',' in lines[-1]:
+                    city, country = [p.strip() for p in lines.pop().rsplit(',', 1)]
+                institution = ', '.join(lines)
+                affiliation_ids = [aff(institution, city=city, country=country)] if institution else []
         m = re.search(r'\\author\s*(\[[^\]]*\])?\s*\{', t)
         inst = re.search(r'\\institute\s*\{', t)
         institutes = []
@@ -236,6 +245,16 @@ def missing(md, target):
     if not md['authors']:
         out.append(('paper', 'authors'))
     return out
+    # Generic metadata commands regardless of class, including venues that
+    # provide their keywords in the preamble rather than an IEEE environment.
+    lic = re.search(r'\\(?:license|licence)\s*\{', t)
+    if lic and not md['license']:
+        md['license'] = group(t, lic.end() - 1)[0].strip()
+    if not md['running_title']:
+        short = re.search(r'\\(?:shorttitle|runningtitle|markboth)\s*\{', t)
+        if short:
+            md['running_title'] = clean(group(t, short.end() - 1)[0])
+    md['acknowledgements'] = re.sub(r'\\(?:fi|else)\s*$', '', md['acknowledgements']).strip()
 
 
 # ---------------------------------------------------------------- writing
