@@ -135,9 +135,9 @@
           }
           // Control words swallow separating spaces in TeX.  For example,
           // \\c c has the same result as \\c{c}; do not emit a raw chip.
-          if (WORD_ACCENTS.has(name) && /[ \\t]/.test(s[k] || '')) {
+          if (WORD_ACCENTS.has(name) && /[ \t]/.test(s[k] || '')) {
             let j = k;
-            while (s[j] === ' ' || s[j] === '\\t') j++;
+            while (s[j] === ' ' || s[j] === '\t') j++;
             if (ACCENT_LETTER.test(s[j] || '')) {
               push({ t: 'cmd', name, s: s.slice(i, j + 1), accentBase: s[j] });
               i = j + 1; continue;
