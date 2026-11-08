@@ -876,23 +876,6 @@ Object.assign(TESTS, {
     untouched(env, 'main.tex', 'sections/body.tex');
   },
 
-  async 'New file: creates it, inserts \\input, and its text is editable after saving'(env, page) {
-    await page.select('Other papers exist.', 'end');
-    await page.click('#newfilebtn');
-    await page.waitFor(visible('#newfilebox'));
-    await page.eval(`$('#newfile-name').value = 'sections/extra.tex'; $('#newfile-text').value = 'Extra text.\\n'`);
-    await page.click('#newfile-create');
-    await page.waitFor(`$('#newfilebox').hidden`);
-    eq(env.read('sections/extra.tex'), 'Extra text.\n', 'the new file');
-    await page.save();
-    has(env.read('main.tex'), 'Other papers exist.\n\n\\input{sections/extra}\n\n', 'main.tex: the input, as a block of its own');
-    await page.waitFor(`document.querySelector('#doc').innerText.includes('Extra text.')`, 8000, 'the new file on the page');
-    await page.select('Extra text', 'end');
-    await page.type(' edited');
-    await page.save();
-    eq(env.read('sections/extra.tex'), 'Extra text edited.\n', 'the new file after editing');
-  },
-
   // ---- toolbar
   async 'toolbar B and I on a selection'(env, page) {
     await page.select('quick');

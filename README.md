@@ -49,8 +49,8 @@ main file. The same project can contain several main documents.
   under a cryptobib-style key; every `\label` by number, type and text.
 - **Find and replace**, toolbar, undo/redo for every kind of edit,
   light/dark/auto colours, one or two columns.
-- Sections can be moved, combined, or split at the cursor; new TeX section
-  files can be created from the interface and inserted with `\input`.
+- Sections can be moved, combined, or split at the cursor. Existing `\input`
+  files can be reviewed and edited in place.
 - **Reads aloud**, phrase by phrase, highlighting the phrase; maths is read
   as words. Voices: the browser's, Kokoro and Piper (offline), Edge
   (unofficial endpoint), Azure and Google (official, need keys).

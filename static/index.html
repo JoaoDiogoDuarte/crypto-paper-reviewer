@@ -14,7 +14,6 @@
   <span id="title">Paper editor</span>
   <span class="group">
     <button id="openbtn" title="Open a paper directory">Open…</button>
-    <button id="newfilebtn" title="Create a new TeX section file">New file…</button>
     <button id="save" title="Save edited files (Ctrl+S)">Save</button>
     <button id="historybtn" title="Earlier versions: every save keeps the text it replaced">History…</button>
     <span id="dirty"></span>
@@ -105,18 +104,6 @@
   <div class="external-actions">
     <button id="open-confirm">Open</button>
     <button id="open-cancel">Cancel</button>
-  </div>
-</div>
-<div id="newfilebox" role="dialog" aria-modal="true" aria-labelledby="newfile-title" hidden>
-  <b id="newfile-title">Create a TeX file</b>
-  <label for="newfile-name">Path relative to the paper directory</label>
-  <input id="newfile-name" placeholder="sections/new-section.tex" spellcheck="false">
-  <label for="newfile-text">Initial content</label>
-  <textarea id="newfile-text">Write here.
-</textarea>
-  <div class="external-actions">
-    <button id="newfile-create">Create and insert</button>
-    <button id="newfile-cancel">Cancel</button>
   </div>
 </div>
 <main id="doc" spellcheck="true"></main>

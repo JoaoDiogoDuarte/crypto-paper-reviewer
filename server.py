@@ -1301,22 +1301,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 BUILDER.aux = load_aux()
                 BUILDER.auxver += 1
                 return self.send(200, {'main': MAIN, 'path': PAPER})
-        if urllib.parse.urlparse(self.path).path == '/api/create-file':
-            req = self.json_body()
-            if not isinstance(req, dict) or not isinstance(req.get('name'), str) or not isinstance(req.get('text'), str):
-                return self.send(400, {'error': 'expected a JSON object with name and text'})
-            name, text = req['name'], req['text']
-            normalized = os.path.normpath(name)
-            if not name.endswith('.tex') or os.path.isabs(name) or normalized == '..' or normalized.startswith('..' + os.sep):
-                return self.send(400, {'error': 'file name must be a relative .tex path'})
-            path = os.path.join(PAPER, normalized)
-            with PROJECT_LOCK:
-                if os.path.exists(path):
-                    return self.send(409, {'error': 'file already exists'})
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                with open(path, 'w', encoding='utf-8', newline='') as f:
-                    f.write(text)
-            return self.send(201, {'name': normalized})
         if urllib.parse.urlparse(self.path).path != '/api/save':
             return self.send(404, {'error': 'not found'})
         req = self.json_body()

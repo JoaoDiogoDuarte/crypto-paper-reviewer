@@ -128,16 +128,17 @@ class BackendTest(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(result['main'], 'other.tex')
 
-    def test_create_file_and_reject_overwrite(self):
-        code, result = self.post('/api/create-file', {'name': 'sections/new.tex', 'text': 'New section.\n'})
-        self.assertEqual(code, 201)
-        self.assertEqual(result['name'], 'sections/new.tex')
-        with open(os.path.join(self.tmp, 'sections', 'new.tex')) as f:
-            self.assertEqual(f.read(), 'New section.\n')
-        code, result = self.post('/api/create-file', {'name': 'sections/new.tex', 'text': 'Changed.'})
-        self.assertEqual(code, 409)
-        code, result = self.post('/api/create-file', {'name': '../escape.tex', 'text': 'bad'})
-        self.assertEqual(code, 400)
+    def test_ieee_metadata_ignores_anonymous_author_branch(self):
+        tex = (r'\documentclass[conference]{IEEEtran}' + '\n' +
+               r'\ifanon\author{\IEEEauthorblockN{Anonymous authors}}' + '\n' +
+               r'\else\author{\IEEEauthorblockN{João Diogo Duarte}' +
+               r'\IEEEauthorblockA{\textit{University of Porto}\\Porto, Portugal}}\fi' + '\n' +
+               r'\begin{IEEEkeywords}crypto, proofs\end{IEEEkeywords}')
+        md = server.convert.extract(tex)
+        self.assertEqual([a['name'] for a in md['authors']], ['João Diogo Duarte'])
+        self.assertEqual(md['affiliations'][0]['city'], 'Porto')
+        self.assertEqual(md['affiliations'][0]['country'], 'Portugal')
+        self.assertEqual(md['keywords'], ['crypto', 'proofs'])
 
     def test_makefile_is_default_build_command(self):
         with open(os.path.join(self.tmp, 'Makefile'), 'w') as f:

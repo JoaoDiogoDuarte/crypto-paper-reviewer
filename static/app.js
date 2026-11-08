@@ -2162,7 +2162,6 @@ function closeCurrentMenu() {
   if (!$('#external').hidden) { $('#external-later').click(); return; }
   if (!$('#openbox').hidden) { $('#open-cancel').click(); return; }
   if (!$('#historybox').hidden) { $('#historybox').hidden = true; return; }
-  if (!$('#newfilebox').hidden) { $('#newfile-cancel').click(); return; }
   if (!$('#palette').hidden) { closePalette(); return; }
   if (!$('#keysbox').hidden) { RECORDING = null; $('#keysbox').hidden = true; return; }
   if (!$('#paperbox').hidden) { $('#paperbox').hidden = true; return; }
@@ -3589,44 +3588,6 @@ $('#history-close').onclick = () => { $('#historybox').hidden = true; };
 // ======================================================= main switcher
 
 let OPEN_PROJECT = null;
-
-let NEWFILE_AT = null;   // where the \input goes: the caret when the dialog opened
-function showNewFile() {
-  if (!editableAt(selRange())) { banner('Put the cursor in the paper where the new file should be included.'); return; }
-  NEWFILE_AT = selRange().cloneRange();
-  $('#newfilebox').hidden = false;
-  $('#newfile-name').focus();
-}
-
-async function createNewFile() {
-  const name = $('#newfile-name').value.trim();
-  const text = $('#newfile-text').value;
-  if (!name) return;
-  const r = await fetch('/api/create-file', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
-    body: JSON.stringify({ name, text }) });
-  if (!r.ok) { banner('Could not create the file: ' + (await r.json()).error); return; }
-  const created = (await r.json()).name;
-  const input = created.replace(/\.tex$/, '');
-  if (NEWFILE_AT && NEWFILE_AT.startContainer.isConnected) {
-    const sel = getSelection(); sel.removeAllRanges(); sel.addRange(NEWFILE_AT);
-    const host = editableAt(NEWFILE_AT); if (host) host.focus({ preventScroll: true });
-  }
-  const src = '\\input{' + input + '}';
-  // the new file is a block of its own
-  if (!insertNodes([chip('parbreak', '\n\n', ''), chip('src', src, src), chip('parbreak', '\n\n', '')])) {
-    banner(`Created ${created}, but the cursor left the text: insert \\input{${input}} yourself.`);
-    $('#newfilebox').hidden = true;
-    return;
-  }
-  $('#newfilebox').hidden = true;
-  $('#newfile-name').value = '';
-  commit();
-  await load(true);
-}
-
-$('#newfilebtn').onclick = showNewFile;
-$('#newfile-create').onclick = createNewFile;
-$('#newfile-cancel').onclick = () => { $('#newfilebox').hidden = true; };
 
 async function chooseProjectDirectory() {
   const r = await fetch('/api/pick-directory', { method: 'POST', headers: { 'X-Token': TOKEN, 'Content-Type': 'application/json' }, body: '{}' });
