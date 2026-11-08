@@ -332,3 +332,350 @@ pre.hist-diff .del { background: color-mix(in srgb, #d33 18%, transparent); text
 pre.hist-diff .ins { background: color-mix(in srgb, #3a3 20%, transparent); }
 pre.hist-diff .skip { color: var(--muted); }
 @media (max-width: 700px) { .history-cols { grid-template-columns: 1fr; } #history-list { max-height: 30vh; border-right: 0; border-bottom: 1px solid var(--line); } }
+
+
+/* macOS-inspired application chrome: keep paper typography independent. */
+:root {
+  --bg: #f5f5f7;
+  --fg: #1c1c1e;
+  --muted: #6e6e73;
+  --line: #d1d1d6;
+  --chip: #e5e5ea;
+  --accent: #007aff;
+  --dirty: #ff9500;
+  --speak: #fff0c2;
+  --math: #f0f0f5;
+  --mark: #ffcc00;
+  --find: #b5d9ff;
+  --findcur: #ff9500;
+  --mac-chrome: #f2f2f7;
+  --mac-raised: #ffffff;
+  --mac-control: #e5e5ea;
+  --mac-control-border: #d1d1d6;
+  --mac-hover: #dcdce1;
+  --mac-pressed: #cfe2ff;
+  --mac-shadow: rgba(0, 0, 0, .12);
+  --mac-window: rgba(255, 255, 255, .96);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #1c1c1e;
+    --fg: #f5f5f7;
+    --muted: #98989d;
+    --line: #38383a;
+    --chip: #2c2c2e;
+    --accent: #0a84ff;
+    --dirty: #ff9f0a;
+    --speak: #3a3320;
+    --math: #242426;
+    --mark: #665400;
+    --find: #244b74;
+    --findcur: #ff9f0a;
+    --mac-chrome: #2c2c2e;
+    --mac-raised: #3a3a3c;
+    --mac-control: #3a3a3c;
+    --mac-control-border: #48484a;
+    --mac-hover: #48484a;
+    --mac-pressed: #264b78;
+    --mac-shadow: rgba(0, 0, 0, .35);
+    --mac-window: rgba(44, 44, 46, .96);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #1c1c1e;
+  --fg: #f5f5f7;
+  --muted: #98989d;
+  --line: #38383a;
+  --chip: #2c2c2e;
+  --accent: #0a84ff;
+  --dirty: #ff9f0a;
+  --speak: #3a3320;
+  --math: #242426;
+  --mark: #665400;
+  --find: #244b74;
+  --findcur: #ff9f0a;
+  --mac-chrome: #2c2c2e;
+  --mac-raised: #3a3a3c;
+  --mac-control: #3a3a3c;
+  --mac-control-border: #48484a;
+  --mac-hover: #48484a;
+  --mac-pressed: #264b78;
+  --mac-shadow: rgba(0, 0, 0, .35);
+  --mac-window: rgba(44, 44, 46, .96);
+  color-scheme: dark;
+}
+
+/* System typography and controls. The manuscript itself remains serif. */
+button, select {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
+  border-radius: 8px;
+  transition: background-color .12s ease, border-color .12s ease, color .12s ease;
+}
+button {
+  padding: .28em .7em;
+  border-color: var(--mac-control-border);
+  background: var(--mac-control);
+}
+button:hover:not(:disabled) {
+  background: var(--mac-hover);
+  border-color: color-mix(in srgb, var(--accent) 24%, var(--mac-control-border));
+}
+button:active:not(:disabled) { background: var(--mac-pressed); }
+button:disabled { opacity: .42; cursor: default; }
+button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent);
+  outline-offset: 2px;
+}
+select {
+  border-radius: 8px;
+  border-color: var(--mac-control-border);
+  background-color: var(--mac-raised);
+}
+input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
+::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+
+/* The title bar and edit toolbar use an opaque material so manuscript text
+   never shines through the sticky layers while scrolling. */
+#bar, #toolbar, #findbar {
+  background: var(--mac-chrome);
+  backdrop-filter: blur(18px) saturate(150%);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  box-shadow: none;
+  border-color: var(--line);
+}
+#bar {
+  padding: .55em .9em;
+  gap: .45em .8em;
+}
+#title {
+  font: 600 14px/1.3 -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", system-ui, sans-serif;
+  letter-spacing: -.015em;
+}
+#bar .group {
+  gap: .16em;
+  padding: .18em;
+  border: 1px solid color-mix(in srgb, var(--mac-control-border) 76%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--mac-control) 72%, var(--mac-chrome));
+}
+#bar .group button {
+  border: 1px solid transparent;
+  border-radius: 7px;
+  padding: .28em .55em;
+  background: transparent;
+}
+#bar .group button:hover:not(:disabled) {
+  background: var(--mac-hover);
+  border-color: transparent;
+}
+#bar .group button:active:not(:disabled) { background: var(--mac-pressed); }
+#bar .group select {
+  padding: .24em .45em;
+  border: 1px solid var(--mac-control-border);
+  border-radius: 7px;
+  background: var(--mac-raised);
+}
+#bar #tts-state {
+  padding: 0 .4em;
+  font-size: 12px;
+  letter-spacing: .01em;
+}
+#bar #dirty { font-size: 12px; font-weight: 600; padding: 0 .35em; }
+#save.has-changes {
+  background: var(--dirty);
+  border-color: var(--dirty);
+  color: #1c1c1e;
+  font-weight: 600;
+}
+body.two #cols {
+  background: var(--mac-pressed);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--mac-control-border));
+}
+
+/* Flat, grouped-feeling macOS toolbar items with a quiet hover affordance. */
+#toolbar {
+  gap: .16em;
+  padding: .25em .75em;
+  border-bottom: 1px solid var(--line);
+  font: 13px/1.35 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
+}
+#toolbar button {
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  padding: .32em .58em;
+}
+#toolbar button:hover:not(:disabled) {
+  background: var(--mac-hover);
+  border-color: transparent;
+}
+#toolbar button:active:not(:disabled) { background: var(--mac-pressed); }
+#toolbar .sep {
+  height: 1.25em;
+  background: var(--line);
+  margin: 0 .35em;
+}
+body.diffing #diffbtn {
+  background: var(--mac-pressed);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--mac-control-border));
+}
+#diffbase {
+  border-radius: 7px;
+  padding: .28em .5em;
+  font-size: 12px;
+}
+#findbar {
+  padding: .35em .8em;
+  gap: .35em;
+  font: 13px/1.35 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
+  border-bottom: 1px solid var(--line);
+}
+#findbar input[type=text], #findbar input:not([type]) {
+  background: var(--mac-raised);
+  color: var(--fg);
+  border-color: var(--mac-control-border);
+  border-radius: 7px;
+  padding: .3em .55em;
+}
+#findbar label { display: inline-flex; align-items: center; gap: .25em; }
+
+/* Unified, softly raised sheets and utility windows. */
+#figview, #paperbox, #historybox, #keysbox, #helpbox, #openbox, #external, #palette {
+  background: var(--mac-window);
+  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  border-radius: 12px;
+  box-shadow: 0 18px 56px var(--mac-shadow), 0 2px 8px color-mix(in srgb, var(--mac-shadow) 40%, transparent);
+  backdrop-filter: blur(22px) saturate(170%);
+  -webkit-backdrop-filter: blur(22px) saturate(170%);
+}
+#figview { inset: 3vh 3vw; border-radius: 14px; }
+.fv-head {
+  gap: .5em;
+  padding: .55em .8em;
+  background: var(--mac-chrome);
+  border-bottom: 1px solid var(--line);
+  border-radius: 11px 11px 0 0;
+}
+.fv-head b { font-weight: 600; letter-spacing: -.01em; }
+.fv-head button {
+  border-radius: 7px;
+  padding: .28em .6em;
+}
+.fv-tabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--mac-control-border);
+  border-radius: 9px;
+  background: var(--mac-control);
+}
+.fv-tabs button {
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: .25em .6em;
+  background: transparent;
+}
+.fv-tabs button:hover:not(:disabled) { background: var(--mac-hover); border-color: transparent; }
+.fv-tabs button.on {
+  background: var(--mac-raised);
+  color: var(--fg);
+  border-color: color-mix(in srgb, var(--mac-control-border) 70%, transparent);
+  box-shadow: 0 1px 2px var(--mac-shadow);
+}
+#fv-body { padding: 1em; }
+#fv-body textarea.fv-src, .gproc textarea, #drawer-src {
+  border-radius: 8px;
+  border-color: var(--mac-control-border);
+}
+#openbox, #external {
+  border-color: color-mix(in srgb, var(--accent) 24%, var(--line));
+  border-radius: 12px;
+}
+#openbox { padding: 1em 1.1em; }
+#external { padding: 1em 1.1em; }
+#helpbox {
+  padding: 1em 1.3em;
+  font: 14px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
+}
+#helpbox h3 { font-size: 15px; font-weight: 600; letter-spacing: -.01em; }
+#helpbox ul { padding-left: 1.4em; }
+#paperbox .fv-head, #historybox .fv-head, #keysbox .fv-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+#history-list { background: color-mix(in srgb, var(--mac-chrome) 58%, transparent); }
+.hist-item { padding: .5em .8em; border-radius: 7px; margin: 2px 4px; }
+.hist-item.active {
+  background: color-mix(in srgb, var(--accent) 14%, var(--mac-control));
+  color: var(--fg);
+}
+#md-body .card { border-radius: 9px; padding: .65em .8em; }
+#md-body input[type=text], #md-body textarea, #md-body select {
+  border-radius: 7px;
+  border-color: var(--mac-control-border);
+}
+#menu {
+  background: var(--mac-raised);
+  border-color: var(--mac-control-border);
+  border-radius: 9px;
+  box-shadow: 0 8px 28px var(--mac-shadow);
+  overflow: hidden;
+}
+#menu button { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif; }
+#menu button:hover { background: color-mix(in srgb, var(--accent) 10%, var(--mac-hover)); }
+#palette { border-radius: 12px; overflow: hidden; }
+#pal-q {
+  background: var(--mac-raised);
+  color: var(--fg);
+  border: 1px solid var(--mac-control-border);
+  border-radius: 8px;
+}
+#pal-item, .pal-item { border-bottom-color: color-mix(in srgb, var(--line) 55%, transparent); }
+.pal-item.active { background: color-mix(in srgb, var(--accent) 14%, var(--mac-control)); }
+#drawer {
+  background: var(--mac-window);
+  border-top: 1px solid var(--line);
+  border-radius: 12px 12px 0 0;
+  box-shadow: 0 -12px 36px var(--mac-shadow);
+  backdrop-filter: blur(22px) saturate(170%);
+  -webkit-backdrop-filter: blur(22px) saturate(170%);
+}
+#drawer-src { background: var(--mac-raised); border-color: var(--mac-control-border); }
+#banner {
+  border-bottom: 1px solid var(--line);
+  font: 13px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
+}
+#diffmap { border-radius: 8px; background: var(--mac-control); border-color: var(--mac-control-border); }
+#diffmap-viewport { border-color: var(--accent); }
+
+/* Game panels also use the same native-looking card and control treatment. */
+.game {
+  border-radius: 10px;
+  border-color: var(--mac-control-border);
+  background: color-mix(in srgb, var(--mac-raised) 70%, transparent);
+  padding: .6em .75em;
+}
+.game-title { padding: .3em 0 .5em; }
+.game-drag { border-radius: 7px; border-color: var(--mac-control-border); background: var(--mac-control); }
+.gline .gtext:focus { border-radius: 5px; }
+.gline .gtools button, .gproc button { border-radius: 6px; }
+
+/* Native-like scrollbars, without changing the paper's reading measure. */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--muted) 30%, transparent);
+  border: 2px solid transparent;
+  border-radius: 10px;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--muted) 48%, transparent); background-clip: padding-box; }
+
+@media (prefers-reduced-motion: reduce) {
+  button, select { transition: none; }
+}
