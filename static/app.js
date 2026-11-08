@@ -4493,7 +4493,21 @@ $('#mainsel').onchange = async () => {
 // Metadata (extracted from the front matter, edited here, saved in the
 // project's .paper-editor/metadata.json), and conversion to another class.
 
-const MD = { data: null, info: null, target: 'llncs', anon: false, dirty: false, rootOutput: false };
+const MD = { data: null, info: null, target: 'llncs', anon: false, dirty: false, rootOutput: false, undo: [] };
+// Every destructive step in the dialog (restore detected fields, delete an
+// author or affiliation) can be taken back: a list of 20 authors must never be
+// one wrong click away from gone.
+function mdCheckpoint(what) {
+  MD.undo.push({ what, data: structuredClone(MD.data) });
+  if (MD.undo.length > 50) MD.undo.shift();
+}
+function mdUndo() {
+  const last = MD.undo.pop();
+  if (!last) return;
+  MD.data = last.data;
+  drawPaper(); metadataDirty();
+  toast('Undone: ' + last.what);
+}
 function metadataDirty() {
   MD.dirty = true;
   const status = $('#md-status'); if (status) status.textContent = 'Unsaved metadata changes';
@@ -4504,6 +4518,7 @@ async function openPaper() {
   MD.data = JSON.parse(JSON.stringify(MD.info.metadata));
   MD.dirty = false;
   MD.rootOutput = false;
+  MD.undo = [];
   drawPaper();
   $('#paperbox').hidden = false;
 }
@@ -4533,13 +4548,19 @@ function drawPaper() {
   const reset = el('button', '', 'Restore detected fields');
   reset.title = 'Replace saved metadata overrides with values detected from the LaTeX source';
   reset.onclick = () => {
-    if (!confirm('Replace your metadata edits with values found in the LaTeX source?')) return;
+    if (!confirm('Replace your metadata edits with values found in the LaTeX source? (Undo takes it back.)')) return;
+    mdCheckpoint('restore detected fields');
     MD.data = structuredClone(MD.info.extracted);
     drawPaper(); metadataDirty();
   };
+  const undoBtn = el('button', '', 'Undo');
+  undoBtn.id = 'md-undo';
+  undoBtn.disabled = !MD.undo.length;
+  undoBtn.title = MD.undo.length ? 'Take back: ' + MD.undo[MD.undo.length - 1].what : 'Nothing to undo';
+  undoBtn.onclick = mdUndo;
   const status = el('span', 'small', MD.dirty ? 'Unsaved metadata changes' : 'Metadata loaded');
   status.id = 'md-status'; status.setAttribute('role', 'status');
-  body.append(origin, reset, status);
+  body.append(origin, reset, undoBtn, status);
   body.append(el('h4', '', 'Paper'));
   let r = el('div', 'row');
   r.append(field(md, 'title', 'Title', 'paper', '30em'), field(md, 'running_title', 'Running title', 'paper'));
@@ -4557,7 +4578,7 @@ function drawPaper() {
     r = el('div', 'row');
     r.append(field(a, 'name', 'Name', where, '16em'), field(a, 'email', 'Email', where), field(a, 'orcid', 'ORCID', where, '11em'));
     const del = el('button', '', 'Delete'); del.title = 'Remove this author';
-    del.onclick = () => { md.authors.splice(i, 1); drawPaper(); metadataDirty(); };
+    del.onclick = () => { mdCheckpoint('delete author ' + (md.authors[i].name || (i + 1))); md.authors.splice(i, 1); drawPaper(); metadataDirty(); };
     r.append(del);
     c.append(r);
     r = el('div', 'row');
@@ -4585,6 +4606,7 @@ function drawPaper() {
       field(af, 'city', 'City', where, '8em'), field(af, 'country', 'Country', where, '8em'), field(af, 'ror', 'ROR id', where, '8em'));
     const del = el('button', '', 'Delete');
     del.onclick = () => {
+      mdCheckpoint('delete affiliation ' + (md.affiliations[k].name || (k + 1)));
       md.affiliations.splice(k, 1);
       for (const a of md.authors) a.affiliations = (a.affiliations || []).filter((j) => j !== k).map((j) => (j > k ? j - 1 : j));
       drawPaper(); metadataDirty();
