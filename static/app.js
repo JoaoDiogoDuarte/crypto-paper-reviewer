@@ -436,7 +436,7 @@ function renderHeading(seg, ctx) {
   seg.parts = h;
   const del = el('button', '', 'Delete');
   del.title = 'Delete this heading (keeps the text under it)';
-  del.onclick = (e) => { e.stopPropagation(); if (confirm('Delete this heading?')) structural(() => removeSeg(seg)); };
+  del.onclick = (e) => { e.stopPropagation(); if (confirm('Delete this heading?' + labelWarning(seg))) structural(() => removeSeg(seg)); };
   const up = el('button', '', 'Up');
   up.title = 'Move this section up';
   up.onclick = (e) => { e.stopPropagation(); moveSection(seg, -1); };
@@ -445,8 +445,19 @@ function renderHeading(seg, ctx) {
   down.onclick = (e) => { e.stopPropagation(); moveSection(seg, 1); };
   const merge = el('button', '', 'Merge');
   merge.title = 'Combine this section with the previous one';
-  merge.onclick = (e) => { e.stopPropagation(); if (confirm('Combine this section with the previous one?')) structural(() => removeSeg(seg)); };
+  merge.onclick = (e) => { e.stopPropagation(); if (confirm('Combine this section with the previous one?' + labelWarning(seg))) structural(() => removeSeg(seg)); };
   return wrapSeg(seg, node, [up, down, merge, del]);
+}
+
+// Removing a heading removes its \label too: say how many references break
+function labelWarning(seg) {
+  const keys = [...seg.src.matchAll(/\\label\{([^}]*)\}/g)].map((m) => m[1]);
+  if (!keys.length) return '';
+  commit();
+  let n = 0;
+  for (const f of Object.values(FILES)) for (const m of (f.text || '').matchAll(/\\(?:[cC]ref|v?ref|autoref|eqref|nameref|pageref)\*?\{([^}]*)\}/g))
+    n += m[1].split(',').filter((k) => keys.includes(k.trim())).length;
+  return n ? `\n\nIts label (${keys.join(', ')}) is referenced ${n} time${n === 1 ? '' : 's'}; those references will show ?? (Undo brings it back).` : '';
 }
 
 function renderCode(seg) {
@@ -978,6 +989,9 @@ function markEdited() {
 // Commit, apply a change to the segment lists, re-render from the texts.
 function structural(change) {
   if (leaveDiff()) return;   // the blocks of the diff view are not the document
+  // every structure change can be undone (Delete and Merge of a heading took
+  // no snapshot, so Ctrl+Z could not bring the heading back)
+  snapshot();
   // where the change was asked for: the new placeholder is the one nearest
   // there, not the first one in the paper (an earlier one may be unfilled)
   const at = (() => { try { const sg = segOf(editableAt(selRange()) || document.body); return sg && sg.file ? { file: sg.file, line: sg.line || 0 } : null; } catch (e) { return null; } })();

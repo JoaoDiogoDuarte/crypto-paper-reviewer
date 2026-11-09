@@ -1318,6 +1318,17 @@ Object.assign(TESTS, {
     onlyChange(env, 'main.tex', 'encryption schemes.\n\n\\section{Related work}\nOther papers exist.', 'encryption schemes.\n\nOther papers exist.');
   },
 
+  async 'Delete a heading, Combine a section: Ctrl+Z brings each back'(env, page) {
+    await page.click(headBtn('Related work', 'Delete this heading'));
+    await page.key('z', { ctrl: true });
+    await page.save();
+    untouched(env, 'main.tex');
+    await page.click(headBtn('Conclusion', 'Combine this section'));
+    await page.key('z', { ctrl: true });
+    await page.save();
+    untouched(env, 'main.tex');
+  },
+
   async 'Combine with the previous section, and saying no changes nothing'(env, page) {
     page.dialogAnswer = false;
     await page.click(headBtn('Related work', 'Combine this section'));
