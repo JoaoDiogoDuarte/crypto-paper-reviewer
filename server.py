@@ -497,29 +497,49 @@ def build_figures(log):
         if cut < 0:
             log('figures: main document has no \\begin{document}')
             return
-        # Preserve the two-column width before switching to a predictable
-        # single-column page; otherwise figure* float placement shifts pages.
-        doc = [main[:cut], r'\newlength{\pefloatcolumnwidth}', r'\makeatletter']
-        doc += aux_label_lines()
-        doc.extend([r'\makeatother', r'\pagestyle{empty}', r'\begin{document}',
-                    r'\setlength{\pefloatcolumnwidth}{\columnwidth}', r'\onecolumn'])
-        for src in todo:
-            env = re.match(r'\\begin\{(figure\*?|table\*?)\}', src).group(1)
-            body = src[src.index('}') + 1:src.rindex('\\end{')]
-            body = re.sub(r'^\[[^\]]*\]', '', body)
-            body = strip_cmd(strip_cmd(body, 'caption'), 'label')
-            width = r'\textwidth' if env.endswith('*') else r'\pefloatcolumnwidth'
-            doc.extend([r'\noindent\begin{minipage}{%s}' % width, body,
-                        r'\end{minipage}\par\clearpage'])
-        doc.append(r'\end{document}')
         tex = os.path.join(tmp, 'figs.tex')
-        with open(tex, 'w', encoding='utf-8') as out:
-            out.write('\n'.join(doc))
         env = tex_env(PAPER, os.path.dirname(PAPER), source_root())
         cmd = ['latexmk', '-pdf', '-interaction=nonstopmode', '-halt-on-error', 'figs.tex']
-        r = subprocess.run(cmd, cwd=tmp, env=env, capture_output=True, text=True, errors='replace', timeout=600)
-        debug_capture('figures', cmd, r, [tex, os.path.join(tmp, 'figs.log'),
-                                          os.path.join(tmp, 'figs.aux')], log)
+
+        def figs_document(tight):
+            # Preserve the two-column width before switching to a predictable
+            # single-column page; otherwise figure* float placement shifts pages.
+            doc = [main[:cut], r'\newlength{\pefloatcolumnwidth}', r'\makeatletter']
+            doc += aux_label_lines()
+            # tight: one page per figure, sized to it, with no header, footer,
+            # line numbers or draft notice (acmart review, iacrtrans submission,
+            # LIPIcs number lines; pdfcrop kept those and a small table became a
+            # tall, mostly empty picture)
+            if tight:
+                doc += [r'\makeatother', r'\usepackage[active,tightpage]{preview}',
+                        r'\setlength\PreviewBorder{2pt}', r'\makeatletter']
+            doc.extend([r'\makeatother', r'\pagestyle{empty}', r'\begin{document}',
+                        r'\makeatletter\@ifpackageloaded{lineno}{\nolinenumbers}{}\makeatother',
+                        r'\setlength{\pefloatcolumnwidth}{\columnwidth}', r'\onecolumn'])
+            for src in todo:
+                kind = re.match(r'\\begin\{(figure\*?|table\*?)\}', src).group(1)
+                body = src[src.index('}') + 1:src.rindex('\\end{')]
+                body = re.sub(r'^\[[^\]]*\]', '', body)
+                body = strip_cmd(strip_cmd(body, 'caption'), 'label')
+                width = r'\textwidth' if kind.endswith('*') else r'\pefloatcolumnwidth'
+                box = [r'\noindent\begin{minipage}{%s}' % width, body, r'\end{minipage}']
+                doc.extend(([r'\begin{preview}'] + box + [r'\end{preview}'] if tight else box) + [r'\par\clearpage'])
+            doc.append(r'\end{document}')
+            return '\n'.join(doc)
+
+        for tight in (True, False):
+            with open(tex, 'w', encoding='utf-8') as out:
+                out.write(figs_document(tight))
+            for stale in ('figs.pdf', 'figs.aux', 'figs.fdb_latexmk'):
+                if os.path.exists(os.path.join(tmp, stale)):
+                    os.remove(os.path.join(tmp, stale))
+            r = subprocess.run(cmd, cwd=tmp, env=env, capture_output=True, text=True, errors='replace', timeout=600)
+            debug_capture('figures', cmd, r, [tex, os.path.join(tmp, 'figs.log'),
+                                              os.path.join(tmp, 'figs.aux')], log)
+            if r.returncode == 0 and os.path.exists(os.path.join(tmp, 'figs.pdf')):
+                break
+            if tight:
+                log('figures: tight pages failed, trying plain pages: ' + tex_error(r))
         if r.returncode != 0 or not os.path.exists(os.path.join(tmp, 'figs.pdf')):
             log('figures: ' + tex_error(r))
             return
