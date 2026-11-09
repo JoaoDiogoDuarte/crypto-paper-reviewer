@@ -56,20 +56,8 @@ failure.
 
 ## CI
 
-Two workflows. Both are currently disabled on GitHub (`gh workflow enable
-smoke.yml` / `torture.yml` turns them back on).
-
-- **CI** (`smoke.yml`) is the fast gate on every PR and push to main: syntax
-  checks, backend and conversion tests, seeded LaTeX round trips and a
-  browser smoke subset, in about a minute. A newer push to a PR cancels the
-  older run.
-- **Deep torture** (`torture.yml`) runs weekly (Sunday, 03:17 UTC) and from
-  Actions > Deep torture > Run workflow. Pushes do not trigger it, so run it
-  by hand before merging risky test-harness or fixture changes. It runs every
-  campaign even when one fails, keeps logs for 14 days, and installs TeX to
-  build real named and anonymous IEEEtran/LNCS/article conversions. Some
-  less common venue classes must be installed separately; failures and
-  omissions are reported explicitly.
+There is none. The project has no GitHub Actions workflows; run the quick
+and intensive commands above locally before pushing.
 
 ## Debugging TeX builds
 
