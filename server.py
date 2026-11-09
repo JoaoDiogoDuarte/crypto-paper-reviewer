@@ -241,7 +241,7 @@ def aux_text():
 
 def load_aux():
     """Label values and types, citation numbers and heading numbers."""
-    labels, cites, heads = {}, {}, []
+    labels, cites, heads, citeinfo = {}, {}, [], {}
     aux = aux_text()
     for m in re.finditer(r'\\newlabel\{([^}]*)\}', aux):
         key = m.group(1)
@@ -256,8 +256,23 @@ def load_aux():
         else:
             v = re.sub(r'\\mbox\s*', '', val).replace('{', '').replace('}', '').strip()
             labels.setdefault(key, {})['v'] = v
-    for k, n in re.findall(r'\\bibcite\{([^}]*)\}\{([^}]*)\}', aux):
-        cites[k] = n
+    # \bibcite{key}{1}, or natbib's \bibcite{key}{{1}{2023}{{Author and Writer}}{{}}}
+    plain = lambda t: re.sub(r'\\[a-zA-Z]+\s*|[{}]', '', t.replace('~', ' ')).strip()
+    for m in re.finditer(r'\\bibcite\{([^}]*)\}', aux):
+        try:
+            body, _ = group(aux, m.end())
+        except (IndexError, AssertionError):
+            continue
+        if body.startswith('{'):
+            parts, i = [], 0
+            while i < len(body) and body[i] == '{' and len(parts) < 4:
+                g, i = group(body, i)
+                parts.append(g)
+            cites[m.group(1)] = plain(parts[0]) if parts else ''
+            citeinfo[m.group(1)] = {'year': plain(parts[1]) if len(parts) > 1 else '',
+                                    'author': plain(parts[2]) if len(parts) > 2 else ''}
+        else:
+            cites[m.group(1)] = body
     # headings, in order, with the number LaTeX printed
     for m in re.finditer(r'\\contentsline\s*\{(part|chapter|section|subsection|subsubsection)\}', aux):
         try:
@@ -276,7 +291,24 @@ def load_aux():
                 num, title = a.group(1) + ' ' + a.group(2), title[a.end():]
         num = re.sub(r'\\mbox\s*', '', num).replace('{', '').replace('}', '').strip()
         heads.append({'level': m.group(1), 'num': num, 'title': title})
-    return {'labels': labels, 'cites': cites, 'heads': heads}
+    # biblatex writes no \bibcite: numbers are \abx@aux@number in the .aux,
+    # alphabetic labels (Aut19) and names/years are in the .bbl
+    for m in re.finditer(r'\\abx@aux@number\{[^}]*\}\{([^}]*)\}\{[^}]*\}\{[^}]*\}\{([^}]*)\}', aux):
+        cites.setdefault(m.group(1), m.group(2))
+    bbl = os.path.join(PAPER, stem() + '.bbl')
+    if os.path.exists(bbl) and '\\entry{' in (btext := open(bbl, encoding='utf-8', errors='replace').read()):
+        for m in re.finditer(r'\\entry\{([^}]*)\}(.*?)\\endentry', btext, re.S):
+            k, e = m.group(1), m.group(2)
+            f = lambda name: (re.search(r'\\field\{%s\}\{([^}]*)\}' % name, e) or [None, ''])[1]
+            if k not in cites:
+                label = f('labelalpha') + f('extraalpha') or f('labelnumber')
+                if label:
+                    cites[k] = label
+            fam = re.findall(r'family=\{([^}]*)\}', e)
+            if k not in citeinfo:
+                who = fam[0] + ' et al.' if len(fam) > 2 else ' and '.join(fam)
+                citeinfo[k] = {'year': f('year'), 'author': who}
+    return {'labels': labels, 'cites': cites, 'heads': heads, 'citeinfo': citeinfo}
 
 
 def load_macros():
@@ -388,8 +420,12 @@ def load_bib():
         return {}
     bbl = open(path, encoding='utf-8', errors='replace').read()
     out = {}
-    for m in re.finditer(r'\\bibitem\{([^}]*)\}(.*?)(?=\\bibitem|\\end\{thebibliography\})', bbl, re.S):
+    # \bibitem{key}, or natbib's \bibitem[Author et~al.(2023)]%\n{key}
+    for m in re.finditer(r'\\bibitem\s*(?:\[(?:[^\[\]{}]|\{[^{}]*\})*\])?\s*%?\s*\{([^}]*)\}(.*?)(?=\\bibitem|\\end\{thebibliography\})', bbl, re.S):
         t = re.sub(r'\\BIBentry(ALT|STD)interwordspacing|\\BIBdecl[A-Za-z]*', '', m.group(2))
+        # ACM-Reference-Format: \bibfield{author}{...}, \bibinfo{person}{...}: keep the values
+        t = re.sub(r'\\bib(?:field|info)\s*\{[^{}]*\}', '', t)
+        t = re.sub(r'\\(?:showDOI|showISBNx|showISSN|showURL|urldef|href)\s*\{[^{}]*\}', '', t)
         out[m.group(1)] = t.replace('\\newblock', ' ').strip()
     # biblatex
     for m in re.finditer(r'\\entry\{([^}]*)\}(.*?)\\endentry', bbl, re.S):

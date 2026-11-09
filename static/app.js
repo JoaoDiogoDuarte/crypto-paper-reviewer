@@ -581,6 +581,10 @@ const HIDDEN = new Set(['label', 'clearpage', 'newpage', 'maketitle', 'bibliogra
   'authorrunning', 'subjclass', 'category', 'supplement', 'copyrightyear', 'acmYear', 'acmDOI', 'acmConference',
   'acmBooktitle', 'acmPrice', 'acmISBN', 'setcopyright', 'orcid', 'country', 'institution', 'city']);
 
+const CITE_CMDS = /^(cite|citep|citet|citealp|citealt|citeauthor|citeyear|citeyearpar|citenum|parencite|textcite|autocite|footcite|smartcite|supercite)$/i;
+// a citation note as LaTeX prints it: \S 4.2 -> § 4.2, p.~7 -> p. 7
+const citeNote = (n) => n.replace(/\\S\s*/g, '§').replace(/~/g, '\u00a0').replace(/[{}]/g, '').trim();
+
 function renderChip(tok, ctx) {
   switch (tok.t) {
     case 'nl': return chip('nl', tok.s, ' ');
@@ -593,13 +597,25 @@ function renderChip(tok, ctx) {
   const arg = (k = 0) => { const m = [...tok.s.matchAll(/\{([^{}]*)\}/g)]; return m[k] ? m[k][1] : ''; };
   if (HIDDEN.has(name) || (name !== 'iff' && /^(newif|else|fi|if[a-zA-Z@]*|[a-zA-Z@]+(true|false))$/.test(name))) return chip('hidden', tok.s);
   if (/^[cC]ref$|^ref$|^eqref$|^autoref$/.test(name)) return chip('ref', tok.s, refText(name, arg()));
-  if (name === 'cite') {
-    const cm = /^\\cite\s*(?:\[((?:[^\]{}]|\{[^{}]*\})*)\])?\s*\{([^{}]*)\}/.exec(tok.s);
-    const keys = cm ? cm[2] : arg();
-    const note = cm && cm[1] ? cm[1].replace(/\\S\s*/g, '§').replace(/~/g, '\u00a0').replace(/[{}]/g, '').trim() : '';
-    const nums = keys.split(',').map((k) => (DOC.aux.cites[k.trim()] || '?'));
-    const c = chip('cite', tok.s, '[' + nums.join(', ') + (note ? ', ' + note : '') + ']');
-    c.title = keys.split(',').map((k) => DOC.bib[k.trim()] || k).join('\n\n').replace(/\\[a-zA-Z]+|[{}]/g, '');
+  if (CITE_CMDS.test(name)) {
+    // \cite, natbib (\citep, \citet, \citeauthor …) and biblatex (\parencite,
+    // \textcite, \autocite …), with [post] or [pre][post] notes
+    const cm = /^\\[A-Za-z]+\*?\s*((?:\[(?:[^\]{}]|\{[^{}]*\})*\]\s*){0,2})\{([^{}]*)\}/.exec(tok.s);
+    const keys = (cm ? cm[2] : arg()).split(',').map((k) => k.trim()).filter(Boolean);
+    const opts = cm ? [...cm[1].matchAll(/\[((?:[^\]{}]|\{[^{}]*\})*)\]/g)].map((o) => citeNote(o[1])) : [];
+    const [pre, post] = opts.length > 1 ? opts : ['', opts[0] || ''];
+    const num = (k) => DOC.aux.cites[k] || '?';
+    const info = (k) => (DOC.aux.citeinfo || {})[k] || {};
+    const low = name.toLowerCase();
+    let text;
+    if (low === 'citeauthor') text = keys.map((k) => info(k).author || k).join(', ');
+    else if (low === 'citeyear') text = keys.map((k) => info(k).year || '?').join(', ');
+    else if (low === 'citeyearpar') text = '(' + keys.map((k) => info(k).year || '?').join(', ') + ')';
+    else if (/^(citet|textcite|citealt)$/.test(low))
+      text = keys.map((k, i) => (info(k).author ? info(k).author + ' ' : '') + '[' + num(k) + (i === keys.length - 1 && post ? ', ' + post : '') + ']').join(', ');
+    else text = '[' + (pre ? pre + ' ' : '') + keys.map(num).join(', ') + (post ? ', ' + post : '') + ']';
+    const c = chip('cite', tok.s, text);
+    c.title = keys.map((k) => DOC.bib[k] || k).join('\n\n').replace(/\\[a-zA-Z]+|[{}]/g, '');
     return c;
   }
   if (name === 'ec' || name === 'texttt' || name === 'url' || name === 'nolinkurl') return chip('ec', tok.s, arg());

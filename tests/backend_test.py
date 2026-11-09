@@ -81,6 +81,23 @@ class BackendTest(unittest.TestCase):
             finally:
                 error.close()
 
+    def test_citation_numbers_from_natbib_and_biblatex(self):
+        stem = os.path.join(server.PAPER, server.stem())
+        with open(stem + '.aux', 'w') as f:
+            f.write('\\bibcite{AcmA}{{1}{2023}{{Author and Writer}}{{}}}\n\\bibcite{Plain}{7}\n')
+        with open(stem + '.bbl', 'w') as f:
+            f.write('\\entry{Lit1}{book}{}{}\n family={Author},\n \\field{labelalpha}{Aut19}\n'
+                    ' \\field{year}{2019}\n\\endentry\n')
+        a = server.load_aux()
+        self.assertEqual(a['cites'], {'AcmA': '1', 'Plain': '7', 'Lit1': 'Aut19'})
+        self.assertEqual(a['citeinfo']['AcmA'], {'year': '2023', 'author': 'Author and Writer'})
+        self.assertEqual(a['citeinfo']['Lit1'], {'year': '2019', 'author': 'Author'})
+        with open(stem + '.bbl', 'w') as f:
+            f.write('\\begin{thebibliography}{2}\n\\bibitem[Author and Writer(2023)]%\n{AcmA}\n'
+                    '\\bibfield{author}{\\bibinfo{person}{Gina Author}}. 2023.\n\\end{thebibliography}\n')
+        self.assertIn('Gina Author', server.load_bib()['AcmA'])
+        self.assertNotIn('bibinfo', server.load_bib()['AcmA'])
+
     def test_box_warnings_are_read_from_the_log_with_their_file(self):
         long = ') (./sections/a-very-long-folder-name/and-another-one/that-makes-the-path-wrap-beyond.tex'
         wrapped = long[:79] + '\n' + long[79:]          # TeX breaks log lines at 79 columns
