@@ -821,7 +821,8 @@ body:not(.two) .page { margin-right: -1.2em; padding-right: 1.2em; }
   font: 11.5px/1.3 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; position: sticky; top: 0; background: var(--mac-raised); }
 #peek .peek-head button { font-size: 11.5px; padding: .1em .45em; }
 #peek .peek-body { padding: .4em .7em .6em; white-space: pre-wrap; }
-.seg.edited::before { content: ''; position: absolute; left: -14px; top: 0; bottom: 0; width: 14px; cursor: help; }
+.seg.edited::before { content: ""; position: absolute; left: -12px; top: 0; bottom: 0; width: 8px; cursor: help; z-index: 1; }
+.seg.edited:hover > .tools { z-index: 7; }
 /* Word-level diff: stronger tints, readable on the grey light page. */
 .d-del { background: color-mix(in srgb, #d33 32%, transparent); text-decoration-thickness: 1.5px; }
 .d-ins { background: color-mix(in srgb, #2a3 32%, transparent); text-decoration-thickness: 1.5px; }
@@ -869,3 +870,12 @@ body.two .seg.wide img { max-width: min(100%, 42em); }
 :root[data-cb] #md-body .ok { color: var(--cb-add); }
 :root[data-cb] #md-body .missing, :root[data-cb] .keyrow.conflict kbd { color: var(--cb-del); border-color: var(--cb-del); }
 :root[data-cb] #md-body input.need { border-color: var(--cb-del); box-shadow: 0 0 0 1px var(--cb-del); }
+/* Overfull / underfull boxes of the last build */
+.seg.boxwarn > .boxbadge { position: absolute; right: 0; top: -.75em; z-index: 2; pointer-events: auto; user-select: none;
+  font: 10.5px/1.5 system-ui, sans-serif; padding: 0 .45em; border-radius: 999px; border: 1px solid var(--line);
+  background: var(--bg); color: var(--muted); white-space: nowrap; cursor: help; }
+.seg.boxwarn > .boxbadge.over { color: #b5651d; border-color: color-mix(in srgb, #b5651d 45%, var(--line)); }
+:root[data-cb] .seg.boxwarn > .boxbadge.over { color: var(--cb-del); border-color: var(--cb-del); }
+.seg.boxflash { outline: 2px solid var(--accent); outline-offset: 3px; transition: outline-color .6s; }
+#boxsum { font-size: 11.5px; padding: 0 .5em; margin-left: .4em; border-radius: 999px; color: #b5651d; }
+#boxsum[hidden] { display: none; }

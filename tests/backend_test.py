@@ -81,6 +81,22 @@ class BackendTest(unittest.TestCase):
             finally:
                 error.close()
 
+    def test_box_warnings_are_read_from_the_log_with_their_file(self):
+        long = ') (./sections/a-very-long-folder-name/and-another-one/that-makes-the-path-wrap-beyond.tex'
+        wrapped = long[:79] + '\n' + long[79:]          # TeX breaks log lines at 79 columns
+        log = ('This is pdfTeX\n(./main.tex\nLaTeX2e <2024-11-01>\n(/usr/share/texlive/article.cls\n'
+               '(/usr/share/texlive/size10.clo)) (./sections/intro.tex\n'
+               'Overfull \\hbox (28.80286pt too wide) in paragraph at lines 45--46\n'
+               '[][][]\\T1/cmr/m/n/10 (see) [1] (x)\n\n'
+               + wrapped + '\nUnderfull \\hbox (badness 10000) in paragraph at lines 3--5\n[]\n\n)\n'
+               'Overfull \\vbox (2.0pt too high) detected at line 99\n)\n')
+        got = server.parse_box_warnings(log)
+        self.assertEqual([(b['kind'], b['file'], b['from'], b['to']) for b in got], [
+            ('overfull', 'sections/intro.tex', 45, 46),
+            ('underfull', 'sections/a-very-long-folder-name/and-another-one/that-makes-the-path-wrap-beyond.tex', 3, 5),
+            ('overfull', 'main.tex', 99, 99)])
+        self.assertEqual(got[0]['amount'], '28.80286pt too wide')
+
     def test_metadata_saves_keep_the_version_they_replace(self):
         """Losing 20 authors to a wrong click is never final: every save keeps the old version."""
         md = server.metadata()['metadata']

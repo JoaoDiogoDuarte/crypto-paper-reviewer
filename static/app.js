@@ -230,7 +230,57 @@ function render() {
   layoutPages(doc);
   watchEdits();
   markEdited();
+  markBoxes();
   if (speech) TTS.restore(speech);
+}
+
+// Overfull and underfull boxes of the last build (from its .log, by file and
+// line): a badge on each block concerned, and a count beside the build state
+// that steps through them.
+let BOXES = [];
+function markBoxes(list) {
+  if (list) {
+    const key = JSON.stringify(list);
+    if (key === markBoxes.key && document.querySelector('#boxsum')) return;
+    markBoxes.key = key; BOXES = list;
+  }
+  for (const b of document.querySelectorAll('#doc .boxbadge')) b.remove();
+  for (const e of document.querySelectorAll('#doc .seg.boxwarn')) e.classList.remove('boxwarn');
+  let over = 0, under = 0;
+  for (const seg of ORDER) {
+    if (!seg.el || !seg.file || seg.line === undefined) continue;
+    const hits = BOXES.filter((b) => b.file === seg.file && b.from != null && b.to >= seg.line && b.from <= (seg.lastLine || seg.line));
+    if (!hits.length) continue;
+    const o = hits.filter((b) => b.kind === 'overfull');
+    over += o.length; under += hits.length - o.length;
+    seg.el.classList.add('boxwarn');
+    const worst = o.length ? o.reduce((a, b) => (parseFloat(b.amount) > parseFloat(a.amount) ? b : a)) : hits[0];
+    const badge = el('span', 'boxbadge ' + (o.length ? 'over' : 'under'),
+      o.length ? '↔ ' + parseFloat(worst.amount).toFixed(1) + 'pt too wide' : worst.amount.replace(/^badness /, 'badness '));
+    if (hits.length > 1) badge.textContent += ` (+${hits.length - 1})`;
+    badge.title = hits.map((b) => `${b.kind === 'overfull' ? 'Overfull' : 'Underfull'} \\${b.box} (${b.amount}), ${b.file} line${b.from === b.to ? ' ' + b.from : 's ' + b.from + '–' + b.to}`).join('\n');
+    badge.contentEditable = 'false';
+    seg.el.append(badge);
+  }
+  let sum = document.querySelector('#boxsum');
+  if (!sum && $('#build')) {
+    sum = el('button', '', ''); sum.id = 'boxsum'; sum.type = 'button';
+    sum.title = 'Overfull and underfull boxes in the last build: click to go to the next one';
+    sum.onclick = () => {
+      const marked = [...document.querySelectorAll('#doc .seg.boxwarn')];
+      if (!marked.length) return;
+      markBoxes.at = ((markBoxes.at ?? -1) + 1) % marked.length;
+      marked[markBoxes.at].scrollIntoView({ block: 'center', behavior: 'smooth' });
+      marked[markBoxes.at].classList.add('boxflash');
+      setTimeout(() => marked[markBoxes.at] && marked[markBoxes.at].classList.remove('boxflash'), 900);
+    };
+    $('#build').after(sum);
+  }
+  if (sum) {
+    const parts = [over && `${over} overfull`, under && `${under} underfull`].filter(Boolean);
+    sum.textContent = parts.join(' · ');
+    sum.hidden = !parts.length;
+  }
 }
 
 // Pages: from SyncTeX (the page each source line went to), or estimated from
@@ -662,9 +712,44 @@ const KATEX_SHIMS = { '\\ensuremath': '#1', '\\xspace': '', '\\mathchoice': '#1'
   '\\unboldmath': '', '\\textsc': '\\text{#1}', '\\mbox': '\\text{#1}',
   '\\protect': '', '\\nobreak': '', '\\allowbreak': '' };
 const katexMacros = () => ({ ...KATEX_SHIMS, ...DOC.macros });
+// A numbered display environment shows the numbers LaTeX gave it (from the
+// .aux), not KaTeX's own count, which restarts at (1) in every formula: each
+// row gets \tag{n}; rows without a label take the number after the row before.
+const NUMBERED_ENV = /^\s*\\begin\{(equation|align|gather|multline|flalign|alignat|eqnarray)\}/;
+function tagRows(src, body) {
+  const env = NUMBERED_ENV.exec(src);
+  if (!env || /\\tag\b/.test(body)) return body;
+  const wrap = /^(\s*\\begin\{[a-z]+\}(?:\{[^}]*\})?)([\s\S]*?)(\\end\{[a-z]+\}\s*)$/.exec(body);
+  if (!wrap) return body;
+  const inner = tagInner(env[1], wrap[2]);
+  return inner === null ? body : wrap[1] + inner + wrap[3];
+}
+function tagInner(name, body) {
+  const single = name === 'equation' || name === 'multline';
+  const rows = single ? [body] : body.split(/(\\\\(?:\[[^\]]*\])?)/);
+  const parts = [];                 // indexes of the rows (odd entries are the \\ separators)
+  for (let i = 0; i < rows.length; i += 2) parts.push(i);
+  const num = parts.map((i) => {
+    if (/\\(nonumber|notag)\b/.test(rows[i])) return null;
+    if (!single && !rows[i].trim() && i === rows.length - 1) return null;   // a trailing \\
+    const lab = /\\label\{([^}]*)\}/.exec(rows[i]);
+    return { v: lab ? labelValue(lab[1]) : undefined };
+  });
+  // fill unlabelled numbered rows from a labelled neighbour (consecutive numbers)
+  const known = num.findIndex((n) => n && n.v && /^\d+$/.test(n.v));
+  if (known < 0) return null;
+  let c = +num[known].v;
+  for (let k = known - 1; k >= 0; k--) if (num[k]) num[k].v = num[k].v || String(--c);
+  c = +num[known].v;
+  for (let k = known + 1; k < num.length; k++) if (num[k]) { if (num[k].v && /^\d+$/.test(num[k].v)) c = +num[k].v; else num[k].v = num[k].v || String(++c); }
+  parts.forEach((i, k) => { if (num[k] && num[k].v) rows[i] += `\\tag{${num[k].v}}`; else if (!single && rows[i].trim()) rows[i] += '\\notag'; });
+  return rows.join('');
+}
+
 function typesetInto(src, node, display) {
   let [body, disp] = mathBody(src);
-  body = body.replace(/\\label\{[^}]*\}/g, '').replace(/\\(nonumber|notag)\b/g, '');
+  body = tagRows(src, body);
+  body = body.replace(/\\label\{[^}]*\}/g, '').replace(/\\(nonumber)\b/g, '\\notag');
   // Only the preview changes; the original source remains on the chip.
   body = body.replace(/\\begin\{multline\*?\}/g, '\\begin{aligned}')
     .replace(/\\end\{multline\*?\}/g, '\\end{aligned}')
@@ -1456,6 +1541,7 @@ async function poll() {
     const s = SAVING ? null : await (await fetch('/api/state')).json();
     if (s && !SAVING) {
       setBuild(s.build);
+      if (s.boxes) markBoxes(s.boxes);
       const busy = Date.now() - lastTyping < 4000 || !$('#drawer').hidden || PENDING_EXTERNAL || !$('#figview').hidden || DIFF_SHOWN || DIFF.on;
       const changed = Object.keys(s.hashes).filter((n) => FILES[n] && s.hashes[n] !== FILES[n].base);
       if (!busy && (changed.length || s.auxver !== AUXVER)) {
@@ -1842,7 +1928,20 @@ function revealRange(range, smooth) {
     if (e) e.scrollIntoView({ block: 'center' });
     r = first();
   }
-  window.scrollBy({ top: r.top - top - (innerHeight - top) / 3, behavior: smooth && !far ? 'smooth' : 'auto' });
+  const delta = r.top - top - (innerHeight - top) / 3;
+  const glide = smooth && !far && Math.abs(delta) < innerHeight / 2;   // a short move glides, a long one jumps
+  window.scrollBy({ top: delta, behavior: glide ? 'smooth' : 'auto' });
+  // blocks just scrolled past are measured for real in the next frames and
+  // push the range away: place it again until it stays (a few frames)
+  if (!glide) {
+    let tries = 0;
+    const settle = () => requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (!range.startContainer.isConnected) return;
+      const q = first(), want = top + (innerHeight - top) / 3;
+      if (Math.abs(q.top - want) > 4 && tries++ < 20) { window.scrollBy(0, q.top - want); settle(); }
+    }));
+    settle();
+  }
 }
 
 const SPOKEN = { '≤': ' at most ', '≥': ' at least ', '=': ' equals ', '≠': ' is not ', '<': ' less than ',
@@ -3388,6 +3487,7 @@ function showPeek(seg) {
 // it does nothing), or at once on a click; typing or scrolling cancels it, and
 // it waits a moment before closing so that the pointer can reach Revert.
 function barSeg(e) {
+  if (e.target.closest && e.target.closest('.tools, button, #menu')) return null;   // the block's tools stay theirs
   const segEl = e.target.closest && e.target.closest('#doc .seg.edited');
   if (!segEl || !segEl.seg) return null;
   const r = segEl.getBoundingClientRect();

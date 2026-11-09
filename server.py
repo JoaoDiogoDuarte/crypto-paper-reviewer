@@ -658,9 +658,82 @@ def doc_payload():
             'tts': {}}
 
 
+# ------------------------------------------------------------------ box warnings
+#
+# Overfull and underfull boxes from the last build's .log, with the source
+# file and lines TeX reports, so the page can mark the blocks concerned.
+
+BOX_RE = re.compile(r'^(Overfull|Underfull) \\([hv]box) \((.*?)\) (in paragraph|in alignment|detected|has occurred)'
+                    r'(?: at lines? (\d+)(?:--(\d+))?)?')
+FILE_RE = re.compile(r'\(((?:\.{0,2}/|/)?[^\s()]+?\.(?:tex|ltx))(?=[\s()]|$)')
+
+
+def parse_box_warnings(text, root=None):
+    """[{kind, box, amount, file, from, to}] from LaTeX log text. The file is
+    found from the log's ( ... ) nesting; lines wrapped at 79 columns are joined."""
+    lines, buf = [], ''
+    for line in text.split('\n'):
+        buf += line
+        if len(line) != 79:
+            lines.append(buf); buf = ''
+    if buf:
+        lines.append(buf)
+    stack, out, skip = [], [], False
+    for line in lines:
+        if skip:                      # the box contents shown after a warning
+            if not line.strip():
+                skip = False
+            continue
+        m = BOX_RE.match(line)
+        if m:
+            f = next((x for x in reversed(stack) if x), None)
+            if f:
+                f = os.path.normpath(f[2:] if f.startswith('./') else f)
+                if root and os.path.isabs(f):
+                    f = os.path.relpath(f, root)
+            a = int(m.group(5)) if m.group(5) else None
+            out.append({'kind': m.group(1).lower(), 'box': m.group(2), 'amount': m.group(3),
+                        'file': f, 'from': a, 'to': int(m.group(6)) if m.group(6) else a})
+            skip = True
+            continue
+        i = 0
+        while i < len(line):
+            c = line[i]
+            if c == '(':
+                fm = FILE_RE.match(line, i)
+                if fm:
+                    stack.append(fm.group(1)); i = fm.end(); continue
+                stack.append(None)
+            elif c == ')' and stack:
+                stack.pop()
+            i += 1
+    return out
+
+
+_boxes = {'stamp': None, 'list': []}
+
+
+def box_warnings():
+    """The last build's box warnings, re-read only when the .log changes."""
+    path = os.path.join(PAPER, stem() + '.log')
+    try:
+        st = os.stat(path)
+    except OSError:
+        return []
+    stamp = (st.st_mtime_ns, st.st_size)
+    if _boxes['stamp'] != stamp:
+        try:
+            text = open(path, encoding='utf-8', errors='replace').read()
+            _boxes['list'] = parse_box_warnings(text, PAPER)[:300]
+        except OSError:
+            _boxes['list'] = []
+        _boxes['stamp'] = stamp
+    return _boxes['list']
+
+
 def state_payload():
     return {'hashes': {n: sha(read(n)) for n in paper_files()}, 'auxver': BUILDER.auxver,
-            'build': BUILDER.state}
+            'build': BUILDER.state, 'boxes': box_warnings()}
 
 
 # ------------------------------------------------------------------ bibliography
