@@ -201,6 +201,7 @@ let HEADS = {};
 // ---------------------------------------------------------------- rendering
 
 function render() {
+  unicodeEngine.v = undefined;      // the preamble may have changed
   DIFF_SHOWN = false;
   const speech = typeof TTS !== 'undefined' ? TTS.capture() : null;
   if (typeof TTS !== 'undefined') TTS.reset();
@@ -819,14 +820,41 @@ function roman(n) {
 
 // Characters the block being serialized already uses as Unicode (an author
 // who writes — rather than ---): typography leaves them alone.
-let KEEP_UNICODE = '';
+let KEEP_UNICODE = '', KEEP_MATH_UNICODE = '';
 let HOUSE_RULE_CHANGES = [];
+// Maths symbols typed as Unicode (≤, α, ∀ …) stop a pdfLaTeX build: written
+// as LaTeX ($\le$), unless the paper is set for XeLaTeX/LuaLaTeX or the block
+// already used that character as it is.
+const UNI_MATH = {
+  '≤': 'le', '≥': 'ge', '≠': 'neq', '≈': 'approx', '≡': 'equiv', '∈': 'in', '∉': 'notin', '⊆': 'subseteq', '⊂': 'subset',
+  '⊇': 'supseteq', '⊃': 'supset', '∪': 'cup', '∩': 'cap', '∀': 'forall', '∃': 'exists', '¬': 'neg', '∧': 'land', '∨': 'lor',
+  '→': 'to', '←': 'gets', '↦': 'mapsto', '⇒': 'Rightarrow', '⇐': 'Leftarrow', '⇔': 'Leftrightarrow', '↔': 'leftrightarrow',
+  '×': 'times', '⋅': 'cdot', '±': 'pm', '∓': 'mp', '∞': 'infty', '∑': 'sum', '∏': 'prod', '∅': 'emptyset', '⊕': 'oplus',
+  '⊗': 'otimes', '⊥': 'bot', '⊤': 'top', '∘': 'circ', '∂': 'partial', '∇': 'nabla', '⟨': 'langle', '⟩': 'rangle', '≪': 'll', '≫': 'gg',
+  'α': 'alpha', 'β': 'beta', 'γ': 'gamma', 'δ': 'delta', 'ε': 'varepsilon', 'ϵ': 'epsilon', 'ζ': 'zeta', 'η': 'eta', 'θ': 'theta',
+  'ι': 'iota', 'κ': 'kappa', 'λ': 'lambda', 'μ': 'mu', 'ν': 'nu', 'ξ': 'xi', 'π': 'pi', 'ρ': 'rho', 'σ': 'sigma', 'τ': 'tau',
+  'υ': 'upsilon', 'φ': 'varphi', 'ϕ': 'phi', 'χ': 'chi', 'ψ': 'psi', 'ω': 'omega', 'Γ': 'Gamma', 'Δ': 'Delta', 'Θ': 'Theta',
+  'Λ': 'Lambda', 'Ξ': 'Xi', 'Π': 'Pi', 'Σ': 'Sigma', 'Υ': 'Upsilon', 'Φ': 'Phi', 'Ψ': 'Psi', 'Ω': 'Omega',
+};
+const UNI_MATH_RE = new RegExp('[' + Object.keys(UNI_MATH).join('') + ']', 'g');
+// what pdfLaTeX cannot print at all, maths or not: CJK, emoji and the like
+const UNPRINTABLE_RE = /[\u2E80-\u9FFF\uAC00-\uD7AF\uF900-\uFAFF\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/gu;
+function unicodeEngine() {
+  if (unicodeEngine.v === undefined) {
+    const b = DOC && DOC.config && DOC.config.build;
+    const build = Array.isArray(b) ? b.join(' ') : String(b || '');
+    unicodeEngine.v = /xelatex|lualatex|-xe|-lua/.test(build) ||
+      Object.values(FILES).some((f) => /\\usepackage(?:\[[^\]]*\])?\{[^}]*\b(?:fontspec|unicode-math)\b/.test(f.text || ''));
+  }
+  return unicodeEngine.v;
+}
 function ser(node) {
   let out = '';
   for (const n of node.childNodes) {
     if (n.nodeType === 3) {
       let t = L.encodeText(n.data);
       t = KEEP_UNICODE ? t.replace(/[\u2013\u2014\u2018\u2019\u201c\u201d\u2026]/g, (c) => (KEEP_UNICODE.includes(c) ? c : L.typeset(c))) : L.typeset(t);
+      if (!unicodeEngine()) t = t.replace(UNI_MATH_RE, (c) => (KEEP_MATH_UNICODE.includes(c) ? c : '$\\' + UNI_MATH[c] + '$'));
       // text right after a % comment would end up inside the comment: start a new line
       const prevEl = n.previousSibling;
       if (t && prevEl && prevEl.nodeType === 1 && prevEl.dataset && (prevEl.dataset.src || '').startsWith('%') &&
@@ -859,6 +887,7 @@ function segSource(seg, warnings, changes, applyRules = true) {
   if (seg.removed) return '';
   if (!seg.touched && seg.kind !== 'code') return seg.src;
   KEEP_UNICODE = (seg.src.match(/[\u2013\u2014\u2018\u2019\u201c\u201d\u2026]/g) || []).join('');
+  KEEP_MATH_UNICODE = (seg.src.match(UNI_MATH_RE) || []).join('');
   const fix = (text, original) => {
     if (!applyRules || text === original) return text;
     const [t, w] = L.houseRules(text, (DOC.config || {}).house_rules, original);
@@ -867,7 +896,15 @@ function segSource(seg, warnings, changes, applyRules = true) {
     return t;
   };
   switch (seg.kind) {
-    case 'para': return seg.edit ? fix(ser(seg.edit), seg.src) : seg.src;
+    case 'para': {
+      if (!seg.edit) return seg.src;
+      const out = fix(ser(seg.edit), seg.src);
+      if (!unicodeEngine() && out !== seg.src) {
+        const bad = [...new Set((out.match(UNPRINTABLE_RE) || []).filter((c) => !seg.src.includes(c)))];
+        if (bad.length) warnings.push(`pdfLaTeX cannot print ${bad.join(' ')} (use XeLaTeX/LuaLaTeX, or remove them)`);
+      }
+      return out;
+    }
     case 'heading': {
       if (!seg.edit || !seg.parts) return seg.src;
       return seg.parts.prefix + fix(ser(seg.edit), seg.parts.title) + seg.parts.suffix;
@@ -1316,7 +1353,7 @@ function copySelection(e, cut) {
     return;
   }
   const frag = r.cloneContents();
-  KEEP_UNICODE = '';
+  KEEP_UNICODE = ''; KEEP_MATH_UNICODE = '';
   e.clipboardData.setData('text/plain', plainOf(frag));
   e.clipboardData.setData(LATEX_MIME, ser(frag));
   e.preventDefault();
