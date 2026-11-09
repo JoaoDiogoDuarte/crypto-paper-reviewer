@@ -3762,6 +3762,7 @@ function openFigure(seg) {
   // with any caption edit made since; while the diff view shows marks in the
   // page, the source it was compared with
   FV.src = DIFF_SHOWN ? (seg.diffSrc !== undefined ? seg.diffSrc : seg.src) : segSource(seg, [], null, false);
+  FV.orig = FV.src;      // what the figure was when opened: Apply compares with this
   FV.games = parseGames(FV.src);
   FV.tables = L.parseTabulars(FV.src);
   FV.undo = []; FV.redo = []; FV.lastEditor = null; FV.dragIndex = -1;
@@ -3774,6 +3775,19 @@ function openFigure(seg) {
 }
 
 function showFigTab(tab) {
+  // leaving the LaTeX tab keeps what was typed there: it becomes the draft
+  // the other tabs show (it used to be dropped, and Apply then wrote nothing)
+  if (FV.tab === 'latex' && tab !== 'latex' && FV.latexEdited) {
+    const ta = $('#fv-body textarea');
+    if (ta) {
+      FV.latexEdited = false;
+      gameCheckpoint();                 // the draft before the LaTeX edit, for Undo
+      FV.src = ta.value;
+      FV.games = parseGames(FV.src);
+      FV.tables = L.parseTabulars(FV.src);
+      FV.lastEditor = null;
+    }
+  }
   FV.tab = tab;
   updateGameActions();
   for (const b of document.querySelectorAll('.fv-tabs button')) b.classList.toggle('on', b.dataset.tab === tab);
@@ -4239,7 +4253,9 @@ function applyFigure() {
   if (DIFF.on) { toast('Leave the diff view (± Diff) to apply changes', 'error'); return; }
   const seg = FV.seg;
   const src = figureWithEdits();
-  if (src === FV.src) { closeFigure(); return; }
+  // compare with the figure as opened: a draft can be rebased (LaTeX tab,
+  // undo) and still differ from the paper
+  if (src === (FV.orig !== undefined ? FV.orig : FV.src)) { closeFigure(); return; }
   snapshot();
   seg.figSrc = src;
   seg.parts = L.captionParts(src) || { prefix: src, caption: '', suffix: '' };
@@ -4264,7 +4280,7 @@ function applyFigure() {
 
 function closeFigure(force = false) {
   if (!FV.seg) return;
-  if (!force && figureWithEdits() !== FV.src &&
+  if (!force && figureWithEdits() !== (FV.orig !== undefined ? FV.orig : FV.src) &&
       !confirm('Discard pending figure/game changes? Undo and redo here will be lost.')) return;
   $('#figview').hidden = true;
   FV.seg = null; FV.latexEdited = false; FV.lastEditor = null;

@@ -1458,6 +1458,20 @@ Object.assign(TESTS, {
     onlyChange(env, 'main.tex', '\\fbox{box}', '\\fbox{boxed}');
   },
 
+  async 'figure viewer: a LaTeX edit survives switching tabs, then Apply writes it'(env, page) {
+    await page.click(`js:ORDER.find((s) => s.kind === 'figure').el.querySelector('div.small, img')`, { count: 2 });
+    await page.waitFor(visible('#figview'), 8000, 'the figure viewer');
+    await page.click(`.fv-tabs button[data-tab="latex"]`);
+    await page.eval(`(() => { const ta = $('#fv-body textarea'); ta.value = ta.value.replace('fbox{box}', 'fbox{boxed}'); ta.dispatchEvent(new Event('input')); })()`);
+    await page.click(`.fv-tabs button[data-tab="text"]`);          // leave the LaTeX tab
+    await page.click(`.fv-tabs button[data-tab="latex"]`);
+    has(await page.eval(`$('#fv-body textarea').value`), 'fbox{boxed}', 'the edit is still there');
+    await page.click(`.fv-tabs button[data-tab="text"]`);
+    await page.click('#fv-apply');                                   // Apply from another tab
+    await page.save();
+    onlyChange(env, 'main.tex', '\\fbox{box}', '\\fbox{boxed}');
+  },
+
   async 'figure viewer keeps a caption edit made before it opened'(env, page) {
     await page.select('A caption here', 'end');
     await page.type(' edited');
