@@ -621,6 +621,14 @@ function renderChip(tok, ctx) {
   if (name === 'ec' || name === 'texttt' || name === 'url' || name === 'nolinkurl') return chip('ec', tok.s, arg());
   if (name === 'appendices' || name === 'appendix') { ctx.app = true; ctx.sec = 0; return chip('runin', tok.s, 'Appendices'); }
   if (name === 'bibliography' || name === 'printbibliography') return refList(tok.s);   // BibTeX or biblatex
+  if (name === 'bibitem') {
+    // a hand-written thebibliography: each entry on its own line, with its label
+    const key = (/\{([^}]*)\}\s*$/.exec(tok.s) || [])[1] || arg();
+    const label = (/^\\bibitem\s*\[([^\]]*)\]/.exec(tok.s) || [])[1];
+    const c = chip('item', tok.s);
+    c.append(el('span', 'itemmark', '[' + (label || DOC.aux.cites[key.trim()] || '?') + '] '));
+    return c;
+  }
   if (name === 'item') {
     // a line break, then the marker: a bullet, the number in an enumerate,
     // the label of \item[label]; nested lists indent by depth
