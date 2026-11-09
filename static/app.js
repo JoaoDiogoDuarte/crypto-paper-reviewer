@@ -620,7 +620,7 @@ function renderChip(tok, ctx) {
   }
   if (name === 'ec' || name === 'texttt' || name === 'url' || name === 'nolinkurl') return chip('ec', tok.s, arg());
   if (name === 'appendices' || name === 'appendix') { ctx.app = true; ctx.sec = 0; return chip('runin', tok.s, 'Appendices'); }
-  if (name === 'bibliography') return refList(tok.s);
+  if (name === 'bibliography' || name === 'printbibliography') return refList(tok.s);   // BibTeX or biblatex
   if (name === 'item') {
     // a line break, then the marker: a bullet, the number in an enumerate,
     // the label of \item[label]; nested lists indent by depth
@@ -800,7 +800,8 @@ function refList(src) {
   c.style.display = 'block';
   const h = el('h2', '', 'References');
   const ol = el('ul', 'refs');
-  const keys = Object.entries(DOC.aux.cites).sort((a, b) => a[1] - b[1]);
+  // numeric labels in order; alphabetic ones (biblatex Aut19) alphabetically
+  const keys = Object.entries(DOC.aux.cites).sort((a, b) => (isNaN(a[1]) || isNaN(b[1]) ? String(a[1]).localeCompare(String(b[1])) : a[1] - b[1]));
   for (const [k, n] of keys) {
     const li = el('li');
     li.textContent = `[${n}] ` + (DOC.bib[k] || k).replace(/\\[a-zA-Z]+\s*|[{}~]/g, (m) => (m === '~' ? ' ' : ''));
