@@ -882,3 +882,7 @@ body.two .seg.wide img { max-width: min(100%, 42em); }
 /* The Paper dialog is as tall as its content (up to 90% of the window), not
    always full height with an empty grey half. */
 #paperbox { bottom: auto; max-height: 90vh; }
+/* Dialog headers wrap in a narrow window instead of pushing Close off the
+   edge; the title does not break inside a word. */
+.fv-head { flex-wrap: wrap; row-gap: .4em; }
+.fv-head > b { white-space: nowrap; }
