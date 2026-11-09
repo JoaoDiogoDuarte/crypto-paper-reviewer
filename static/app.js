@@ -1223,6 +1223,8 @@ function preview() {
 
 function applyDrawer(remove) {
   if (!drawerChip) return closeDrawer(true);
+  // its window was redrawn or closed: the formula is gone, write nowhere
+  if (!drawerChip.isConnected) { closeDrawer(true); toast('That formula is no longer shown (its window changed): open it again', 'error'); return; }
   if (drawerChip.isConnected) snapshot();
   const src = $('#drawer-src').value;
   if (remove || !src.trim()) {
@@ -1525,6 +1527,8 @@ async function saveOnce() {
     for (const seg of ORDER) if (seg.touched) { seg.src = segSource(seg, [], null, apply); seg.touched = false; }
     markEdited();
   }
+  // a failure shown before is over once a save goes through
+  if (saved && !conflicts.length && /^Sav(ing|e) .*failed/.test($('#banner').textContent)) { $('#banner').hidden = true; clearTimeout(banner.t); }
   if (saved) { setBuild({ state: 'running', message: 'saved; rebuilding PDF' }); toast(`Saved ${saved} file${saved > 1 ? 's' : ''}; rebuilding the PDF`, 'ok'); }
   if (conflicts.length) toast(`${conflicts.length} file${conflicts.length > 1 ? 's' : ''} not saved: changed on disk`, 'error');
   if (warnings.length && saved) banner('Saved. House rules: ' + [...new Set(warnings)].join('; '));
@@ -3688,7 +3692,7 @@ async function diffOn() {
         } else { b.el.classList.add('diff-new'); DIFF.marks.push(b.el); }
       }
       for (const d of dels) {   // deleted blocks, shown where they were
-        const ghost = renderSeg({ ...d }, {});
+        const ghost = renderSeg({ ...d }, { sec: 0, sub: 0, subsub: 0, app: false, counters: {}, heads: {}, env: [] });
         if (!ghost) continue;
         ghost.classList.add('diff-gone', 'diff-ghost');
         for (const e of ghost.querySelectorAll('[contenteditable]')) e.contentEditable = 'false';
@@ -3816,6 +3820,7 @@ function openFigure(seg) {
 }
 
 function showFigTab(tab) {
+  dropFigureDrawer();   // the tab is drawn again: its chips are replaced
   // leaving the LaTeX tab keeps what was typed there: it becomes the draft
   // the other tabs show (it used to be dropped, and Apply then wrote nothing)
   if (FV.tab === 'latex' && tab !== 'latex' && FV.latexEdited) {
@@ -4324,7 +4329,12 @@ function closeFigure(force = false) {
   if (!force && figureWithEdits() !== (FV.orig !== undefined ? FV.orig : FV.src) &&
       !confirm('Discard pending figure/game changes? Undo and redo here will be lost.')) return;
   $('#figview').hidden = true;
+  dropFigureDrawer();
   FV.seg = null; FV.latexEdited = false; FV.lastEditor = null;
+}
+// the formula editor open on a chip of the figure window goes with it
+function dropFigureDrawer() {
+  if (drawerChip && (drawerChip.closest('#figview') || !drawerChip.isConnected)) closeDrawer(true);
 }
 
 for (const b of document.querySelectorAll('.fv-tabs button')) b.onclick = () => showFigTab(b.dataset.tab);

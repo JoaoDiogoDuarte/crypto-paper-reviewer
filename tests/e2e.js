@@ -196,12 +196,17 @@ class Page {
   // expression giving the element when it starts with "js:")
   async click(sel, opts = {}) {
     const expr = sel.startsWith('js:') ? sel.slice(3) : `document.querySelector(${JSON.stringify(sel)})`;
-    const box = await this.eval(`(() => { const e = ${expr}; if (!e) return null; e.scrollIntoView({ block: 'center' });
-      const r = e.getBoundingClientRect();
+    // scroll it into view, then measure once the blocks around it have their
+    // real sizes (off screen they are estimated: the first frame lies)
+    await this.eval(`(() => { const e = ${expr}; if (e) e.scrollIntoView({ block: 'center' }); })()`);
+    await this.eval(`new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))`);
+    const box = await this.eval(`(() => { const e = ${expr}; if (!e) return null;
+      const r = e.getBoundingClientRect(); if (r.bottom < 0 || r.top > innerHeight) { e.scrollIntoView({ block: 'center' }); }
+      const r2 = e.getBoundingClientRect();
       // a block's tools show when the mouse is over the block: come from there
       const seg = e.closest('.tools') && e.closest('.seg');
       const s = seg && seg.firstChild.getBoundingClientRect();
-      return { x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width, from: s ? { x: s.left + 10, y: s.top + Math.min(8, s.height / 2) } : null }; })()`);
+      return { x: r2.left + r2.width / 2, y: r2.top + r2.height / 2, w: r2.width, from: s ? { x: s.left + 10, y: s.top + Math.min(8, s.height / 2) } : null }; })()`);
     if (!box || !box.w) throw new Error('nothing to click: ' + sel);
     const base = { x: box.x, y: box.y, button: 'left', clickCount: opts.count || 1 };
     if (box.from) {
@@ -1925,6 +1930,7 @@ Object.assign(TESTS, {
     await page.save();
     onlyChange(env, 'main.tex', 'lazy dog.', 'lazy dog offline.');
     eq(await page.eval(`$('#external').hidden`), true, 'no conflict');
+    hasNot(await page.banner(), 'failed', 'the old failure is not shown after the save worked');
   },
 
   async 'typing while a save is on its way: the typing stays an edit and the next save writes it'(env, page) {
@@ -2229,7 +2235,8 @@ async function tortureRun(env, page, seed, ops) {
         await page.key('Backspace');
       } else if (op === 'plus') {
         const n = await page.eval(`ORDER.filter((s) => s.kind === 'para' && s.el).length`);
-        await page.click(`js:ORDER.filter((s) => s.kind === 'para' && s.el)[${R.int(n)}].el.querySelector('.tools button')`);
+        const k = R.int(n);
+        await page.click(`js:ORDER.filter((s) => s.kind === 'para' && s.el)[${k}].el.querySelector('.tools button')`);
         await page.click(menuItem(R.pick(['Paragraph', 'Section heading', 'Displayed maths'])));
         await page.type(R.pick(['New text.', 'Heading', 'x']));
       } else if (op === 'move') {

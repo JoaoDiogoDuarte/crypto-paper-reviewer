@@ -401,7 +401,13 @@ async function checkEditing(S, two) {
     })()`);
     if (!target) continue;
     kinds[target.kind] = (kinds[target.kind] || 0) + 1;
-    await sleep(120); await S.settle();
+    // as revealRange does: place the word again until the blocks around it are measured
+    for (let n = 0; n < 6; n++) {
+      await S.settle();
+      const moved = await p.eval(`(() => { const [t, i] = __word; const r = document.createRange(); r.setStart(t, i); r.setEnd(t, i + 1);
+        const b = r.getBoundingClientRect(); const d = b.top - innerHeight / 2; if (Math.abs(d) > 4) { window.scrollBy(0, d); return true; } return false; })()`);
+      if (!moved) break;
+    }
     const pt = await p.eval(`(() => { const [t, i] = __word; const r = document.createRange(); r.setStart(t, i + 1); r.setEnd(t, i + 2);
       const b = r.getBoundingClientRect(); const x = b.left + b.width / 2, y = b.top + b.height / 2;
       const hit = document.elementFromPoint(x, y);
@@ -545,9 +551,11 @@ async function checkReader(S) {
       await p.eval(`(() => { const o = [...$('#voice').options].find((x) => /Fake/.test(x.value)); if (o) $('#voice').value = o.value; })()`);
       await p.eval(`window.scrollBy(0, 2000); __fake.spoken = []; 0`);   // the caret is off screen: reading must bring it back
       await p.click('#play'); await sleep(700);
+      if (process.env.UI_DEBUG) for (let q = 0; q < 4; q++) { console.log('  t+' + (700 + q * 400), await p.eval(`(() => { const h = CSS.highlights.get('tts'); const range = h && [...h][0]; const b = range && range.getClientRects()[0]; return [scrollY, b && Math.round(b.top), document.documentElement.scrollHeight]; })()`)); await sleep(400); }
       const r = await p.eval(`(() => { const h = CSS.highlights && CSS.highlights.get('tts'); const range = h && [...h][0]; const b = range && (range.getClientRects()[0] || range.getBoundingClientRect());
         return { spoken: __fake.spoken[0] || '', b: b && { top: b.top, bottom: b.bottom, h: b.height }, chrome: chromeBottom(), vh: innerHeight, pause: !$('#pause').disabled, stop: !$('#stop').disabled, state: $('#tts-state').textContent }; })()`);
       if (!r.spoken) { S.bug(where, 'play speaks nothing'); continue; }
+      if (process.env.UI_DEBUG) console.log(where, JSON.stringify(r), await p.eval(`(() => { const h = CSS.highlights.get('tts'); const range = h && [...h][0]; return range ? [range.toString().slice(0, 50), [...range.getClientRects()].slice(0, 3).map((x) => [Math.round(x.top), Math.round(x.height)]), range.startContainer.parentElement.closest('.seg').className] : null; })()`));
       if (!r.spoken.replace(/\s+/g, ' ').includes(want.trim().replace(/\s+/g, ' ').slice(0, 6))) S.notes.push(`${where}: started with ${JSON.stringify(r.spoken.slice(0, 60))}, caret at ${JSON.stringify(want)}`);
       if (!r.b) S.bug(where, 'no phrase is highlighted while reading');
       else if (r.b.top < r.chrome - 1 || r.b.bottom > r.vh + 1) S.bug(where, `the phrase being read is not visible (top ${Math.round(r.b.top)}, bars end ${Math.round(r.chrome)}, window ${r.vh})`);
@@ -595,7 +603,8 @@ async function checkFind(S) {
     if (!v) { S.bug('find', `no current match for ${JSON.stringify(word)}`); break; }
     if (v[0] < v[2] - 1 || v[1] > v[3] + 1) { S.bug('find', `the current match is hidden (top ${Math.round(v[0])}, bars end ${Math.round(v[2])})`); break; }
   }
-  await p.key('Escape'); await sleep(100);
+  await p.key('Escape');
+  await p.waitFor(`$('#findbar').hidden`, 1500).catch(() => {});
   if (!(await p.eval(`$('#findbar').hidden`))) S.bug('find', 'Escape does not close find; open: ' + await p.eval(`[...['external','openbox','historybox','palette','keysbox','paperbox','figview','drawer','findbar','helpbox','menu']].filter((i) => { const e = document.getElementById(i); return e && !e.hidden; }).join(',')`));
 }
 
@@ -617,7 +626,8 @@ async function checkWindows(S) {
         if (!document.documentElement.classList.contains('modal-open')) out.push('the page behind is not locked');
         return out; })()`);
       for (const i of r.slice(0, 5)) S.bug(where, i);
-      await p.key('Escape'); await sleep(250);
+      await p.key('Escape');
+      await p.waitFor(`$('${box}').hidden`, 1500).catch(() => {});
       if (!(await p.eval(`$('${box}').hidden`))) { S.bug(where, 'Escape does not close it; open: ' + await p.eval(`[...['external','openbox','historybox','palette','keysbox','paperbox','figview','drawer','findbar','helpbox','menu']].filter((i) => { const e = document.getElementById(i); return e && !e.hidden; }).join(',')`)); await p.eval(`$('${box}').hidden = true`); }
       if (await p.eval(`document.documentElement.classList.contains('modal-open')`)) S.bug(where, 'the page stays locked after closing');
     }
