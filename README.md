@@ -47,45 +47,145 @@ That is enough to start. Reading aloud with offline voices is optional:
     ./run ~/papers/my-paper              # a paper folder (finds the main file)
     ./run ~/papers/my-paper/main.tex     # or a main file
 
-It opens in its own browser window and is reachable only from your machine.
+It opens in its own browser window and is reachable only from your machine
+(it listens on `127.0.0.1` and refuses requests addressed to any other host).
 **Open…** switches to another paper or another main file in the same folder.
-Other options: `--browser chrome` (a normal window), `--browser system`,
-`--no-open`, `--port 8766`, `--main other.tex`.
+Stop it with `Ctrl+C` in the terminal.
+
+| Option | Meaning |
+| --- | --- |
+| `--main other.tex` | the main file, when the folder has several documents |
+| `--browser chrome-app` | Chrome or Chromium as an app window (the default) |
+| `--browser chrome` | Chrome or Chromium as a normal window |
+| `--browser system` | your default browser (Firefox works) |
+| `--no-open` | open nothing; visit `http://127.0.0.1:8765/` yourself |
+| `--port 8766` | another port (the default is 8765) |
+| `--cwd DIR` | the directory LaTeX runs in (default: the main file's) |
+| `--state DIR` | where settings, history and caches go (default: `<paper>/.paper-editor`) |
+
+## Intended workflow
+
+The editor is for the **reviewing and polishing** stage: the paper exists,
+builds, and you want to read it as a reader would and fix what you find,
+without hunting for the line in the source. It is not a replacement for your
+text editor for writing the preamble, macros or new figures from scratch.
+
+1. **Keep the paper in Git** and commit before a session. The editor never
+   touches text you did not edit, but Git is your real safety net, and
+   **Diff** can compare with the last commit.
+2. **Build the paper once** the usual way if it has no `.aux` yet: numbers
+   for sections, equations and citations are read from it, so they match the
+   PDF. Then **start the editor** on the paper folder
+   (`./run ~/papers/my-paper`); it renders the figures and opens the page.
+3. **Read through the rendered paper.** Turn on two columns or read it
+   aloud (listening catches errors your eyes skip). Overfull and underfull
+   boxes are marked on the blocks that cause them.
+4. **Fix things in place**: typos, wording, a missing citation
+   (`Ctrl+Alt+C`), a reference (`Ctrl+Alt+R`), a formula (click it), a
+   game or table (double-click the figure).
+5. **Save** (`Ctrl+S`). Only the blocks you changed are written back, to the
+   file they came from; house rules are offered first; the PDF rebuilds in
+   the background.
+6. **Check what you did** with **Diff** (since the last save or the last
+   commit), then commit in Git as usual. **History** has every save if you
+   need to go back.
+7. **For a submission elsewhere**, use **Paper…** to convert to the target
+   venue (optionally anonymous). The result goes in `converted/<venue>/`
+   and reuses your section files, so later fixes apply to every version.
+
+You can keep your usual editor open at the same time: when a file changes on
+disk the paper reloads, and if you had unsaved edits in that file you choose
+what happens (see *Outside changes* below). Do not run a second `latexmk` on
+the same paper while the editor is building.
 
 ## What you can do
 
-- **Read the paper, not the source.** Everything the main file `\input`s or
+### Read
+
+- **The paper, not the source.** Everything the main file `\input`s or
   `\include`s, in order, with section, theorem, equation and citation
   numbers taken from LaTeX's own `.aux`, so they match the PDF. Page breaks
-  follow the PDF. Light or dark theme, one or two columns.
-- **Fix text in place.** Type directly. Maths, references and citations are
-  chips you click to edit, with a live preview. Paste plain text, and
-  formulas in it (`$…$`, `\[…\]`) become formulas.
+  follow the PDF. Figures, tables and games are shown as images cut from a
+  build of their own; natbib, biblatex and hand-written `thebibliography`
+  reference lists are rendered.
+- **Layout.** Light, dark or follow-the-system theme; one or two columns;
+  a colour-blind friendly mode for change and mark colours.
+- **Build problems.** Overfull and underfull boxes from the `.log` are shown
+  as badges on the blocks they come from. The toolbar shows the build state;
+  **PDF** opens the latest PDF.
+- **Listen.** Read aloud from the sentence at the cursor, phrase by phrase,
+  with the phrase highlighted and maths read as words; `«` and `»` move by
+  sentence, and the speed is adjustable. See *Reading aloud* below for the
+  voices.
+
+### Edit
+
+- **Text.** Type directly. `Enter` starts a new paragraph, `Backspace` at
+  the start of one joins it to the previous one. Bold, emphasis and italic
+  from the toolbar or keys. Paste plain text; formulas in it (`$…$`,
+  `\[…\]`) become formulas, and Unicode maths symbols are written as LaTeX
+  for pdfLaTeX papers.
+- **Chips.** Maths, references, citations and any LaTeX the editor does not
+  render are grey *chips*: click one to edit its source with a live preview
+  (`Ctrl+Enter` applies). `Ctrl+\` inserts any LaTeX.
+- **Structure.** Add a section, subsection or `\paragraph` heading at the
+  cursor; hover a block and use **＋** to add a paragraph, heading or
+  displayed equation after it, or **✕** to delete a heading. Heading tools
+  move a section up or down or merge it with the previous one; **Split
+  section** divides the current one at the cursor. Undo brings a deleted or
+  merged heading back and warns about references to it.
 - **Cite and reference by searching.** Search your `.bib` files by key,
   title, author or year (cryptobib's 90k entries take about 40 ms), or
-  Crossref and arXiv, which add the entry to your `.bib`. Search labels by
-  number, type or text.
-- **Edit games and tables.** Double-click a figure with `gameenv` or
-  `algorithmic` pseudocode to edit it line by line: insert `if`, `while`,
-  `for`, `return` and comments, move statements, colour lines, reorder
-  games. Double-click a table to edit it cell by cell. **Apply** puts the
-  change into the paper; saving writes it to disk.
-- **Review changes.** **Diff** shows what changed since the last save or the
-  last Git commit. **History** lists every save and can restore one. If a
-  file changes on disk (an editor, `git pull`), the paper reloads, and a
-  save never overwrites a file that changed since it was read.
-- **Convert to another venue.** **Paper…** shows the detected title,
-  authors and affiliations and converts the paper to IEEEtran, llncs,
-  iacrcc, iacrtrans, acmart, LIPIcs or article, optionally anonymous. See
-  [Converting between venues](#converting-between-venues).
-- **Listen to it.** Read aloud phrase by phrase, with the phrase
-  highlighted and maths read as words. Voices: the browser's, Kokoro and
-  Piper (offline), Edge, Azure and Google. Online voices send the text to
-  Microsoft or Google.
-- **Saving is exact.** Only the blocks you changed are rewritten. Edited
-  text follows house rules you can configure (special characters escaped,
-  `~` before `\cite`, `--`/`---` dashes, ` `` '' ` quotes), and the editor
-  asks before applying them.
+  Crossref and arXiv, which add the entry to your `.bib` with a
+  cryptobib-style key (`C:BelRog93`). `Ctrl+Enter` picks several. Search
+  labels by number, type or text.
+- **Games and pseudocode.** Double-click a figure with `gameenv` (cryptocode)
+  or `algorithmic` pseudocode. The figure viewer has tabs: **Image**, **Text**
+  (the text extracted from the rendered figure),
+  **Games** (line by line: insert `if`, `while`, `for`, `return` and
+  comments, move statements with `Alt+Up/Down`, colour lines with xcolor
+  boxes, reorder or add games), **LaTeX** (the raw source) and **Changes**.
+  **Apply** (`Ctrl+Enter`) puts the change into the paper; `Ctrl+S` applies
+  and saves.
+- **Tables.** Double-click a table to edit it cell by cell (**Cells** tab).
+  `\verb`, nested tabulars and comments in cells stay whole.
+- **Code listings** (`lstlisting`, `minted`, `verbatim` and the
+  environments in `code_envs`) are edited in their box.
+- **Find and replace** (`Ctrl+F`, `Ctrl+H`) in the text, with regular
+  expressions, case and whole-word options; it says what it replaced, and
+  undo takes it back. Maths and chips are not searched.
+- **Undo and redo** across everything above, and spelling suggestions from
+  the browser (right-click).
+
+### Save and review
+
+- **Saving is exact.** Only the blocks you changed are rewritten, in the
+  file they came from; the file's permissions are kept and the write is
+  atomic. Edited text follows *house rules* you can configure (special
+  characters escaped, `~` before `\cite`/`\ref`, `--`/`---` dashes,
+  ` `` '' ` quotes, optionally one sentence per line); the editor asks before
+  applying them. A failed save keeps your edits on the page.
+- **Change bars.** Edited blocks get a bar in the margin; hover it to see
+  the change and **Revert** that block alone.
+- **Diff** shows every change since the last save or the last Git commit
+  (read-only while it is on), with previous/next buttons.
+- **History** lists every save, each keeping the text it replaced, and can
+  restore one. You can delete one snapshot or clear them all (Git commits are
+  never touched).
+- **Outside changes.** If a file changes on disk (another editor,
+  `git pull`) the paper reloads. If you had unsaved edits in that file, you
+  choose: **Reload** (take theirs), **Overwrite disk** (keep yours; theirs is
+  kept in History), **Save backup** (your version goes to a `name.tex.editor-backup-…` file
+  beside it, then theirs is loaded) or **Later**. A save never overwrites a
+  file that changed since it was read. **Reload** in the toolbar rereads
+  everything and asks before dropping your edits.
+
+### Convert
+
+- **Paper…** shows the detected title, authors, affiliations, keywords and
+  abstract, lets you correct them, and converts the paper to IEEEtran,
+  llncs, iacrcc, iacrtrans, acmart, LIPIcs or article, optionally anonymous.
+  See [Converting between venues](#converting-between-venues).
 
 ## Keys
 
@@ -114,19 +214,48 @@ Dictionary*.
 
 ## Settings for a paper
 
-Each paper keeps its settings and caches in its own `.paper-editor/` folder.
-`.paper-editor/config.json` is optional and worth committing:
+Each paper keeps its settings, save history and caches in its own
+`.paper-editor/` folder (add `.paper-editor/` to the paper's `.gitignore`,
+except perhaps `config.json`). The configuration is optional; it is read
+from `.paper-editor.json` next to the main file, then
+`.paper-editor/config.json`, and these are the defaults:
 
     {
       "house_rules": {"tie_before": ["cite", "ref"], "flag_bracketed_cref": true, "one_sentence_per_line": false},
       "key_style": "cryptobib",
-      "bib_add_to": "references.bib",
-      "build": ["latexmk", "-pdf", "-synctex=1", "main.tex"],
+      "bib_add_to": null,
+      "build": null,
       "code_envs": ["ecblock"]
     }
 
-Metadata you correct in **Paper…** is kept in `.paper-editor/metadata.json`.
-It never rewrites your `\author` lines.
+| Key | Meaning |
+| --- | --- |
+| `house_rules.tie_before` | commands that get a `~` before them in edited text |
+| `house_rules.flag_bracketed_cref` | warn about `(\cref{…})`: refer in prose instead |
+| `house_rules.one_sentence_per_line` | break edited paragraphs after each sentence |
+| `key_style` | key style for entries added from Crossref or arXiv |
+| `bib_add_to` | the `.bib` file that receives them (default: the smallest one the paper uses) |
+| `build` | the build command, run in the main file's directory (default: `make` if there is a `Makefile`, otherwise `latexmk -pdf -synctex=1`) |
+| `code_envs` | more environments to show as editable code boxes |
+
+Metadata you correct in **Paper…** is kept in `.paper-editor/metadata.json`,
+with earlier versions. It never rewrites your `\author` lines.
+
+Your key bindings (**Keys** in the toolbar) are shared by every paper and
+kept in `~/.config/paper-editor/keys.json`.
+
+## Reading aloud
+
+The browser's own voices always work. The others are optional:
+
+| Voice | Needs | Text leaves your machine? |
+| --- | --- | --- |
+| Kokoro, Piper | `.venv` with `kokoro-onnx`, `piper-tts`, `soundfile`, then `get_voices.py` | no |
+| Edge | `edge-tts` in `.venv` | yes, to Microsoft |
+| Azure | `AZURE_SPEECH_KEY` and `AZURE_SPEECH_REGION` in the environment | yes, to Microsoft |
+| Google | `GOOGLE_TTS_API_KEY` in the environment | yes, to Google |
+
+`./run` uses `.venv` automatically when it exists.
 
 ## Converting between venues
 
