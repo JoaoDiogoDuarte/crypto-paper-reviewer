@@ -1041,7 +1041,7 @@ Object.assign(TESTS, {
           tool: cs('#toolbar', 'fontSize'), body: cs('body', 'fontSize') };
       })()`);
       const dark = theme === 'dark';
-      if (dark && lum(m.bg) > 0.06) throw new Error('dark background not dark enough: ' + m.bg);
+      if (dark && lum(m.bg) > 0.12) throw new Error('dark background not dark enough: ' + m.bg);   // dark, not black
       if (!dark && lum(m.bg) > 0.9) throw new Error('light background too bright: ' + m.bg);
       if (Math.abs(lum(m.fg) - lum(m.bg)) < 0.6) throw new Error(`${theme}: text/background contrast too low (${m.fg} on ${m.bg})`);
       eq(m.bar, '12.5px', 'bar font'); eq(m.tool, '12px', 'toolbar font'); eq(m.body, '16px', 'body font');

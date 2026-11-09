@@ -2854,37 +2854,16 @@ function posAt(map, off, end) {
   return null;
 }
 
-// Measuring matches lays out blocks the browser had skipped (content-visibility:
-// auto); their real heights replace the estimates and the page shifts. Searching
-// must not move what is on screen: note the block at the top, put it back.
-function viewAnchor() {
-  const d = $('#doc').getBoundingClientRect();
-  const hit = document.elementFromPoint(d.left + d.width / 2, chromeBottom() + 24);
-  const e = hit && hit.closest('#doc .seg, #doc h1, #doc .pagemark');
-  return e ? { e, top: e.getBoundingClientRect().top } : null;
-}
-function restoreAnchor(a) {
-  if (!a || !a.e.isConnected) return;
-  const d = a.e.getBoundingClientRect().top - a.top;
-  if (Math.abs(d) > 0.5) window.scrollBy(0, d);
-}
-
 // html's scroll-padding keeps the caret clear of the sticky bars. A field in
 // those bars is always on screen, yet Chrome "reveals" it below the padding
 // on every keystroke, so typing in Find crept the page up to the top. While
 // focus is in the bars, the padding is off.
-{
-  const chrome = document.getElementById('chrome');
-  if (chrome) {
-    chrome.addEventListener('focusin', () => { document.documentElement.style.scrollPaddingTop = '0px'; });
-    chrome.addEventListener('focusout', (e) => {
-      if (!chrome.contains(e.relatedTarget)) document.documentElement.style.scrollPaddingTop = '';
-    });
-  }
-}
+const IN_BARS = '#chrome, #bar, #toolbar, #findbar';
+document.addEventListener('focusin', (e) => {
+  document.documentElement.style.scrollPaddingTop = e.target.closest && e.target.closest(IN_BARS) ? '0px' : '';
+});
 
 function runFind(keepIndex) {
-  const anchor = viewAnchor();
   const re = findRegex();
   FIND.matches = [];
   if (re) {
@@ -2905,7 +2884,6 @@ function runFind(keepIndex) {
   }
   if (!keepIndex || FIND.cur >= FIND.matches.length) FIND.cur = FIND.matches.length ? firstVisibleMatch() : -1;
   paintFind();
-  restoreAnchor(anchor);
 }
 
 function firstVisibleMatch() {
@@ -4519,6 +4497,7 @@ async function openPaper() {
   MD.dirty = false;
   MD.rootOutput = false;
   MD.undo = [];
+  MD.history = await fetch('/api/metadata/history').then((r) => r.ok ? r.json() : []).catch(() => []);
   drawPaper();
   $('#paperbox').hidden = false;
 }
@@ -4560,7 +4539,27 @@ function drawPaper() {
   undoBtn.onclick = mdUndo;
   const status = el('span', 'small', MD.dirty ? 'Unsaved metadata changes' : 'Metadata loaded');
   status.id = 'md-status'; status.setAttribute('role', 'status');
-  body.append(origin, reset, undoBtn, status);
+  // earlier saved versions (kept by the server before every save)
+  const hist = el('select');
+  hist.title = 'Every save keeps the version it replaced: load one into the form (Save to keep it)';
+  hist.append(new Option((MD.history || []).length ? `Earlier versions (${MD.history.length})…` : 'No earlier versions yet', ''));
+  hist.disabled = !(MD.history || []).length;
+  for (const h of MD.history || []) {
+    const when = h.at ? new Date(h.at * 1000).toLocaleString() : h.name;
+    hist.append(new Option(`${when} · ${h.authors} author${h.authors === 1 ? '' : 's'} · ${(h.title || '').slice(0, 40)}`, h.name));
+  }
+  hist.onchange = async () => {
+    const name = hist.value;
+    if (!name) return;
+    const r = await fetch('/api/metadata/history/' + encodeURIComponent(name));
+    if (!r.ok) { banner('Could not load that version'); return; }
+    const v = await r.json();
+    mdCheckpoint('load earlier version');
+    MD.data = v.metadata;
+    drawPaper(); metadataDirty();
+    toast('Earlier version loaded: Save metadata keeps it, Undo takes it back');
+  };
+  body.append(origin, reset, undoBtn, hist, status);
   body.append(el('h4', '', 'Paper'));
   let r = el('div', 'row');
   r.append(field(md, 'title', 'Title', 'paper', '30em'), field(md, 'running_title', 'Running title', 'paper'));
@@ -4713,6 +4712,7 @@ async function saveMetadata(quiet) {
   }
   MD.info = await r.json();
   MD.dirty = false;
+  MD.history = await fetch('/api/metadata/history').then((x) => x.ok ? x.json() : MD.history).catch(() => MD.history);
   const status = $('#md-status');
   if (status) status.textContent = 'Saved locally at ' + new Date().toLocaleTimeString();
   if (!quiet) banner('Metadata saved successfully in .paper-editor/metadata.json.');

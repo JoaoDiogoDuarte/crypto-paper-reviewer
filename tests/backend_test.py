@@ -71,6 +71,34 @@ class BackendTest(unittest.TestCase):
             finally:
                 error.close()
 
+    def get(self, path):
+        try:
+            with urllib.request.urlopen(self.url + path) as response:
+                return response.status, json.loads(response.read())
+        except urllib.error.HTTPError as error:
+            try:
+                return error.code, json.loads(error.read())
+            finally:
+                error.close()
+
+    def test_metadata_saves_keep_the_version_they_replace(self):
+        """Losing 20 authors to a wrong click is never final: every save keeps the old version."""
+        md = server.metadata()['metadata']
+        md['authors'] = [{'name': f'Author {i}', 'email': '', 'orcid': '', 'affiliations': []} for i in range(20)]
+        self.assertEqual(self.post('/api/metadata', md)[0], 200)
+        md2 = server.metadata()['metadata']
+        md2['authors'] = []                          # the wrong click
+        self.assertEqual(self.post('/api/metadata', md2)[0], 200)
+        self.assertEqual(self.post('/api/metadata', md2)[0], 200)   # same again: no new backup
+        status, hist = self.get('/api/metadata/history')
+        self.assertEqual(status, 200)
+        self.assertEqual([h['authors'] for h in hist], [20, 0])     # newest first
+        status, back = self.get('/api/metadata/history/' + hist[0]['name'])
+        self.assertEqual(status, 200)
+        self.assertEqual(len(back['metadata']['authors']), 20)
+        for bad in ('../metadata.json', '..%2Fmetadata.json', 'x.json', '20260101-000000.txt'):
+            self.assertEqual(self.get('/api/metadata/history/' + bad)[0], 404, bad)
+
     def test_torture_repeated_saves_conflicts_and_history(self):
         """HTTP saves are atomic and history chains never diverge (seed is reproducible)."""
         seed = int(os.environ.get('TORTURE_BACKEND_SEED', '91731'))

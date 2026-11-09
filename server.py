@@ -1213,6 +1213,58 @@ def metadata():
             'missing': {t: convert.missing(merged, t) for t in convert.TARGETS}}
 
 
+# Every save of the metadata first keeps the version it replaces, so a wrong
+# click (Restore detected fields, a deleted author) is never final.
+MD_HISTORY_KEEP = 50
+MD_HISTORY_NAME = re.compile(r'^\d{8}-\d{6}(?:-\d+)?\.json$')
+
+
+def metadata_history_dir():
+    return os.path.join(STATE, 'metadata-history')
+
+
+def backup_metadata(new=None):
+    """Keep the current effective metadata before a save replaces it with
+    something different (no backup for a save that changes nothing, no repeats)."""
+    current = metadata()['metadata']
+    strip = lambda m: {k: v for k, v in (m or {}).items() if k != 'source_class'}
+    if new is not None and strip(new) == strip(current):
+        return
+    d = metadata_history_dir()
+    os.makedirs(d, exist_ok=True)
+    names = sorted(n for n in os.listdir(d) if MD_HISTORY_NAME.match(n))
+    if names:
+        try:
+            if json.load(open(os.path.join(d, names[-1])))['metadata'] == current:
+                return
+        except (ValueError, KeyError, OSError):
+            pass
+    stamp = time.strftime('%Y%m%d-%H%M%S')
+    k = 0     # same width, so names sort in the order they were made
+    while os.path.exists(os.path.join(d, name := f'{stamp}-{k:03d}.json')):
+        k += 1
+    with open(os.path.join(d, name), 'w') as f:
+        json.dump({'at': time.time(), 'metadata': current}, f, indent=2, ensure_ascii=False)
+    for old in names[:max(0, len(names) + 1 - MD_HISTORY_KEEP)]:
+        os.remove(os.path.join(d, old))
+
+
+def metadata_history():
+    d = metadata_history_dir()
+    out = []
+    if os.path.isdir(d):
+        for n in sorted((n for n in os.listdir(d) if MD_HISTORY_NAME.match(n)), reverse=True):
+            try:
+                v = json.load(open(os.path.join(d, n)))
+                md = v['metadata']
+                out.append({'name': n, 'at': v.get('at'), 'title': md.get('title', ''),
+                            'authors': len(md.get('authors') or []),
+                            'affiliations': len(md.get('affiliations') or [])})
+            except (ValueError, KeyError, OSError):
+                continue
+    return out
+
+
 def original_main():
     """The main file's text; for a converted file, the original it came from
     (its front matter is where metadata lives: a converted one is lossy)."""
@@ -1374,6 +1426,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send(200, load_keys())
         if p == '/api/metadata':
             return self.send(200, metadata())
+        if p == '/api/metadata/history':
+            return self.send(200, metadata_history())
+        if p.startswith('/api/metadata/history/'):
+            name = p.rsplit('/', 1)[1]
+            f = os.path.join(metadata_history_dir(), name)
+            if not MD_HISTORY_NAME.match(name) or not os.path.isfile(f):
+                return self.send(404, {'error': 'no such metadata backup'})
+            return self.send(200, json.load(open(f)))
         if p == '/api/voices':
             return self.send(200, server_voices())
         if p.startswith('/static/'):
@@ -1425,6 +1485,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not isinstance(md, dict):
                 return self.send(400, {'error': 'expected a JSON object'})
             ensure_state()
+            backup_metadata(md)
             # Save only explicit differences; new metadata from LaTeX remains discoverable.
             extracted = convert.extract(original_main())
             overrides = {k: v for k, v in md.items() if k != 'source_class'
