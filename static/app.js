@@ -914,14 +914,34 @@ function markEdited() {
 // Commit, apply a change to the segment lists, re-render from the texts.
 function structural(change) {
   if (leaveDiff()) return;   // the blocks of the diff view are not the document
+  // where the change was asked for: the new placeholder is the one nearest
+  // there, not the first one in the paper (an earlier one may be unfilled)
+  const at = (() => { try { const sg = segOf(editableAt(selRange()) || document.body); return sg && sg.file ? { file: sg.file, line: sg.line || 0 } : null; } catch (e) { return null; } })();
   commit();
   // every segment of every file takes its current source first, so that the
   // texts rebuilt below keep the edits of files the change does not touch
-  for (const f of Object.values(FILES)) if (f.segs) f.segs.forEach((s) => { s.src = segSource(s, []); });
+  const before = new Map();
+  for (const f of Object.values(FILES)) if (f.segs) f.segs.forEach((s) => { before.set(s, s.src); s.src = segSource(s, []); });
   const focus = change();
+  // a paragraph break typed at the very end (or start) of a block sits next to
+  // the blank line already there: keep one blank line, not two or three
+  for (const f of Object.values(FILES)) {
+    if (!f.segs) continue;
+    const segs = f.segs.filter((x) => !x.removed);
+    segs.forEach((x, i) => {
+      if (x.kind === 'gap' || before.get(x) === x.src) return;
+      // inside a paragraph or heading block every blank line is new (blank
+      // lines separate blocks in the source): two breaks in a row make one
+      if (x.kind === 'para' || x.kind === 'heading') x.src = x.src.replace(/\n(?:[ \t]*\n){2,}/g, '\n\n');
+      if (segs[i + 1] && segs[i + 1].kind === 'gap' && /\n\s*$/.test(x.src)) x.src = x.src.replace(/\s+$/, '');
+      if (segs[i - 1] && segs[i - 1].kind === 'gap' && /^\s*\n[ \t]*\n/.test(x.src)) x.src = x.src.replace(/^\s+/, '');
+    });
+  }
   for (const f of Object.values(FILES)) if (f.segs) f.text = f.segs.map((s) => s.removed ? '' : s.src).join('');
   render();
-  if (focus) focusPlaceholder(focus);
+  const near = INSERT_HINT || at;
+  INSERT_HINT = null;
+  if (focus) focusPlaceholder(focus, near);
 }
 
 // Take a block out with one of the gaps around it: the one after a heading
@@ -934,7 +954,9 @@ function removeSeg(seg) {
   else if (i > 0 && segs[i - 1].kind === 'gap') segs[i - 1].removed = true;
 }
 
+let INSERT_HINT = null;   // where insertAfter put its block: structural focuses there
 function insertAfter(seg, src) {
+  INSERT_HINT = { file: seg.file, line: (seg.lastLine || seg.line || 0) + 1 };
   const segs = FILES[seg.file].segs;
   const i = segs.indexOf(seg);
   segs.splice(i + 1, 0, { kind: 'gap', src: '\n\n', file: seg.file }, { kind: 'para', src, file: seg.file });
@@ -1041,23 +1063,28 @@ function addMenu(seg, anchor) {
 }
 document.addEventListener('click', (e) => { if (!$('#menu').contains(e.target)) $('#menu').hidden = true; });
 
-function focusPlaceholder(text) {
+function focusPlaceholder(text, near) {
+  let best = null;
   for (const seg of ORDER) {
     if (!seg.edit || seg.edit.tagName === 'TEXTAREA') continue;
     const walker = document.createTreeWalker(seg.edit, NodeFilter.SHOW_TEXT);
     let n;
     while ((n = walker.nextNode())) {
       const i = n.data.indexOf(text);
-      if (i >= 0) {
-        const r = document.createRange();
-        r.setStart(n, i); r.setEnd(n, i + text.length);
-        const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
-        seg.edit.focus();
-        seg.el.scrollIntoView({ block: 'center' });
-        return;
-      }
+      if (i < 0) continue;
+      // nearest to where the change was asked for; at equal distance, after it
+      const d = !near ? 0 : seg.file !== near.file ? 1e9 : Math.abs((seg.line || 0) - near.line) * 2 + ((seg.line || 0) < near.line ? 1 : 0);
+      if (!best || d < best.d) best = { d, seg, n, i };
+      break;
     }
+    if (best && best.d === 0) break;
   }
+  if (!best) return;
+  const r = document.createRange();
+  r.setStart(best.n, best.i); r.setEnd(best.n, best.i + text.length);
+  const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
+  best.seg.edit.focus();
+  best.seg.el.scrollIntoView({ block: 'center' });
 }
 
 // Join a paragraph to the previous one (Backspace at its start).
@@ -2393,6 +2420,13 @@ function insertBreak(nodes = [chip('parbreak', '\n\n', '')]) {
 // the caret goes under the new heading.
 function headingAtCaret(level) {
   const seg = segOf(editableAt(selRange()) || document.body);
+  // on a heading: the new heading goes right after it (a subsection under
+  // the section just made, say)
+  if (seg && seg.kind === 'heading') {
+    const after = level === 'paragraph' ? '\\paragraph{' + PLACEHOLDER + '}\nText.' : '\\' + level + '{' + PLACEHOLDER + '}';
+    structural(() => { insertAfter(seg, after); return PLACEHOLDER; });
+    return;
+  }
   if (!seg || seg.kind !== 'para') return;
   const src = level === 'paragraph' ? '\\paragraph{' + PLACEHOLDER + '}\n' : '\\' + level + '{' + PLACEHOLDER + '}';
   const nodes = level === 'paragraph'
@@ -2596,6 +2630,17 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.ctrlKey && !e.altKey) {
     e.preventDefault();
     if (seg.kind === 'para') insertBreak();
+    // Enter in a heading goes on to the section's text: the start of the
+    // paragraph after it, or, when none follows (a new section), a new one.
+    // (It used to do nothing, and what came next was typed into the heading.)
+    else if (seg.kind === 'heading') {
+      const i = ORDER.indexOf(seg);
+      const next = ORDER.slice(i + 1).find((x) => x.kind !== 'gap' && x.kind !== 'hidden');
+      if (next && next.kind === 'para' && next.edit && next.file === seg.file) {
+        const r = document.createRange(); r.setStart(next.edit, 0); r.collapse(true);
+        next.edit.focus(); const sel2 = getSelection(); sel2.removeAllRanges(); sel2.addRange(r);
+      } else structural(() => { insertAfter(seg, PLACEHOLDER); return PLACEHOLDER; });
+    }
     return;
   }
   if (e.key === 'Backspace' && !e.ctrlKey && seg.kind === 'para' && caretAtStart(seg.edit)) {
