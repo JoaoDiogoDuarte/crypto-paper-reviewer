@@ -499,6 +499,19 @@
   // A tabular split for cell editing: [{start, end, specRange, rows}] where a
   // row is {lead (rules, spaces), cells:[{lead, content, trail}], sep (\\, its
   // optional [..] and the spaces after)}.  Rebuilt with tabularSrc.
+  // In a tabular body, the index of the last character of a unit that must
+  // not be split at & or \\: \verb|...| (any delimiter), a nested
+  // \begin{x}...\end{x}, a % comment to the end of its line. -1 otherwise.
+  function tabularAtomEnd(t, i) {
+    if (t[i] === '%') { const e = t.indexOf('\n', i); return e < 0 ? t.length - 1 : e; }
+    if (t[i] !== '\\') return -1;
+    let m = /^\\verb\*?([^a-zA-Z\s*])/.exec(t.slice(i, i + 8));
+    if (m) { const e = t.indexOf(m[1], i + m[0].length); return e < 0 ? -1 : e; }
+    m = /^\\begin\{([^}]+)\}/.exec(t.slice(i, i + 60));
+    if (m) { const e = envEnd(t, i, m[1]); return e < 0 ? -1 : e - 1; }
+    return -1;
+  }
+
   function parseTabulars(src) {
     const out = [];
     const re = /\\begin\{(tabular\*?|tabularx)\}/g;
@@ -525,6 +538,8 @@
         let d = 0, c0 = 0;
         for (let i = 0; i <= rest.length; i++) {
           const ch = rest[i];
+          const atom = tabularAtomEnd(rest, i);
+          if (atom >= 0) { i = atom; continue; }
           if (ch === '\\') { i++; continue; }
           if (ch === '{') d++; else if (ch === '}') d--;
           if ((ch === '&' && d === 0) || i === rest.length) {
@@ -545,6 +560,8 @@
           pushRow(body.slice(last, i), body.slice(i, e));
           last = e; i = e - 1; continue;
         }
+        const atom = tabularAtomEnd(body, i);
+        if (atom >= 0) { i = atom; continue; }
         if (ch === '\\') { i++; continue; }
         if (ch === '{') depth++; else if (ch === '}') depth--;
       }

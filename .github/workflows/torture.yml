@@ -73,6 +73,9 @@ jobs:
           E2E_SEEDS: '101'
           E2E_OPS: '1'
         run: node tests/e2e.js 2>&1 | tee torture-logs/browser-all.log
+      - name: UI bug bounty over the e2e paper and every fixture
+        if: ${{ !cancelled() }}
+        run: node tests/ui_torture.js 2>&1 | tee torture-logs/ui-bounty.log
       - name: Seeded random editing and saving
         if: ${{ !cancelled() }}
         env:
@@ -105,6 +108,10 @@ jobs:
           kpsewhich IEEEtran.cls
           kpsewhich llncs.cls
           latexmk --version | head -n 1
+      - name: Conversion round trips, built with TeX
+        env:
+          ROUNDTRIP_BUILD: '1'
+        run: python3 -m unittest -v tests.test_convert_roundtrip
       - name: Build anonymous and named venue conversions on temporary copies
         shell: bash
         run: |

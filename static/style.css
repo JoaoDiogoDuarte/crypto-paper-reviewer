@@ -879,3 +879,6 @@ body.two .seg.wide img { max-width: min(100%, 42em); }
 .seg.boxflash { outline: 2px solid var(--accent); outline-offset: 3px; transition: outline-color .6s; }
 #boxsum { font-size: 11.5px; padding: 0 .5em; margin-left: .4em; border-radius: 999px; color: #b5651d; }
 #boxsum[hidden] { display: none; }
+/* The Paper dialog is as tall as its content (up to 90% of the window), not
+   always full height with an empty grey half. */
+#paperbox { bottom: auto; max-height: 90vh; }

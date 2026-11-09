@@ -12,6 +12,7 @@ Python 3, Node 22 for the tests, and Chrome or Chromium for the browser tests.
     tests/selftest.py ~/papers/a ~/papers/b  # the page itself, in headless Firefox
     node tests/ui_torture.js [--real]        # bug bounty: every feature on real papers, checked on screen
     python3 -m unittest tests.test_convert_roundtrip   # S -> A -> S and S -> A -> B -> S give S byte for byte
+    node tests/tabular_test.js               # table cells: \verb, nested tabulars, comments stay whole
 
 `tests/e2e.js` (`CHROME=…` to choose the browser) runs a real server on a
 throwaway paper and acts as a user: key presses, typing, pasting, the dialogs.

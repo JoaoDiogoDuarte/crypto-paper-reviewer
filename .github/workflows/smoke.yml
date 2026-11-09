@@ -35,12 +35,13 @@ jobs:
           for file in static/*.js tests/*.js; do node --check "$file"; done
 
       - name: Backend and conversion tests
-        run: python -m unittest tests.backend_test tests.test_convert_contract tests.torture_conversion
+        run: python -m unittest tests.backend_test tests.test_convert_contract tests.torture_conversion tests.test_convert_roundtrip
 
       - name: LaTeX round-trips (seeded fuzz + every fixture)
         run: |
           node tests/torture.js --seeds=1,7,42,99 --cases=700
           node tests/roundtrip.js tests/fixtures
+          node tests/tabular_test.js
 
       # One Chrome session for the review smoke tests and a short seeded save fuzz.
       - name: Browser smoke tests
@@ -49,3 +50,5 @@ jobs:
           E2E_OPS: '18'
         run: |
           node tests/e2e.js render diff "Paper dialog" "two columns" "History UI: delete" "game editor" "layout: table" "save torture:"
+      - name: UI bug bounty (quick, one fixture)
+        run: UI_QUICK=1 node tests/ui_torture.js tests/fixtures/ieee-conf
