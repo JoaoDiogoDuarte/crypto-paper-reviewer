@@ -712,7 +712,9 @@ const KATEX_CACHE = new Map();   // source -> rendered HTML (cleared when the ma
 const KATEX_SHIMS = { '\\ensuremath': '#1', '\\xspace': '', '\\mathchoice': '#1', '\\boldmath': '',
   '\\unboldmath': '', '\\textsc': '\\text{#1}', '\\mbox': '\\text{#1}',
   '\\protect': '', '\\nobreak': '', '\\allowbreak': '' };
-const katexMacros = () => ({ ...KATEX_SHIMS, ...DOC.macros });
+// cryptocode's keywords (\pcreturn, \sample …) preview in running text too, not
+// only in the game editor; the paper's own definitions still win
+const katexMacros = () => ({ ...KATEX_SHIMS, ...CRYPTOCODE_MACROS, ...DOC.macros });
 // A numbered display environment shows the numbers LaTeX gave it (from the
 // .aux), not KaTeX's own count, which restarts at (1) in every formula: each
 // row gets \tag{n}; rows without a label take the number after the row before.
