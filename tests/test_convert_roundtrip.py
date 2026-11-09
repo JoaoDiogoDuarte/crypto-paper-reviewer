@@ -149,7 +149,7 @@ class RoundTripTest(unittest.TestCase):
 
 
 class PaperBugsTest(unittest.TestCase):
-    """What broke converting a real paper (IEEEtran, \input{preamble}, cryptobib/)."""
+    r"""What broke converting a real paper (IEEEtran, \input{preamble}, cryptobib/)."""
     SRC = r"""\documentclass[conference]{IEEEtran}
 \usepackage{amsmath}
 \usepackage{inconsolata}

@@ -81,6 +81,23 @@ class BackendTest(unittest.TestCase):
             finally:
                 error.close()
 
+    def test_requests_for_another_host_are_refused(self):
+        """DNS rebinding: a page on evil.example resolved to 127.0.0.1 gets nothing."""
+        import http.client
+        for host, expected in [('evil.example', 403), (f'evil.example:{self.http.server_port}', 403),
+                               ('127.0.0.1.evil.example', 403), (f'127.0.0.1:{self.http.server_port}', 200),
+                               (f'localhost:{self.http.server_port}', 200), ('[::1]', 200)]:
+            conn = http.client.HTTPConnection('127.0.0.1', self.http.server_port)
+            try:
+                conn.request('GET', '/api/doc', headers={'Host': host})
+                response = conn.getresponse()
+                body = response.read()
+                self.assertEqual(response.status, expected, host)
+                if expected == 403:
+                    self.assertNotIn(server.TOKEN.encode(), body)
+            finally:
+                conn.close()
+
     def test_included_aux_headings_keep_document_order(self):
         stem = os.path.join(server.PAPER, server.stem())
         line = lambda n, t: '\\@writefile{toc}{\\contentsline {section}{\\numberline {%s}%s}{1}{}}\n' % (n, t)

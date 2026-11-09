@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Download the local neural voices used by the editor into .cache/voices.
 
-    tools/paper-editor/.venv/bin/python tools/paper-editor/get_voices.py
+    .venv/bin/python get_voices.py
 
 Kokoro-82M (about 340 MB, several US and British voices) and four Piper
 voices (about 60-120 MB each).  Both run offline on the CPU.

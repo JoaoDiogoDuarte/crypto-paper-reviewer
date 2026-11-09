@@ -1,5 +1,13 @@
 # Crypto Paper Reviewer
 
+> [!WARNING]
+> **This project is vibe-coded: an AI coding assistant wrote practically all
+> of the code, tests and documentation.** I steered it and used it on my own
+> papers, but I did not review every line, so expect rough edges. It works
+> for me; it may not work for you. No support, no stability promises. The
+> one thing it is tested hard for: saving never changes text you did not
+> edit. Keep your paper under Git (or another backup) anyway.
+
 Review a LaTeX paper as the paper itself. Your `.tex` sources are shown as the
 rendered paper, with typeset maths and the same numbers as the PDF. You fix
 things in place, and each save writes back only what you changed, then
@@ -19,11 +27,6 @@ Type into the paper, make a phrase bold, save: the edit lands in
 ![The same paper in the dark theme](docs/screenshots/editor-dark.png)
 
 </details>
-
-> **Vibe-coded.** An AI assistant wrote this for my own papers, to my taste.
-> It works for me; it may not work for you. No support, no stability
-> promises. The one thing it is tested hard for: saving never changes text
-> you did not edit.
 
 ## Install
 

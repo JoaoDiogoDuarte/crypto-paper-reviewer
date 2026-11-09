@@ -1481,6 +1481,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
+    def parse_request(self):
+        # Answer only requests addressed to this machine by name.  A web page
+        # whose domain is made to resolve to 127.0.0.1 (DNS rebinding) sends
+        # its own domain as the Host, and must not read the paper or get the
+        # page's token.
+        if not super().parse_request():
+            return False
+        host = (self.headers.get('Host') or '').strip().lower()
+        host = host[1:host.find(']')] if host.startswith('[') else host.rsplit(':', 1)[0]
+        if host not in ('127.0.0.1', 'localhost', '::1'):
+            self.send_error(403, 'Forbidden host')
+            return False
+        return True
+
     def send(self, code, body, ctype='application/json'):
         if isinstance(body, (dict, list)):
             body = json.dumps(body)
@@ -2042,8 +2056,7 @@ def main():
     ensure_state()
     load_token()
     BUILDER = Builder()
-    threading.Thread(target=lambda: bib_entries(), daemon=True).start()   # index the .bib files now, not at the first search
-    threading.Thread(target=bib_entries, daemon=True).start()
+    threading.Thread(target=bib_entries, daemon=True).start()   # index the .bib files now, not at the first search
     srv = http.server.ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
     url = f'http://127.0.0.1:{args.port}/'
     print(f'Crypto Paper Reviewer for {os.path.join(PAPER, MAIN)} on {url}  (Ctrl+C to stop)', flush=True)
