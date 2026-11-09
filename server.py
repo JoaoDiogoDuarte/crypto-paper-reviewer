@@ -232,11 +232,16 @@ def aux_text():
     if not os.path.exists(path):
         return ''
     text = open(path, encoding='utf-8', errors='replace').read()
-    for sub in re.findall(r'\\@input\{([^}]*)\}', text):
-        p = os.path.join(PAPER, sub)
-        if os.path.exists(p):
-            text += open(p, encoding='utf-8', errors='replace').read()
-    return text
+    # an \include'd file's .aux is read where it is \@input, not at the end:
+    # its headings come in document order (they were numbered after the rest)
+    def splice(t, depth=0):
+        def one(m):
+            p = os.path.join(PAPER, m.group(1))
+            if depth > 4 or not os.path.exists(p):
+                return ''
+            return splice(open(p, encoding='utf-8', errors='replace').read(), depth + 1)
+        return re.sub(r'\\@input\{([^}]*)\}', one, t)
+    return splice(text)
 
 
 def load_aux():

@@ -81,6 +81,15 @@ class BackendTest(unittest.TestCase):
             finally:
                 error.close()
 
+    def test_included_aux_headings_keep_document_order(self):
+        stem = os.path.join(server.PAPER, server.stem())
+        line = lambda n, t: '\\@writefile{toc}{\\contentsline {section}{\\numberline {%s}%s}{1}{}}\n' % (n, t)
+        with open(stem + '.aux', 'w') as f:
+            f.write(line(1, 'Top') + '\\@input{appendix.aux}\n' + line(3, 'After'))
+        with open(os.path.join(server.PAPER, 'appendix.aux'), 'w') as f:
+            f.write(line(2, 'Included'))
+        self.assertEqual([h['num'] for h in server.load_aux()['heads']], ['1', '2', '3'])
+
     def test_citation_numbers_from_natbib_and_biblatex(self):
         stem = os.path.join(server.PAPER, server.stem())
         with open(stem + '.aux', 'w') as f:
