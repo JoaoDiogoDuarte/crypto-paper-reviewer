@@ -375,6 +375,21 @@ def load_aux():
         cites.setdefault(m.group(1), m.group(2))
     bbl = os.path.join(PAPER, stem() + '.bbl')
     if os.path.exists(bbl) and '\\entry{' in (btext := open(bbl, encoding='utf-8', errors='replace').read()):
+        # numeric styles: biber writes no labelnumber (and, without
+        # defernumbers, biblatex writes no \abx@aux@number): the number is the
+        # entry's place in the sorted list, the refcontext's datalist (else the
+        # first one), counting only entries that get a label
+        lists = re.findall(r'\\datalist\[entry\]\{([^}]*)\}(.*?)\\enddatalist', btext, re.S)
+        ctx = re.search(r'\\abx@aux@refcontext\{([^}]*)\}', aux)
+        sorted_list = next((b for n, b in lists if ctx and n == ctx.group(1)), lists[0][1] if lists else '')
+        n = 0
+        for m in re.finditer(r'\\entry\{([^}]*)\}(.*?)\\endentry', sorted_list, re.S):
+            if re.search(r'\\field\{labelalpha\}', m.group(2)):
+                break             # an alphabetic style: labels come from labelalpha below
+            if re.search(r'\\field\{options\}\{[^}]*\bskip(?:lab|biblist)\b', m.group(2)):
+                continue
+            n += 1
+            cites.setdefault(m.group(1), str(n))
         for m in re.finditer(r'\\entry\{([^}]*)\}(.*?)\\endentry', btext, re.S):
             k, e = m.group(1), m.group(2)
             f = lambda name: (re.search(r'\\field\{%s\}\{([^}]*)\}' % name, e) or [None, ''])[1]

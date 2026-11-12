@@ -696,7 +696,12 @@ function renderChip(tok, ctx) {
     else if (low === 'citeyearpar') text = '(' + keys.map((k) => info(k).year || '?').join(', ') + ')';
     else if (/^(citet|textcite|citealt)$/.test(low))
       text = keys.map((k, i) => (info(k).author ? info(k).author + ' ' : '') + '[' + num(k) + (i === keys.length - 1 && post ? ', ' + post : '') + ']').join(', ');
-    else text = '[' + (pre ? pre + ' ' : '') + keys.map(num).join(', ') + (post ? ', ' + post : '') + ']';
+    else {
+      // numbers in ascending order, as sortcites (biblatex) and natbib's sort do
+      const nums = keys.map(num);
+      if (nums.every((v) => /^\d+$/.test(v))) nums.sort((a, b) => a - b);
+      text = '[' + (pre ? pre + ' ' : '') + nums.join(', ') + (post ? ', ' + post : '') + ']';
+    }
     const c = chip('cite', tok.s, text);
     c.title = keys.map((k) => DOC.bib[k] || k).join('\n\n').replace(/\\[a-zA-Z]+|[{}]/g, '');
     return c;

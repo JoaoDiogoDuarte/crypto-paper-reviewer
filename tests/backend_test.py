@@ -122,6 +122,17 @@ class BackendTest(unittest.TestCase):
         self.assertEqual(a['cites'], {'AcmA': '1', 'Plain': '7', 'Lit1': 'Aut19'})
         self.assertEqual(a['citeinfo']['AcmA'], {'year': '2023', 'author': 'Author and Writer'})
         self.assertEqual(a['citeinfo']['Lit1'], {'year': '2019', 'author': 'Author'})
+        # numeric biblatex without defernumbers: numbers follow the sorted datalist
+        with open(stem + '.aux', 'w') as f:
+            f.write('\\abx@aux@refcontext{nyt/global//global/global/global}\n')
+        entry = lambda k, extra='': '\\entry{%s}{misc}{}{}\n family={%s},\n%s \\field{year}{2020}\n\\endentry\n' % (k, k, extra)
+        with open(stem + '.bbl', 'w') as f:
+            f.write('\\refsection{0}\n\\datalist[entry]{nty/global//global/global/global}\n'
+                    + entry('Zed') + entry('Ann') + '\\enddatalist\n'
+                    '\\datalist[entry]{nyt/global//global/global/global}\n'
+                    + entry('Ann') + entry('Hidden', ' \\field{options}{skiplab}\n') + entry('Zed')
+                    + '\\enddatalist\n\\endrefsection\n')
+        self.assertEqual(server.load_aux()['cites'], {'Ann': '1', 'Zed': '2'})
         with open(stem + '.bbl', 'w') as f:
             f.write('\\begin{thebibliography}{2}\n\\bibitem[Author and Writer(2023)]%\n{AcmA}\n'
                     '\\bibfield{author}{\\bibinfo{person}{Gina Author}}. 2023.\n\\end{thebibliography}\n')
