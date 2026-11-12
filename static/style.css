@@ -47,7 +47,7 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
 #tts-state { color: var(--muted); min-width: 4.5em; }
 #ttsbar button:disabled { opacity: .45; cursor: default; }
 
-#doc { max-width: 46em; margin: 1.5em auto 50vh; padding: 0 1.2em 0 3em; }   /* left: room for the block tools */
+#doc { font-size: var(--doc-size, 16px); max-width: 46em; margin: 1.5em auto 50vh; padding: 0 1.2em 0 3em; }   /* left: room for the block tools */
 body.two #doc { max-width: 76em; padding-right: 2.6em; }
 body.two .page { column-count: 2; column-gap: 2.2em; column-fill: balance; column-rule: 1px solid var(--line);
   content-visibility: visible; contain: none; overflow: visible; min-width: 0; }
@@ -90,6 +90,11 @@ body.two .tools { left: auto; right: -1.6em; padding-right: 0; padding-left: .8e
 .para.thm { font-style: italic; }
 .para .thmhead, .para .runin { font-style: normal; font-weight: bold; }
 .para.proof { }
+/* quote and quotation environments are blocks of their own: indented as
+   LaTeX prints them, with a rule at the left edge */
+blockquote.para { margin: 0 1.6em .8em; padding-left: .9em;
+  border-left: 3px solid color-mix(in srgb, var(--accent) 40%, var(--line)); }
+blockquote.para.quotation { text-indent: 1.5em; }
 .speaking { background: var(--speak) !important; }
 .edited { box-shadow: -3px 0 0 var(--dirty); }
 
@@ -103,6 +108,7 @@ h4 { font-size: 1em; }
 .chip { cursor: pointer; border-radius: 3px; }
 .chip:hover { outline: 1px solid var(--accent); }
 .chip.src { font: .8em/1.2 ui-monospace, monospace; background: var(--chip); color: var(--muted); padding: 0 .2em; }
+.chip.uline { border-bottom: 1px solid currentColor; padding-bottom: 1px; }
 .chip.ref, .chip.cite { color: var(--accent); }
 .chip.ec { font: .85em ui-monospace, monospace; overflow-wrap: anywhere; word-break: break-word; white-space: normal; }
 .chip.math.display { display: block; text-align: center; margin: .5em 0; background: var(--math); padding: .2em 0;
@@ -119,7 +125,7 @@ h4 { font-size: 1em; }
 .chip.bad .katex-error, .chip.bad { color: #c0392b; }
 .katex { font-size: 1.05em; }
 
-.seg.code textarea, .rawsrc { width: 100%; font: 13px/1.45 ui-monospace, "JetBrains Mono", monospace;
+.seg.code textarea, .rawsrc { width: 100%; font: .8125em/1.45 ui-monospace, "JetBrains Mono", monospace;
   background: var(--math); color: var(--fg); border: 1px solid var(--line); border-radius: 4px;
   padding: .5em .7em; resize: vertical; white-space: pre; overflow-x: auto; margin: .3em 0 .8em; }
 .seg.figure, .seg.table { margin: 1em 0; text-align: center; }
@@ -156,7 +162,7 @@ body.two .seg.figure img, body.two .seg.table img { max-height: min(64vh, 46rem)
 .spacer { flex: 1; }
 #drawer-src { width: 100%; height: 7em; font: 14px/1.45 ui-monospace, monospace; background: var(--math);
   color: var(--fg); border: 1px solid var(--line); border-radius: 4px; padding: .4em; }
-#drawer-preview { min-height: 2em; padding: .4em; font: 17px/1.5 Georgia, serif; overflow-x: auto; }
+#drawer-preview { min-height: 2em; box-sizing: border-box; padding: .4em; font: 17px/1.5 Georgia, serif; overflow-x: auto; }
 
 #menu { position: absolute; z-index: 30; background: var(--bg); border: 1px solid var(--line); border-radius: 5px;
   box-shadow: 0 4px 14px rgba(0,0,0,.15); font: 14px system-ui, sans-serif; padding: .3em 0; }
@@ -717,7 +723,15 @@ html.modal-open, html.modal-open body { overflow: hidden; }
 #bar .group { flex-wrap: wrap; min-width: 0; max-width: 100%; }
 #bar .group button, #bar .group select { padding: .1em .42em; }
 #voice { max-width: 15em; min-width: 6em; text-overflow: ellipsis; }
-#rate { width: 4.2em; }
+#rate { width: auto; min-width: 4.6em; }
+/* reading controls: icons of one size, drawn in the text colour */
+#ttsbar .ic { width: 1.05em; height: 1.05em; fill: currentColor; vertical-align: -.17em; flex: none; }
+#ttsbar button { display: inline-flex; align-items: center; gap: .3em; }
+/* while reading, Read is tinted in the accent colour and its icon breathes */
+#bar .group #play.reading { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+#play.reading .ic { animation: reading-pulse 1.2s ease-in-out infinite; }
+@keyframes reading-pulse { 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) { #play.reading .ic { animation: none; } }
 #bar #tts-state { min-width: 0; padding: 0 .3em; }
 #build { max-width: 22em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 11.5px; }
 #toolbar button { padding: .12em .42em; min-width: 1.9em; }
@@ -878,6 +892,10 @@ body.two .seg.wide img { max-width: min(100%, 42em); }
 :root[data-cb] .seg.boxwarn > .boxbadge.over { color: var(--cb-del); border-color: var(--cb-del); }
 .seg.boxflash { outline: 2px solid var(--accent); outline-offset: 3px; transition: outline-color .6s; }
 #boxsum { font-size: 11.5px; padding: 0 .5em; margin-left: .4em; border-radius: 999px; color: #b5651d; }
+/* in the line under the title: plain text that fits its 14px, not a pill */
+#chrome #sub #boxsum { flex: none; font: inherit; font-size: 11px; line-height: 14px; height: 14px; padding: 0; margin: 0;
+  border: 0; border-radius: 0; background: none; color: color-mix(in srgb, var(--dirty) 70%, var(--fg)); cursor: pointer; }
+#chrome #sub #boxsum:hover { text-decoration: underline; background: none; }
 #boxsum[hidden] { display: none; }
 /* The Paper dialog is as tall as its content (up to 90% of the window), not
    always full height with an empty grey half. */
@@ -886,3 +904,163 @@ body.two .seg.wide img { max-width: min(100%, 42em); }
    edge; the title does not break inside a word. */
 .fv-head { flex-wrap: wrap; row-gap: .4em; }
 .fv-head > b { white-space: nowrap; }
+
+/* a figure of games, previewed after Apply until the next build */
+.game-preview { display: flex; flex-wrap: wrap; justify-content: space-around; gap: 1em 2em; margin: .5em 0;
+  font: 15px/1.55 Georgia, serif; }
+.game-preview .gp-game { min-width: 12em; text-align: left; }
+.game-preview .gp-title { margin-bottom: .2em; }
+.game-preview .gp-line { white-space: nowrap; }
+.game-preview .gp-no { display: inline-block; width: 1.8em; text-align: right; margin-right: .5em; font-size: .8em; color: var(--muted); }
+.game-preview .gp-comment { margin-left: 1.5em; }
+.game-preview .gp-mark { padding: 0 .2em; border-radius: 2px; }
+.game-preview .gp-mark[data-mark="yellow!20"] { background: color-mix(in srgb, yellow 22%, var(--bg)); }
+.game-preview .gp-mark[data-mark="cyan!20"] { background: color-mix(in srgb, cyan 22%, var(--bg)); }
+.game-preview .gp-mark[data-mark="green!20"] { background: color-mix(in srgb, green 22%, var(--bg)); }
+.game-preview .gp-mark[data-mark="magenta!15"] { background: color-mix(in srgb, magenta 18%, var(--bg)); }
+.fv-flash { animation: fv-flash .9s ease-out; }
+@keyframes fv-flash { from { background: color-mix(in srgb, var(--accent) 30%, transparent); } to { background: transparent; } }
+
+/* paper text size, separate from the interface */
+.textsize { display: inline-flex; }
+.textsize button { padding-inline: .45em; }
+.textsize button + button { margin-left: -1px; }
+#textsize { min-width: 3.6em; font-variant-numeric: tabular-nums; }
+
+/* the games of a figure as a grid of cells (minipages in the LaTeX) */
+.games-layout { display: flex; align-items: center; gap: .35em; flex-wrap: wrap; margin: 0 0 .7em; font: 12px system-ui, sans-serif; }
+.games-layout button { min-width: 2em; padding: .1em .45em; }
+.games-layout button[aria-pressed="true"] { background: var(--sel-bg); color: var(--sel-fg); border-color: var(--sel-bg); }
+.games-cells { align-items: start; overflow-x: auto; }
+.gcell { min-width: 0; min-height: 3em; border: 1px dashed transparent; border-radius: 8px; padding: .25em; }
+.gcell .game:last-child { margin-bottom: 0; }
+.gcell.empty { border-color: var(--line); display: flex; align-items: center; justify-content: center; }
+.gcell.fresh { min-height: 2.2em; opacity: .7; }
+.gcell-hint { font: 12px system-ui, sans-serif; color: var(--muted); }
+.gcell.drop { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.game.drop-above { box-shadow: 0 -3px 0 var(--accent); }
+.game.dragging { opacity: .45; }
+.game-actions .gmove { min-width: 1.7em; padding: .1em .3em; }
+.game-drag { font-size: 14px; line-height: 1; padding: .1em .3em; }
+.game-preview.gp-grid { display: grid; justify-content: space-around; align-items: start; gap: 1em 2em; }
+.gp-cell { display: flex; flex-direction: column; gap: 1em; min-width: 0; }
+
+/* ------------------------------------------------------------------
+   GNOME (Adwaita) header bar: flat buttons with one set of symbolic
+   line icons, no outlined groups (spacing separates them), a neutral
+   fill for toggled buttons, rounded 6px corners. */
+#chrome { font-family: Cantarell, "Adwaita Sans", Inter, system-ui, sans-serif; }
+#chrome button, #chrome select { font-family: inherit; }
+#chrome .ic { width: 16px; height: 16px; flex: none; vertical-align: -3px; }
+#chrome #ttsbar .ic { width: 16px; height: 16px; vertical-align: -3px; }
+#chrome #bar { gap: .3em 1.4em; }
+#chrome #bar .group { border: 0; background: none; padding: 0; gap: 2px; border-radius: 0; }
+#chrome #bar .group button, #chrome #toolbar button, #chrome #findbar button, #chrome #bar .textsize button {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 0; border-radius: 6px; background: transparent; box-shadow: none;
+  padding: 4px 8px; color: var(--fg);
+}
+#chrome #bar .group button:hover:not(:disabled), #chrome #toolbar button:hover:not(:disabled),
+#chrome #findbar button:hover:not(:disabled) { background: color-mix(in srgb, currentColor 9%, transparent); }
+#chrome #bar .group button:active:not(:disabled), #chrome #toolbar button:active:not(:disabled),
+#chrome #findbar button:active:not(:disabled) { background: color-mix(in srgb, currentColor 16%, transparent); }
+/* toggled: a neutral fill, as GNOME's toggle buttons */
+#chrome #bar button[aria-pressed="true"], #chrome #toolbar button[aria-pressed="true"],
+body.two #chrome #cols, body.diffing #chrome #diffbtn {
+  background: color-mix(in srgb, var(--fg) 15%, transparent); color: var(--fg); border: 0;
+}
+#chrome #bar button[aria-pressed="true"]:hover:not(:disabled), #chrome #toolbar button[aria-pressed="true"]:hover:not(:disabled),
+body.two #chrome #cols:hover, body.diffing #chrome #diffbtn:hover { background: color-mix(in srgb, var(--fg) 20%, transparent); color: var(--fg); }
+/* Dark themes: 15% fg sits almost on the chrome colour, so a pressed #cols or
+   #diffbtn was hard to see.  A stronger fill plus a hairline outline makes the
+   on-state read at a glance (WCAG 1.4.11 non-text contrast). */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) #chrome #bar button[aria-pressed="true"],
+  :root:not([data-theme="light"]) #chrome #toolbar button[aria-pressed="true"],
+  :root:not([data-theme="light"]) body.two #chrome #cols,
+  :root:not([data-theme="light"]) body.diffing #chrome #diffbtn,
+  :root:not([data-theme="light"]) #chrome .popover button[aria-pressed="true"] {
+    background: color-mix(in srgb, var(--fg) 32%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fg) 60%, transparent);
+  }
+  :root:not([data-theme="light"]) #chrome #bar button[aria-pressed="true"]:hover:not(:disabled),
+  :root:not([data-theme="light"]) #chrome #toolbar button[aria-pressed="true"]:hover:not(:disabled),
+  :root:not([data-theme="light"]) body.two #chrome #cols:hover,
+  :root:not([data-theme="light"]) body.diffing #chrome #diffbtn:hover,
+  :root:not([data-theme="light"]) #chrome .popover button[aria-pressed="true"]:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--fg) 38%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fg) 75%, transparent);
+  }
+}
+:root[data-theme="dark"] #chrome #bar button[aria-pressed="true"],
+:root[data-theme="dark"] #chrome #toolbar button[aria-pressed="true"],
+:root[data-theme="dark"] body.two #chrome #cols,
+:root[data-theme="dark"] body.diffing #chrome #diffbtn,
+:root[data-theme="dark"] #chrome .popover button[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--fg) 32%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fg) 60%, transparent);
+}
+:root[data-theme="dark"] #chrome #bar button[aria-pressed="true"]:hover:not(:disabled),
+:root[data-theme="dark"] #chrome #toolbar button[aria-pressed="true"]:hover:not(:disabled),
+:root[data-theme="dark"] body.two #chrome #cols:hover,
+:root[data-theme="dark"] body.diffing #chrome #diffbtn:hover,
+:root[data-theme="dark"] #chrome .popover button[aria-pressed="true"]:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--fg) 38%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fg) 75%, transparent);
+}
+#chrome #bar .group select {
+  border: 0; border-radius: 6px; padding: 4px 6px;
+  background: color-mix(in srgb, currentColor 8%, transparent);
+}
+#chrome #bar .group select:hover { background: color-mix(in srgb, currentColor 13%, transparent); }
+/* reading: the accent colour, lightly, never a solid block */
+#chrome #bar .group #play.reading { color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, transparent); }
+#chrome #bar .group #save.has-changes { background: var(--dirty); color: #1c1c1e; }
+#chrome #toolbar .sep { width: 1px; height: 16px; background: var(--line); margin: 0 6px; }
+
+/* ------------------------------------------------------------------
+   One row for the header bar, one for the editing toolbar. */
+#chrome > #bar { flex-wrap: nowrap; gap: 0 12px; align-items: center; }
+#chrome #title-wrap { flex: 1 1 auto; min-width: 4em; margin-right: 0; }
+#chrome #bar .group { flex-wrap: nowrap; flex: none; }
+#chrome #bar .navgroup { gap: 0; }
+#chrome #bar .navgroup button { padding: 4px 6px; }
+/* while idle only Read shows; the other reading controls come with reading */
+#chrome #bar #ttsbar:not(.active) #tts-prev, #chrome #bar #ttsbar:not(.active) #pause,
+#chrome #bar #ttsbar:not(.active) #tts-next, #chrome #bar #ttsbar:not(.active) #stop { display: none; }
+#chrome #bar #ttsopts { padding: 4px 4px; }
+#chrome > #toolbar { flex-wrap: nowrap; overflow: hidden; }
+#chrome #toolbar > *, #chrome #toolbar .tgroup { flex: none; }
+#chrome #toolbar .tgroup { display: inline-flex; }
+
+/* popovers and menus, GNOME style */
+.popover { position: fixed; z-index: 70; min-width: 15em; max-width: min(24em, calc(100vw - 16px));
+  padding: 6px; border-radius: 12px; background: var(--mac-raised, var(--bg)); color: var(--fg);
+  border: 1px solid color-mix(in srgb, var(--fg) 12%, transparent);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, .22), 0 1px 3px rgba(0, 0, 0, .12);
+  display: flex; flex-direction: column; gap: 1px; font-size: 13px; }
+.popover[hidden] { display: none; }
+#chrome .popover button { width: 100%; display: flex; align-items: center; gap: 8px; justify-content: flex-start;
+  padding: 6px 10px; border: 0; border-radius: 6px; background: transparent; color: var(--fg); text-align: left; box-shadow: none; }
+#chrome .popover button:hover:not(:disabled) { background: color-mix(in srgb, currentColor 9%, transparent); }
+#chrome .popover button:active:not(:disabled) { background: color-mix(in srgb, currentColor 16%, transparent); }
+#chrome .popover select { border: 0; border-radius: 6px; padding: 4px 6px; background: color-mix(in srgb, currentColor 8%, transparent); }
+#chrome .popover button[aria-pressed="true"] { font-weight: 600; }
+.popover hr { border: 0; border-top: 1px solid color-mix(in srgb, var(--fg) 10%, transparent); margin: 4px 6px; }
+.popover .menurow { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 4px 10px; }
+.popover .menulabel { color: var(--muted); white-space: nowrap; }
+#chrome .popover .textsize button { width: auto; padding: 4px 8px; }
+#chrome .popover select { max-width: 15em; }
+#chrome .popover #tts-state { padding: 0; font-size: 13px; }
+#toolmore .sep { display: none; }
+#toolmore > button, #toolmore .tgroup { width: 100%; }
+#toolmore #diffnav { display: flex; align-items: center; gap: 4px; }
+#toolmore #diffnav[hidden] { display: none; }
+
+/* narrow windows: icons only (the title of each button keeps its name) */
+@media (max-width: 1000px) {
+  #chrome #bar .lbl, #chrome #toolbar .lbl { display: none; }
+  #chrome #bar .group button, #chrome #toolbar button { padding: 4px 6px; }
+}
+/* the paper's title does not grow with large text sizes as much */
+h1.doctitle { font-size: max(1.3em, min(1.7em, 28px)); }

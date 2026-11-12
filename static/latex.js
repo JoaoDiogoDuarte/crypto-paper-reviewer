@@ -71,8 +71,11 @@
   function decodeText(s) { return s.replace(/\\([%&_#${}])/g, '$1'); }
   // one pass, so that an escape is never escaped again
   const ENC = { '%': '\\%', '&': '\\&', '_': '\\_', '#': '\\#', '$': '\\$', '{': '\\{', '}': '\\}',
-    '\\': '\\textbackslash{}', '~': '\\textasciitilde{}', '^': '\\textasciicircum{}', '\u00a0': ' ' };
-  function encodeText(t) { return t.replace(/[%&_#${}\\~^\u00a0]/g, (c) => ENC[c]); }
+    '\\': '\\textbackslash{}', '~': '\\textasciitilde{}', '^': '\\textasciicircum{}', '\u00a0': ' ',
+    // pdfLaTeX/OT1 prints raw < and > as ¡ and ¿: escape them so they print as
+    // themselves.  A raw " is fine: OT1 prints it as ”, T1 as "
+    '<': '\\textless{}', '>': '\\textgreater{}' };
+  function encodeText(t) { return t.replace(/[%&_#${}\\~^\u00a0<>]/g, (c) => ENC[c]); }
 
   // ---------------------------------------------------------------- tokenizer
 
@@ -238,7 +241,8 @@
 
   // ----------------------------------------------------------------- segments
 
-  // Segments: para (editable text), heading, code (a listing, optionally in
+  // Segments: para (editable text), heading, quote (a quote or quotation
+  // environment, shown as a block quote), code (a listing, optionally in
   // ecblock), figure, table, gap (the blank lines between, kept verbatim).
   // Code environments are shown as editable boxes; the list can be extended
   // per paper (setCodeEnvs), e.g. with a wrapper environment around listings.
@@ -246,7 +250,7 @@
   let BLOCK_RE;
   function buildBlockRe() {
     const code = CODE_ENVS.map((e) => e.replace(/[*]/g, '\\*')).join('|');
-    BLOCK_RE = new RegExp('\\\\begin\\{(figure\\*?|table\\*?|' + code + ')\\}|' +
+    BLOCK_RE = new RegExp('\\\\begin\\{(figure\\*?|table\\*?|quote|quotation|' + code + ')\\}|' +
       '\\\\(part|chapter|section|subsection|subsubsection)\\*?(?=[\\[{])', 'g');
   }
   buildBlockRe();
@@ -266,7 +270,8 @@
       if (m[1]) {
         end = envEnd(text, m.index, m[1]);
         if (end < 0) continue;
-        kind = m[1].startsWith('figure') ? 'figure' : m[1].startsWith('table') ? 'table' : 'code';
+        kind = m[1].startsWith('figure') ? 'figure' : m[1].startsWith('table') ? 'table'
+          : (m[1] === 'quote' || m[1] === 'quotation') ? 'quote' : 'code';
       } else {
         let k = m.index + 1 + m[2].length;
         if (text[k] === '*') k++;
@@ -572,12 +577,163 @@
     return out;
   }
 
+  // ------------------------------------------------------------ game layout
+  //
+  // The games of a figure as a grid: rows of cells, a cell a stack of games
+  // (indexes into parseGames).  Read from minipages side by side (a row ends
+  // at \par, \\, a blank line or a skip), from multicols columns split at
+  // \columnbreak (or \gamebreak), or from games one under the other.  Written
+  // as rows of top-aligned minipages.
+  const MINI_BEGIN = /\\begin\{minipage\}(?:\s*\[[^\]]*\])*\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}/y;
+  const LAYOUT_TOKENS = [
+    ['space', /\s+/y], ['comment', /%[^\n]*\n?/y], ['mini', MINI_BEGIN], ['end', /\\end\{minipage\}/y],
+    ['colbreak', /\\(?:columnbreak|gamebreak)(?![A-Za-z])/y],
+    ['skip', /\\vspace\*?\s*\{0pt\}/y],      // tops of minipages aligned
+    ['break', /\\(?:par|medskip|smallskip|bigskip|newline)(?![A-Za-z])|\\vspace\*?\s*\{[^{}]*\}|\\\\(?:\s*\[[^\]]*\])?/y],
+    ['skip', /\\(?:hfill|quad|qquad|noindent|centering|null)(?![A-Za-z])|\\hspace\*?\s*\{[^{}]*\}|\\mbox\{\}/y],
+  ];
+  // the tokens a layout region may begin or end with
+  const EDGE = new Set(['space', 'comment', 'mini', 'end', 'skip']);
+
+  function layoutTokens(src, games) {
+    const toks = [];
+    let i = 0, gi = 0;
+    while (i < src.length) {
+      if (gi < games.length && i === games[gi].start) { toks.push({ t: 'game', g: gi, a: i, b: games[gi].end }); i = games[gi++].end; continue; }
+      let hit = null;
+      for (const [t, re] of LAYOUT_TOKENS) {
+        re.lastIndex = i;
+        const m = re.exec(src);
+        if (m && m[0].length) { hit = { t, a: i, b: i + m[0].length, s: m[0], w: m[1] }; break; }
+      }
+      if (hit && gi < games.length && hit.b > games[gi].start) hit = null;
+      if (!hit) {
+        const next = gi < games.length ? games[gi].start : src.length;
+        const last = toks[toks.length - 1];
+        if (last && last.t === 'other') { last.b = i + 1; } else toks.push({ t: 'other', a: i, b: i + 1 });
+        i++;
+        if (i > next) i = next;
+        continue;
+      }
+      if (hit.t === 'space' && /\n[ \t]*\n/.test(hit.s)) hit.t = 'blank';
+      toks.push(hit);
+      i = hit.b;
+    }
+    return toks;
+  }
+
+  const widthOf = (w) => { const m = /^\s*([\d.]+)\s*\\(?:line|text|column)width\s*$/.exec(w || ''); return m ? parseFloat(m[1]) : null; };
+
+  // multicolEnvs: environments that open multicols (as \begin{env}{n}).
+  function gameLayout(src, games, multicolEnvs) {
+    const fail = (reason) => ({ ok: false, reason });
+    if (!games.length) return fail('no games');
+    if (games.some((g) => !(g.end > g.start))) return fail('a game has no clear extent');
+    for (let k = 1; k < games.length; k++) if (games[k].start < games[k - 1].end) return fail('nested games');
+    const toks = layoutTokens(src, games);
+    const first = toks.findIndex((t) => t.t === 'game');
+    let lastG = -1;
+    toks.forEach((t, k) => { if (t.t === 'game') lastG = k; });
+    let lo = first, hi = lastG;
+    while (lo > 0 && EDGE.has(toks[lo - 1].t)) lo--;
+    while (hi < toks.length - 1 && EDGE.has(toks[hi + 1].t)) hi++;
+    // keep the whitespace and comments around the region as they are
+    while (lo < first && (toks[lo].t === 'space' || toks[lo].t === 'comment')) lo++;
+    while (hi > lastG && (toks[hi].t === 'space' || toks[hi].t === 'comment')) hi--;
+    const region = toks.slice(lo, hi + 1);
+    if (region.some((t) => t.t === 'other')) return fail('text or commands between the games');
+    // minipages must open and close inside the region
+    let depth = 0;
+    for (const t of region) {
+      if (t.t === 'mini') depth++;
+      if (t.t === 'end' && --depth < 0) return fail('unbalanced minipages');
+      if (t.t === 'mini' && depth > 1) return fail('nested minipages');
+    }
+    if (depth) return fail('unbalanced minipages');
+    // a multicols wrapper around the games: \begin{multicols}{n}, \begin{games}{n}
+    let wrapper = null;
+    const envs = new Set(['multicols', ...(multicolEnvs || [])]);
+    const wre = /\\begin\{([A-Za-z*]+)\}\s*\{\s*(\d+)\s*\}/g;
+    for (let m; (m = wre.exec(src)) && m.index < region[0].a;) {
+      if (!envs.has(m[1]) || inComment(src, m.index)) continue;
+      const e = envEnd(src, m.index, m[1]);
+      if (e >= region[region.length - 1].b) {
+        const at = m.index + m[0].lastIndexOf(m[2]);
+        wrapper = { env: m[1], n: +m[2], argRange: [at, at + m[2].length] };
+      }
+    }
+    const rows = [];
+    let cols = 1;
+    const hasMini = region.some((t) => t.t === 'mini');
+    if (wrapper && wrapper.n > 1 && !hasMini) {
+      // columns of a multicols: split at \columnbreak, else as balanced by
+      // length (as multicols would, roughly)
+      const columns = [[]];
+      for (const t of region) {
+        if (t.t === 'colbreak') columns.push([]);
+        if (t.t === 'game') columns[columns.length - 1].push(t.g);
+      }
+      if (columns.length === 1 && wrapper.n > 1) {
+        const all = columns[0], size = all.map((g) => games[g].lines.length + 2);
+        const total = size.reduce((x, y) => x + y, 0);
+        columns.length = 0;
+        let acc = 0, col = [];
+        all.forEach((g, k) => {
+          if (col.length && acc + size[k] / 2 > total * (columns.length + 1) / wrapper.n && columns.length < wrapper.n - 1) { columns.push(col); col = []; }
+          col.push(g); acc += size[k];
+        });
+        columns.push(col);
+      }
+      cols = Math.max(wrapper.n, columns.length);
+      rows.push(columns);
+    } else {
+      let row = null, cell = null, width = 1;
+      const close = () => { if (row && row.length) rows.push(row); row = null; };
+      for (const t of region) {
+        if (t.t === 'mini') { cell = []; row = row || []; const w = widthOf(t.w); if (w) width = Math.min(width, w); }
+        else if (t.t === 'end') { row.push(cell); cell = null; }
+        else if (t.t === 'game') { if (cell) cell.push(t.g); else { close(); rows.push([[t.g]]); } }
+        else if (!cell && (t.t === 'break' || t.t === 'blank' || t.t === 'colbreak')) close();
+      }
+      close();
+      cols = Math.max(1, ...rows.map((r) => r.length), hasMini && width < 1 ? Math.min(4, Math.floor(1 / width + 0.05)) : 1);
+    }
+    for (const r of rows) while (r.length < cols) r.push([]);
+    return { ok: true, cols, rows, region: [region[0].a, region[region.length - 1].b], wrapper };
+  }
+
+  const cellWidth = (cols) => Math.floor((1 - 0.03 * (cols - 1)) / cols * 100) / 100;
+
+  // The figure with its games laid out as `rows` (cells of game indexes) in
+  // `cols` columns; `layout` is what gameLayout read from the same source.
+  function writeGameLayout(src, games, layout, cols, rows) {
+    const text = (g) => src.slice(games[g].start, games[g].end);
+    rows = rows.map((r) => r.map((c) => c.slice())).filter((r) => r.some((c) => c.length));
+    let out;
+    if (cols <= 1) {
+      out = rows.flat(2).map(text).join('\n');
+    } else {
+      const w = String(cellWidth(cols)).replace(/^0/, '');
+      out = rows.map((r) => {
+        while (r.length < cols) r.push([]);
+        return '\\noindent\n' + r.slice(0, cols).map((c) => `\\begin{minipage}[t]{${w}\\linewidth}\\vspace{0pt}\n` +
+          (c.length ? c.map(text).join('\n') : '\\mbox{}') + '\n\\end{minipage}').join('\\hfill\n');
+      }).join('\n\\par\\medskip\n');
+    }
+    const [a, b] = layout.region;
+    let res = src.slice(0, a) + out + src.slice(b);
+    // the games are now in minipages: a multicols wrapper keeps one column
+    const wr = layout.wrapper;
+    if (wr && wr.n !== 1) res = res.slice(0, wr.argRange[0]) + '1' + res.slice(wr.argRange[1]);
+    return res;
+  }
+
   function tabularBody(t) {
     return t.rows.map((r) => r.lead + (r.empty ? r.rawRest : r.cells.map((c, i) => c.lead + c.content + c.trail + (i < r.cells.length - 1 ? '&' : '')).join('')) + r.sep).join('');
   }
 
   const api = { tokenize, serializeTokens, segment, serializeSegments, splitCode, documentPieces,
-    decodeText, encodeText, houseRules, headingParts, captionParts, typeset, setCodeEnvs, parseGames, parseGameLine, gameLineSrc, parseTabulars, tabularBody, groupEnd, envEnd, inComment, THM_ENVS, MATH_ENVS };
+    decodeText, encodeText, houseRules, headingParts, captionParts, typeset, setCodeEnvs, parseGames, parseGameLine, gameLineSrc, gameLayout, writeGameLayout, parseTabulars, tabularBody, groupEnd, envEnd, inComment, THM_ENVS, MATH_ENVS };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.LatexDoc = api;
 })(this);

@@ -360,17 +360,17 @@ async function checkFeedback(S) {
     // something to act on: the caret in the first paragraph
     await p.eval(`(() => { const s = ORDER.find((x) => x.kind === 'para' && x.edit && x.edit.isContentEditable); if (!s) return;
       const r = document.createRange(); r.selectNodeContents(s.edit); r.collapse(true); s.edit.focus(); getSelection().removeAllRanges(); getSelection().addRange(r); })()`);
-    const before = await p.eval(`JSON.stringify({ t: __toasts, d: [...document.querySelectorAll('[role=dialog], #palette, #findbar, #figview, #helpbox, #drawer, #menu')].map((e) => e.hidden), a: [...document.querySelectorAll('#chrome [aria-pressed]')].map((e) => e.getAttribute('aria-pressed')), s: $('#tts-state').textContent, th: document.documentElement.dataset.theme || '', two: document.body.classList.contains('two') })`);
+    const before = await p.eval(`JSON.stringify({ t: __toasts, d: [...document.querySelectorAll('[role=dialog], #palette, #findbar, #figview, #helpbox, #drawer, #menu, .popover')].map((e) => e.hidden), a: [...document.querySelectorAll('#chrome [aria-pressed]')].map((e) => e.getAttribute('aria-pressed')), dis: [...document.querySelectorAll('#chrome button')].map((e) => e.disabled), y: Math.round(scrollY), s: $('#tts-state').textContent, th: document.documentElement.dataset.theme || '', two: document.body.classList.contains('two') })`);
     p.dialogAnswer = false;
     await p.click(sel).catch((e) => S.bug('feedback', `${sel} cannot be clicked: ${e.message}`));
     await sleep(500);
-    const after = await p.eval(`JSON.stringify({ t: __toasts, d: [...document.querySelectorAll('[role=dialog], #palette, #findbar, #figview, #helpbox, #drawer, #menu')].map((e) => e.hidden), a: [...document.querySelectorAll('#chrome [aria-pressed]')].map((e) => e.getAttribute('aria-pressed')), s: $('#tts-state').textContent, th: document.documentElement.dataset.theme || '', two: document.body.classList.contains('two') })`);
+    const after = await p.eval(`JSON.stringify({ t: __toasts, d: [...document.querySelectorAll('[role=dialog], #palette, #findbar, #figview, #helpbox, #drawer, #menu, .popover')].map((e) => e.hidden), a: [...document.querySelectorAll('#chrome [aria-pressed]')].map((e) => e.getAttribute('aria-pressed')), dis: [...document.querySelectorAll('#chrome button')].map((e) => e.disabled), y: Math.round(scrollY), s: $('#tts-state').textContent, th: document.documentElement.dataset.theme || '', two: document.body.classList.contains('two') })`);
     if (before === after && !p.dialogs.length) S.bug('feedback', `clicking ${sel} shows nothing`);
     p.dialogs = []; p.dialogAnswer = true;
     // put things back
     await p.eval(`(() => { TTS.stop && TTS.stop(); if (DIFF.on) diffOff(); for (const id of ['paperbox', 'historybox', 'keysbox', 'helpbox', 'palette', 'drawer', 'menu', 'openbox']) { const e = document.getElementById(id); if (e && !e.hidden) { const esc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }); document.activeElement.dispatchEvent(esc); } }
       for (const id of ['paperbox', 'historybox', 'keysbox', 'helpbox', 'palette', 'drawer', 'menu', 'openbox']) { const e = document.getElementById(id); if (e) e.hidden = true; }
-      if (!$('#findbar').hidden) closeFind(); if (!$('#figview').hidden) closeFigure(true); })()`);
+      if (typeof closePopovers === 'function') closePopovers(); if (!$('#findbar').hidden) closeFind(); if (!$('#figview').hidden) closeFigure(true); })()`);
     await sleep(80);
   }
   await p.eval(`(() => { while (UNDO && UNDO.length) undo(); })()`).catch(() => {});
@@ -383,13 +383,13 @@ async function checkEditing(S, two) {
   await S.size(1280, 860);
   await p.eval(`if (document.body.classList.contains('two') !== ${two}) $('#cols').click(); 0`);
   await sleep(300);
-  const n = await p.eval(`ORDER.filter((s) => s.edit && s.edit.isContentEditable && /[a-z]{4}/.test(s.edit.textContent) && ['para', 'heading', 'figure', 'table'].includes(s.kind)).length`);
+  const n = await p.eval(`ORDER.filter((s) => s.edit && s.edit.isContentEditable && /[a-z]{4}/.test(s.edit.textContent) && ['para', 'heading', 'figure', 'table', 'quote'].includes(s.kind)).length`);
   const want = Math.min(n, QUICK ? 6 : 16);
   const kinds = {};
   for (let k = 0; k < want; k++) {
     const idx = Math.floor((k + 0.5) * n / want);
     const target = await p.eval(`(() => {
-      const segs = ORDER.filter((s) => s.edit && s.edit.isContentEditable && /[a-z]{4}/.test(s.edit.textContent) && ['para', 'heading', 'figure', 'table'].includes(s.kind));
+      const segs = ORDER.filter((s) => s.edit && s.edit.isContentEditable && /[a-z]{4}/.test(s.edit.textContent) && ['para', 'heading', 'figure', 'table', 'quote'].includes(s.kind));
       const s = segs[${idx}]; window.__seg = s; window.__word = null;
       const w = document.createTreeWalker(s.edit, NodeFilter.SHOW_TEXT);
       let t; while ((t = w.nextNode())) { const m = /[a-z]{4,}/.exec(t.data); if (m && !t.parentElement.closest('.chip')) { window.__word = [t, m.index]; break; } }
@@ -478,7 +478,7 @@ async function checkFigures(S) {
         if (!(await p.eval(`figureWithEdits().includes('Qg')`))) S.bug(where, 'typing into a game line does nothing');
         kindsTried.push('game text');
       }
-      const c = await p.eval(`(() => { const c = document.querySelector('#fv-body .gline .gtext .chip.math'); if (!c) return null; c.scrollIntoView({ block: 'center' }); const r = c.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2, src: c.dataset.src }; })()`);
+      const c = await p.eval(`(() => { const c = [...document.querySelectorAll('#fv-body .gline .gtext .chip.math')].find((e) => !e.parentElement.closest('.chip')); if (!c) return null; c.scrollIntoView({ block: 'center' }); const r = c.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2, src: c.dataset.src }; })()`);
       if (c) {
         await S.clickAt(c.x, c.y); await sleep(150);
         if (await p.eval(`$('#drawer').hidden`)) S.bug(where, 'clicking a formula in a game line does not open its editor');
@@ -565,7 +565,10 @@ async function checkReader(S) {
         const v = await p.eval(`(() => { const h = CSS.highlights.get('tts'); const range = h && [...h][0]; const b = range && (range.getClientRects()[0] || range.getBoundingClientRect()); return b ? [b.top, b.bottom, chromeBottom(), innerHeight] : null; })()`);
         if (v && (v[0] < v[2] - 1 || v[1] > v[3] + 1)) { S.bug(where, `a later phrase is read off screen (top ${Math.round(v[0])}, bars end ${Math.round(v[2])})`); break; }
       }
-      await p.click('#stop'); await sleep(100);
+      // Stop is shown only while reading; the reader may have reached the end
+      const st = await p.eval(`({ speaking: !$('#stop').disabled, shown: !!$('#stop').getClientRects().length })`);
+      if (st.speaking && !st.shown) S.bug(where, 'reading, but the stop button is hidden');
+      if (st.shown) { await p.click('#stop'); await sleep(100); }
       if (await p.eval(`!$('#stop').disabled`)) S.bug(where, 'stop leaves the reader running');
     }
   }

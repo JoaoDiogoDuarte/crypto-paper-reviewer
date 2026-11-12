@@ -11,6 +11,7 @@ optional .paper-editor.json beside the main file; see README.md.
 """
 import argparse
 import hashlib
+import html
 import http.server
 import json
 import os
@@ -131,21 +132,57 @@ def input_map():
     return out
 
 
+def expanded_source(folder, name, seen=None):
+    """A .tex file of `folder` with the local files it \\input or \\include
+    spliced in (comments removed), so that a main file whose \\documentclass
+    sits in an \\input{preamble}, or a wrapper that only sets a flag and
+    \\inputs main.tex, still reads as a document."""
+    seen = set() if seen is None else seen
+    path = os.path.normpath(os.path.join(folder, name))
+    if path in seen or len(seen) > 200 or not os.path.isfile(path):
+        return ''
+    seen.add(path)
+    try:
+        with open(path, encoding='utf-8', errors='replace') as source:
+            text = strip_comments(source.read())
+    except OSError:
+        return ''
+
+    def splice(m):
+        arg = m.group(1).strip()
+        for cand in (arg, arg + '.tex'):
+            if os.path.isfile(os.path.join(folder, cand)):
+                return expanded_source(folder, cand, seen)
+        return ''
+    return INPUT_RE.sub(splice, text)
+
+
 def find_mains(folder):
     """The .tex files of a folder that are documents (\\documentclass and
-    \\begin{document}), the most recently built first."""
+    \\begin{document}, directly or through files they \\input), the most
+    recently built first; a wrapper that only \\inputs another document
+    (a second edition of the same paper) comes after the documents."""
     out = []
     for f in sorted(os.listdir(folder)):
         p = os.path.join(folder, f)
         if f.endswith('.tex') and os.path.isfile(p):
-            with open(p, encoding='utf-8', errors='replace') as source:
-                t = source.read()
-            if re.search(r'^[^%\n]*\\documentclass', t, re.M) and '\\begin{document}' in t:
+            t = expanded_source(folder, f)
+            if re.search(r'\\documentclass', t) and re.search(r'\\begin\s*\{document\}', t):
                 built = [os.path.getmtime(os.path.join(folder, f[:-4] + e)) for e in ('.aux', '.pdf')
                          if os.path.exists(os.path.join(folder, f[:-4] + e))]
-                out.append((max(built) if built else 0, f != 'main.tex', f))
-    out.sort(key=lambda x: (-x[0], x[1], x[2]))
-    return [f for _, _, f in out]
+                own = strip_comments(read_path(p))
+                wrapper = not re.search(r'\\begin\s*\{document\}', own)
+                out.append((wrapper, -(max(built) if built else 0), f != 'main.tex', f))
+    out.sort()
+    return [x[-1] for x in out]
+
+
+def read_path(path):
+    try:
+        with open(path, encoding='utf-8', errors='replace') as source:
+            return source.read()
+    except OSError:
+        return ''
 
 
 def paper_files():
@@ -165,17 +202,52 @@ def paper_files():
     return order
 
 
+def spliced_preamble(whole=False):
+    """The main file up to \\begin{document}, with the local files it \\input
+    or \\include spliced in where they stand (comments removed): a wrapper's
+    \\def before its \\input{main} comes before the preamble that tests it,
+    as in TeX.  Files after \\begin{document} are not read, unless whole:
+    then it is the whole document."""
+    seen, out = set(), []
+    begin = re.compile(r'\\begin\s*\{document\}')
+
+    def splice(name, depth):
+        """False once \\begin{document} is reached."""
+        if name in seen or depth > 12:
+            return True
+        seen.add(name)
+        text, pos = strip_comments(read(name)), 0
+        for m in INPUT_RE.finditer(text):
+            b = None if whole else begin.search(text, pos, m.start())
+            if b:
+                out.append(text[pos:b.start()])
+                return False
+            out.append(text[pos:m.start()])
+            pos = m.end()
+            f = resolve_input(m.group(1))
+            if not (f and f.endswith('.tex')):
+                out.append(m.group(0))
+            elif not splice(f, depth + 1):
+                return False
+        b = None if whole else begin.search(text, pos)
+        out.append(text[pos:b.start()] if b else text[pos:])
+        return not b
+    splice(MAIN, 0)
+    return ''.join(out)
+
+
 def preamble_text():
-    """Everything before \\begin{document}, with local files it inputs or loads
-    (\\input, \\usepackage of a .sty in the paper's directory) appended."""
-    main = read(MAIN)
-    pre = main[:main.find('\\begin{document}')] if '\\begin{document}' in main else main
+    """Everything before \\begin{document}, with local files it inputs spliced
+    in, the branches of decidable conditionals TeX would skip left out
+    (convert.active_tex), and .sty files of the paper's directory it loads
+    appended."""
+    pre = convert.active_tex(spliced_preamble())
     out, seen = [pre], set()
 
     def expand(text):
         for m in INPUT_RE.finditer(strip_comments(text)):
             f = resolve_input(m.group(1))
-            if f and f not in seen:
+            if f and f not in seen and not f.endswith('.tex'):
                 seen.add(f)
                 t = read(f)
                 out.append(t)
@@ -199,12 +271,13 @@ def read(name):
 
 
 def docclass():
-    m = re.search(r'^[^%\n]*\\documentclass\s*(?:\[[^\]]*\])?\s*\{([^}]*)\}', read(MAIN), re.M)
+    """The class, with its options after a slash (IEEEtran/conference), as
+    LaTeX would load it: a \\documentclass in an \\input file or in one
+    branch of an \\if counts."""
+    m = re.search(r'\\documentclass\s*(?:\[([^\]]*)\])?\s*\{([^}]*)\}', preamble_text())
     if not m:
-        m = re.search(r'\\documentclass\s*(?:\[([^\]]*)\])?\s*\{([^}]*)\}', preamble_text())
-        return m.group(2) if m else 'article'
-    opts = re.search(r'\\documentclass\s*\[([^\]]*)\]', read(MAIN))
-    return m.group(1) + ('/' + opts.group(1) if opts else '')
+        return 'article'
+    return m.group(2).strip() + ('/' + m.group(1) if m.group(1) else '')
 
 
 def stem():
@@ -412,7 +485,7 @@ def load_theorems():
         shared = re.search(r'(?:sibling|numberlike|sharenumber)\s*=\s*\{?([^,}]*)', opts)
         th[env] = {'name': name.group(1).strip() if name else env.capitalize(),
                    'counter': shared.group(1).strip() if shared else env}
-    if re.search(r'\\documentclass(\[[^\]]*\])?\{(llncs|svjour3?|lncs)\}', read(MAIN)) or not th:
+    if docclass().split('/')[0] in ('llncs', 'svjour', 'svjour3', 'lncs') or not th:
         for env, name in THEOREM_DEFAULTS.items():
             th.setdefault(env, {'name': name, 'counter': 'theorem' if env != 'definition' else env})
     return th
@@ -617,13 +690,33 @@ class Builder:
         self.state = {'state': 'idle', 'message': '', 'at': 0}
         self.aux = load_aux()
         self.auxver = 1
+        self.figver = 1     # counts the figure cuts: they finish after the PDF build
+        self.clean = False
         threading.Thread(target=self.loop, daemon=True).start()
 
     def log(self, msg):
         print(time.strftime('%H:%M:%S'), msg, flush=True)
 
-    def request(self):
+    def request(self, clean=False):
+        if clean:
+            self.clean = True
         self.wanted.set()
+
+    # what LaTeX, BibTeX and latexmk write beside the main file; a clean
+    # build starts without them (they are kept in the cache, not deleted)
+    BUILD_FILES = ('.aux', '.out', '.fdb_latexmk', '.fls', '.toc', '.lof', '.lot', '.bbl', '.blg',
+                   '.bcf', '.run.xml', '.nav', '.snm', '.synctex.gz')
+
+    def clean_files(self):
+        backup = os.path.join(CACHE, 'clean', str(time.time_ns()))
+        moved = 0
+        for suffix in self.BUILD_FILES:
+            path = os.path.join(PAPER, stem() + suffix)   # stem() keeps MAIN's subfolder
+            if os.path.isfile(path):
+                os.makedirs(backup, exist_ok=True)
+                shutil.move(path, os.path.join(backup, os.path.basename(path)))
+                moved += 1
+        self.log(f'build: clean build, {moved} build file(s) moved to {backup}')
 
     def build_command(self):
         if CONFIG.get('build'):
@@ -647,9 +740,11 @@ class Builder:
             # Hyperref's .out is just as vulnerable to partial writes as .aux.
             # Keep the damaged files, and remove latexmk's stale status before
             # retrying.  Do not delete any manuscript .tex/.bib files.
-            recoverable = re.search(
-                r'File ended while scanning use of \\(?:@newl@bel|@@BOOKMARK|pgfsys@pdfmark)',
-                output)
+            # \@writefile, \@newl@bel, \@@BOOKMARK, \abx@aux@... : any of them
+            # truncated in the .aux/.out ends the run.  A missing brace in the
+            # .tex gives the same message; one retry without the .aux is then
+            # merely wasted time, and the error is shown as before.
+            recoverable = re.search(r'File ended while scanning use of \\[@A-Za-z]', output)
             nontext = any(os.path.isfile(p) and b'\x00' in open(p, 'rb').read()
                           for p in log_files if p.endswith(('.aux', '.out')))
             if (r.returncode != 0 and isinstance(cmd, list) and cmd
@@ -680,20 +775,27 @@ class Builder:
             self.state = {'state': 'error', 'message': f'build failed: {e}', 'at': time.time()}
         self.log('build: ' + self.state['message'])
 
-    def loop(self):
+    def figures(self):
         try:
             build_figures(self.log)
         except Exception as e:  # figures are a nicety; never stop the server
             self.log(f'figures: {e}')
+        self.figver += 1
+
+    def loop(self):
+        self.figures()
         while True:
             self.wanted.wait()
             time.sleep(1.5)  # let several saves in a row share one build
             self.wanted.clear()
+            if self.clean:
+                self.clean = False
+                try:
+                    self.clean_files()
+                except OSError as e:
+                    self.log(f'build: clean failed: {e}')
             self.build_once()
-            try:
-                build_figures(self.log)
-            except Exception as e:
-                self.log(f'figures: {e}')
+            self.figures()
 
 
 BUILDER = None
@@ -793,7 +895,7 @@ def box_warnings():
 
 
 def state_payload():
-    return {'hashes': {n: sha(read(n)) for n in paper_files()}, 'auxver': BUILDER.auxver,
+    return {'hashes': {n: sha(read(n)) for n in paper_files()}, 'auxver': BUILDER.auxver, 'figver': BUILDER.figver,
             'build': BUILDER.state, 'boxes': box_warnings()}
 
 
@@ -828,6 +930,7 @@ def bib_target():
         return 'references.bib'
     return min(files, key=lambda b: os.path.getsize(os.path.join(PAPER, b)))
 _bib_lock = threading.Lock()
+_bib_add_lock = threading.Lock()   # check+write of one /api/bibadd must be atomic
 
 
 def parse_bib(text, source):
@@ -1029,6 +1132,15 @@ def format_bib(bib, key):
         else:
             k = re.match(r'[^,]*', body[k:]).end() + k
         name, val = f.group(1).lower(), body[f.end():k].strip().replace('\u2013', '--').replace('\u2014', '---')
+        if len(val) >= 2 and (val[0], val[-1]) in (('{', '}'), ('"', '"')) and re.search(r'[&<>"]', val[1:-1]):
+            # doi.org serves &amp; &lt; &#x27; …; escape inside the delimiters only
+            inner = html.unescape(val[1:-1])
+            inner = re.sub(r'(?<!\\)&', r'\\&', inner)
+            inner = re.sub(r'(?<!\\)<', r'\\textless{}', inner)
+            inner = re.sub(r'(?<!\\)>', r'\\textgreater{}', inner)
+            if val[0] == '"':   # a bare " would end the value
+                inner = re.sub(r'(?<!\\)"', r'\\textquotedbl{}', inner)
+            val = val[0] + inner + val[-1]
         i = k
         if name not in ('url', 'timestamp', 'biburl', 'bibsource', 'issn', 'isbn', 'month'):
             fields.append(f'  {name} = {val},')
@@ -1039,23 +1151,25 @@ def online_add(source, ident, key):
     """Fetch the BibTeX of a DOI or arXiv id and append it to references.bib."""
     if not re.fullmatch(r'[A-Za-z0-9:_+.-]+', key or ''):
         raise ValueError('bad key')
-    if any(e[0] == key for e in bib_entries()):
-        raise ValueError(f'{key} already exists')
-    if source == 'crossref':
-        req = urllib.request.Request('https://doi.org/' + urllib.parse.quote(ident),
-                                     headers={'Accept': 'application/x-bibtex', 'User-Agent': 'paper-editor'})
-    elif source == 'arxiv':
-        req = urllib.request.Request('https://arxiv.org/bibtex/' + urllib.parse.quote(ident),
-                                     headers={'User-Agent': 'paper-editor'})
-    else:
-        raise ValueError('unknown source')
-    bib = format_bib(urllib.request.urlopen(req, timeout=20).read().decode(), key)
-    path = os.path.join(PAPER, bib_target())
-    text = open(path, encoding='utf-8', newline='').read() if os.path.exists(path) else ''
-    nl = '\r\n' if '\r\n' in text else '\n'
-    bib = bib.replace('\n', nl)
-    with open(path, 'w', encoding='utf-8', newline='') as f:
-        f.write(text.rstrip('\n') + '\n\n' + bib + '\n')
+    with _bib_add_lock:   # the exists-check and the write are one step
+        if any(e[0] == key for e in bib_entries()):
+            raise ValueError(f'{key} already exists')
+        if source == 'crossref':
+            req = urllib.request.Request('https://doi.org/' + urllib.parse.quote(ident),
+                                         headers={'Accept': 'application/x-bibtex', 'User-Agent': 'paper-editor'})
+        elif source == 'arxiv':
+            req = urllib.request.Request('https://arxiv.org/bibtex/' + urllib.parse.quote(ident),
+                                         headers={'User-Agent': 'paper-editor'})
+        else:
+            raise ValueError('unknown source')
+        bib = format_bib(urllib.request.urlopen(req, timeout=20).read().decode(), key)
+        path = os.path.join(PAPER, bib_target())
+        text = open(path, encoding='utf-8', newline='').read() if os.path.exists(path) else ''
+        nl = '\r\n' if '\r\n' in text else '\n'
+        bib = bib.replace('\n', nl)
+        with open(path, 'w', encoding='utf-8', newline='') as f:
+            f.write(text.rstrip('\n') + '\n\n' + bib + '\n')
+        _bib.update(entries=None, stamp=None)   # the index is stale now
     return bib
 
 
@@ -1403,7 +1517,14 @@ def original_main():
     """The main file's text; for a converted file, the original it came from
     (its front matter is where metadata lives: a converted one is lossy)."""
     text = read(MAIN)
-    return convert.restore(text) or text
+    restored = convert.restore(text)
+    if restored:
+        return restored
+    # front matter and the class may sit in \\input files, and in branches of
+    # an \\if: what LaTeX would read (comments are gone)
+    whole = spliced_preamble(whole=True)
+    cut = re.search(r'\\begin\s*\{document\}', whole)
+    return convert.active_tex(whole[:cut.start()]) + whole[cut.start():] if cut else convert.active_tex(whole)
 
 
 def theorems_used():
@@ -1419,6 +1540,12 @@ def run_convert(target, anonymous, name, overwrite, root=False):
         raise ValueError('unknown target')
     if not re.fullmatch(r'[A-Za-z0-9._-]+\.tex', name or ''):
         raise ValueError('the file name must end in .tex, without folders')
+    if not re.search(r'\\begin\s*\{document\}', strip_comments(read(MAIN))):
+        inner = [resolve_input(m.group(1)) for m in INPUT_RE.finditer(strip_comments(read(MAIN)))]
+        inner = [f for f in inner if f and f in find_mains(PAPER)] if os.path.isdir(PAPER) else []
+        raise ValueError(f'{MAIN} only sets options and \\inputs the paper'
+                         + (f' ({inner[0]})' if inner else '') + ': open '
+                         + (inner[0] if inner else 'the file with \\begin{document}') + ' and convert that')
     # A missing class is an installation problem, not a failed conversion.
     # Fail before writing an unusable .tex file.
     target_class = {'ieee': 'IEEEtran', 'llncs': 'llncs', 'iacrcc': 'iacrcc',
@@ -1526,6 +1653,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        LIFE['last'] = time.time()
         url = urllib.parse.urlparse(self.path)
         p = url.path
         if p == '/':
@@ -1534,6 +1662,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if p == '/api/doc':
             return self.send(200, doc_payload())
         if p == '/api/state':
+            c = urllib.parse.parse_qs(url.query).get('c', [''])[0][:40]
+            if c:
+                CLIENTS[c] = time.time()
+                LIFE['seen'] = True
             return self.send(200, state_payload())
         if p.startswith('/fig/') and re.fullmatch(r'/fig/[0-9a-f]{16}\.png', p):
             f = os.path.join(CACHE, p[5:])
@@ -1588,11 +1720,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             name = os.path.basename(p)
             f = os.path.join(STATIC, name)
             if os.path.exists(f):
-                ctype = {'.js': 'text/javascript', '.css': 'text/css'}.get(os.path.splitext(f)[1], 'text/plain')
+                ctype = {'.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml'}.get(os.path.splitext(f)[1], 'text/plain')
                 return self.send(200, open(f, 'rb').read(), ctype + '; charset=utf-8')
         self.send(404, {'error': 'not found'})
 
     def do_POST(self):
+        LIFE['last'] = time.time()
+        if urllib.parse.urlparse(self.path).path == '/api/bye':
+            # sent by navigator.sendBeacon, which cannot set headers: the token is in the body
+            req = self.json_body() or {}
+            if req.get('token') != TOKEN:
+                return self.send(403, {'error': 'bad token'})
+            CLIENTS.pop(str(req.get('c', ''))[:40], None)
+            return self.send(200, {})
         if self.headers.get('X-Token') != TOKEN:
             return self.send(403, {'error': 'bad token'})
         if urllib.parse.urlparse(self.path).path == '/api/log':
@@ -1611,6 +1751,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         out.write(time.strftime('%Y-%m-%d %H:%M:%S ') + msg.replace('\n', '\n    ') + '\n')
                 except OSError:
                     pass
+            return self.send(200, {})
+        if urllib.parse.urlparse(self.path).path == '/api/build':
+            req = self.json_body() or {}
+            BUILDER.request(clean=bool(req.get('clean')))
+            BUILDER.state = {'state': 'running', 'message': 'clean build queued' if req.get('clean') else 'build queued',
+                             'at': time.time()}
             return self.send(200, {})
         if urllib.parse.urlparse(self.path).path == '/api/history/delete':
             req = self.json_body()
@@ -1803,6 +1949,43 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send(200, audio, ctype)
 
 
+RECENT_FILE = os.path.join(os.environ.get('XDG_CONFIG_HOME', os.path.expanduser('~/.config')), 'paper-editor', 'recent.json')
+
+
+def last_paper():
+    try:
+        last = json.load(open(RECENT_FILE)).get('last')
+        return last if last and os.path.isfile(last) else None
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+# The pages open on this server: each polls /api/state with its id and says
+# goodbye when it closes.  When the server opens its own window (and not
+# --keep-running), it stops once no page is left.
+CLIENTS = {}
+LIFE = {'last': time.time(), 'seen': False}
+
+
+def watch_clients(srv):
+    while True:
+        time.sleep(1)
+        now = time.time()
+        # a page not heard from for long is gone (a throttled background
+        # window still polls about once a minute)
+        for c, t in list(CLIENTS.items()):
+            if now - t > 900:
+                CLIENTS.pop(c, None)
+        if not LIFE['seen'] or CLIENTS or now - LIFE['last'] < 5:
+            continue
+        # never in the middle of a build: a cut-off LaTeX run leaves a damaged .aux
+        if BUILDER and (BUILDER.state.get('state') == 'running' or BUILDER.wanted.is_set()):
+            continue
+        print('the editor window was closed: stopping', flush=True)
+        srv.shutdown()
+        return
+
+
 def open_paper(path, cwd=None, state=None):
     """Point the editor at a main file (path relative to PAPER or absolute)."""
     global PAPER, MAIN, ROOT, STATE, CACHE, CONFIG, VOICES
@@ -1819,6 +2002,12 @@ def open_paper(path, cwd=None, state=None):
         if os.path.exists(cfg):
             CONFIG.update(json.load(open(cfg)))
     _bib.update(entries=None, stamp=None)
+    try:
+        os.makedirs(os.path.dirname(RECENT_FILE), exist_ok=True)
+        with open(RECENT_FILE, 'w') as out:
+            json.dump({'last': path}, out)
+    except OSError:
+        pass
 
 
 def load_token():
@@ -1997,12 +2186,38 @@ def open_browser(url, browser):
             found = executable if os.path.isfile(executable) else shutil.which(executable)
             if found:
                 if browser == 'chrome-app':
-                    subprocess.Popen([found, '--app=' + url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    # --class: the window groups under the launcher's icon (StartupWMClass)
+                    subprocess.Popen([found, '--app=' + url, '--class=crypto-paper-reviewer'],
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 else:
                     webbrowser.BackgroundBrowser(found).open(url)
                 return
         print('Chrome/Chromium was not found; opening the system browser.', flush=True)
     webbrowser.open(url)
+
+
+
+
+def install_desktop():
+    """An entry in the applications menu that runs ./run (the last paper, else a folder chooser)."""
+    data = os.environ.get('XDG_DATA_HOME', os.path.expanduser('~/.local/share'))
+    icon = os.path.join(data, 'icons', 'hicolor', 'scalable', 'apps', 'crypto-paper-reviewer.svg')
+    entry = os.path.join(data, 'applications', 'crypto-paper-reviewer.desktop')
+    os.makedirs(os.path.dirname(icon), exist_ok=True)
+    os.makedirs(os.path.dirname(entry), exist_ok=True)
+    shutil.copyfile(os.path.join(STATIC, 'icon.svg'), icon)
+    run = os.path.join(HERE, 'run')
+    with open(entry, 'w') as out:
+        out.write('[Desktop Entry]\nType=Application\nName=Crypto Paper Reviewer\n'
+                  'Comment=Read, listen to and edit a LaTeX paper\n'
+                  f'Exec="{run}" %f\nIcon=crypto-paper-reviewer\nTerminal=false\n'
+                  'Categories=Office;\nMimeType=text/x-tex;\n'
+                  'StartupWMClass=crypto-paper-reviewer\nStartupNotify=false\n')
+    for cmd in (['update-desktop-database', os.path.dirname(entry)], ['gtk-update-icon-cache', '-q', os.path.join(data, 'icons', 'hicolor')]):
+        if shutil.which(cmd[0]):
+            subprocess.run(cmd, capture_output=True)
+    print(f'added {entry}')
+    return 0
 
 
 def choose_directory():
@@ -2033,32 +2248,66 @@ def choose_directory():
 def main():
     global BUILDER
     ap = argparse.ArgumentParser(description='A local reading editor for a LaTeX paper.')
-    ap.add_argument('path', help='a project folder, or its main .tex file')
+    ap.add_argument('path', nargs='?', help='a project folder, or its main .tex file '
+                    '(default: the paper opened last, else a folder chooser)')
     ap.add_argument('--main', help='the main file, when the folder has several documents')
     ap.add_argument('--cwd', help='the directory LaTeX runs in (default: the main file\'s directory)')
     ap.add_argument('--state', help='where to keep settings and caches (default: <project>/.paper-editor)')
-    ap.add_argument('--port', type=int, default=8765)
+    ap.add_argument('--port', type=int, help='port (default: 8765, or a free one when it is taken)')
     ap.add_argument('--browser', choices=('chrome-app', 'chrome', 'system'), default='chrome-app',
                     help='browser to open (default: standalone Chrome app window)')
     ap.add_argument('--no-open', action='store_true', help='do not open a browser')
+    ap.add_argument('--keep-running', action='store_true',
+                    help='keep the server running when its window is closed (the default with --no-open)')
+    ap.add_argument('--install-desktop', action='store_true',
+                    help='add the editor to the applications menu (Linux, freedesktop), then exit')
     args = ap.parse_args()
-    path = os.path.abspath(args.path)
+    if args.install_desktop:
+        return install_desktop()
+    if not args.path:
+        args.path = last_paper() or choose_directory()
+        if not args.path:
+            ap.error('no paper given, none opened before, and no folder chosen')
+    path = os.path.abspath(os.path.expanduser(args.path))
+    if not os.path.exists(path):
+        ap.error(f'{args.path}: no such file or folder')
     if os.path.isdir(path):
-        mains = [args.main] if args.main else find_mains(path)
+        if args.main:
+            mains = [args.main]
+            if not os.path.isfile(os.path.join(path, args.main)):
+                found = find_mains(path)
+                ap.error(f'--main {args.main}: no such file in {args.path}'
+                         + (f' (documents there: {", ".join(found)})' if found else ''))
+        else:
+            mains = find_mains(path)
         if not mains:
-            ap.error(f'{args.path}: no LaTeX document (\\documentclass ... \\begin{{document}}) in this folder')
+            tex = sorted(f for f in os.listdir(path) if f.endswith('.tex'))
+            if not tex:
+                ap.error(f'{args.path}: no .tex files in this folder; give the folder that holds the main file, '
+                         'or the main .tex file itself')
+            ap.error(f'{args.path}: none of its .tex files ({", ".join(tex[:8])}{", ..." if len(tex) > 8 else ""}) '
+                     'is a whole document: no \\documentclass and \\begin{document}, directly or through '
+                     '\\input. Give the main file: ./run <folder>/<main>.tex, or --main <file>')
         if len(mains) > 1 and not args.main:
             print(f'documents in {args.path}: {", ".join(mains)}; opening {mains[0]} (switch in the page, or --main)')
         path = os.path.join(path, mains[0])
-    if not os.path.isfile(path):
-        ap.error(f'{args.path}: no such file')
+    elif not path.endswith('.tex'):
+        ap.error(f'{args.path}: not a .tex file or a folder')
     open_paper(path, args.cwd, args.state)
     ensure_state()
     load_token()
     BUILDER = Builder()
     threading.Thread(target=bib_entries, daemon=True).start()   # index the .bib files now, not at the first search
-    srv = http.server.ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
-    url = f'http://127.0.0.1:{args.port}/'
+    try:
+        srv = http.server.ThreadingHTTPServer(('127.0.0.1', args.port or 8765), Handler)
+    except OSError as e:
+        if args.port:
+            ap.error(f'--port {args.port}: cannot listen there ({e.strerror or e}); leave out --port to take a free one')
+        srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)   # another editor has 8765
+    port = srv.server_address[1]
+    url = f'http://127.0.0.1:{port}/'
+    if not args.no_open and not args.keep_running:
+        threading.Thread(target=watch_clients, args=(srv,), daemon=True).start()
     print(f'Crypto Paper Reviewer for {os.path.join(PAPER, MAIN)} on {url}  (Ctrl+C to stop)', flush=True)
     if not args.no_open:
         threading.Timer(0.5, lambda: open_browser(url, args.browser)).start()

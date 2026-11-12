@@ -42,21 +42,42 @@ the same paper while the editor is building.
 
 ### Read
 
+The header bar holds back and forward, the title, **Save**, **Read**, **PDF**
+and the ☰ menu (open, history, reload, build, text size, columns, theme,
+colour-blind colours, paper metadata, keys, help). The editing toolbar keeps
+to one row: headings are under **Heading**, and what does not fit goes
+under ⋯. In narrow windows both show icons only; hovering a button names it.
+
 - **The paper, not the source.** Everything the main file `\input`s or
   `\include`s, in order, with section, theorem, equation and citation
   numbers taken from LaTeX's own `.aux`, so they match the PDF. Page breaks
   follow the PDF. Figures, tables and games are shown as images cut from a
   build of their own; natbib, biblatex and hand-written `thebibliography`
-  reference lists are rendered.
+  reference lists are rendered. `quote` and `quotation` environments are
+  shown as indented block quotes, and are edited in place like paragraphs.
 - **Layout.** Light, dark or follow-the-system theme; one or two columns;
-  a colour-blind friendly mode for change and mark colours.
+  a colour-blind friendly mode for change and mark colours. **A−** / **A+**
+  change the size of the paper's text without changing the toolbar (click
+  the percentage to reset).
+- **Follow references.** `Ctrl`+click (`Cmd`+click) a reference or a
+  citation to go to Lemma 4, the equation, the figure or the reference
+  entry. The ← and → buttons at the left of the header bar (or `Alt+←`,
+  `Alt+→`, or the mouse's back and forward buttons) go back and forward
+  over every jump: a reference, a box warning, a change of the diff, a find
+  match.
 - **Build problems.** Overfull and underfull boxes from the `.log` are shown
   as badges on the blocks they come from. The toolbar shows the build state;
-  **PDF** opens the latest PDF.
+  **PDF** opens the latest PDF; in the ☰ menu, **Build the PDF now** builds
+  again, and **Clean build**
+  sets the `.aux`, `.bbl` and other build files aside (in the editor's
+  cache) and builds from scratch, which fixes a damaged `.aux`. A build
+  that stops on a truncated `.aux` is retried once without it.
 - **Listen.** Read aloud from the sentence at the cursor, phrase by phrase,
-  with the phrase highlighted and maths read as words; `«` and `»` move by
-  sentence, and the speed is adjustable. See *Reading aloud* below for the
-  voices.
+  with the phrase highlighted and maths read as words; while reading, Prev and Next move by
+  sentence; speed and voice are under the ▾ beside **Read**, which stays tinted while
+  reading. Edits are read as they are now (a phrase edited while paused is
+  read again from its start on resume), and a save does not interrupt the
+  phrase being read. See *Reading aloud* below for the voices.
 
 ### Edit
 
@@ -84,7 +105,11 @@ the same paper while the editor is building.
   (the text extracted from the rendered figure),
   **Games** (line by line: insert `if`, `while`, `for`, `return` and
   comments, move statements with `Alt+Up/Down`, colour lines with xcolor
-  boxes, reorder or add games), **LaTeX** (the raw source) and **Changes**.
+  boxes, add games, and arrange them in a grid: choose 1–4 columns, then
+  drag a game, or use its arrows, into any cell; a cell can hold several
+  games one under the other. The grid is written as top-aligned minipages,
+  and a `multicols` wrapper such as `\begin{games}{2}` is set to one
+  column), **LaTeX** (the raw source) and **Changes**.
   **Apply** (`Ctrl+Enter`) puts the change into the paper; `Ctrl+S` applies
   and saves.
 - **Tables.** Double-click a table to edit it cell by cell (**Cells** tab).
@@ -117,7 +142,7 @@ the same paper while the editor is building.
   choose: **Reload** (take theirs), **Overwrite disk** (keep yours; theirs is
   kept in History), **Save backup** (your version goes to a `name.tex.editor-backup-…` file
   beside it, then theirs is loaded) or **Later**. A save never overwrites a
-  file that changed since it was read. **Reload** in the toolbar rereads
+  file that changed since it was read. **Reload from disk** in the ☰ menu rereads
   everything and asks before dropping your edits.
 
 ### Convert
@@ -134,7 +159,7 @@ the same paper while the editor is building.
 | `Ctrl+S` | save |
 | `Ctrl+Z`, `Ctrl+Shift+Z` / `Ctrl+Y` | undo, redo |
 | `Ctrl+B`, `Ctrl+I`, `Ctrl+Shift+I` | bold, emphasis, italic |
-| `$`, `Ctrl+M` | inline maths (the selection becomes a formula) |
+| `Ctrl+M` | inline maths: a new formula, or the selection becomes one (`$` typed over a selection does the same; otherwise `$` is a dollar sign) |
 | `Ctrl+Shift+M` | displayed equation |
 | `(` `)` `[` `]` `{` `}` `"` `'` over a selection | wrap the selection |
 | `Enter` / `Backspace` at a paragraph's start | new paragraph / join paragraphs |
@@ -147,8 +172,35 @@ the same paper while the editor is building.
 | `Ctrl++` | expand the selection: word, line, paragraph |
 | `Alt+R`, `Alt+P`, `Alt+S` | read aloud, pause, stop |
 | `Ctrl+Alt+Left`, `Ctrl+Alt+Right` | previous, next sentence |
+| `Ctrl+Alt+S` | split the section at the cursor |
+| `Ctrl+Alt+A` | add a block after the one at the cursor |
+| `Ctrl+Alt+↑` / `Ctrl+Alt+↓` | move the section at the cursor up / down |
+| `Ctrl+Alt+J` | combine the section at the cursor with the previous one |
+| `Ctrl+Alt+X` | delete the heading at the cursor |
+| `Ctrl+Alt+Backspace` | revert the block at the cursor to the last save |
+| `Ctrl+Alt+F` | open the figure or table at the cursor in the viewer |
+| `Ctrl`+click a reference or citation, `Alt+←`, `Alt+→` | go to what it names, back, forward |
 
-**Keys** in the toolbar changes them. In the game editor, `Ctrl+Enter`
+Everything in the bars and the ☰ menu has a key too (all `Ctrl+Alt+…`, and all
+listed and changeable under **Keys…**):
+
+| Key | Action |
+| --- | --- |
+| `Ctrl+Alt+M` | the ☰ menu |
+| `Ctrl+Alt+O` / `Ctrl+Alt+T` / `Ctrl+Alt+L` | open a paper, save history, reload from disk |
+| `Ctrl+Alt+B` / `Ctrl+Alt+Shift+B` | build the PDF now, clean build |
+| `Ctrl+Alt+D` | open the rendered PDF |
+| `Ctrl+Alt+P` / `Ctrl+Alt+,` / `Ctrl+Alt+H` | paper metadata and conversion, keys, help |
+| `Ctrl+Alt+G` / `Ctrl+Alt+W` | colour scheme, one or two columns |
+| `Ctrl+Alt+-` / `Ctrl+Alt+=` / `Ctrl+Alt+0` | smaller, larger, reset paper text size |
+| `Ctrl+Alt+V`, then `Ctrl+Alt+[` / `Ctrl+Alt+]` | diff of what changed, previous / next change |
+| `Ctrl+Alt+U` | reading speed and voice |
+
+While a dialog is open its own keys work: the outside-change bar answers
+`r` (reload), `o` (overwrite disk), `b` (save backup), `l` (later); `Enter`
+confirms the open dialog; in the figure viewer `1`–`6` pick the tabs.
+
+**Keys…** in the ☰ menu changes them. In the game editor, `Ctrl+Enter`
 applies and `Ctrl+S` applies and saves. Spelling: right-click, *Add to
 Dictionary*.
 
@@ -181,7 +233,7 @@ from `.paper-editor.json` next to the main file, then
 Metadata you correct in **Paper…** is kept in `.paper-editor/metadata.json`,
 with earlier versions. It never rewrites your `\author` lines.
 
-Your key bindings (**Keys** in the toolbar) are shared by every paper and
+Your key bindings (**Keys…** in the ☰ menu) are shared by every paper and
 kept in `~/.config/paper-editor/keys.json`.
 
 ## Reading aloud

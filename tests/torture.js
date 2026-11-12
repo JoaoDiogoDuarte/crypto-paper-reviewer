@@ -36,6 +36,10 @@ const FRAGMENTS = [
   '\\emph{soft \\textbf{nested}} ', '\\textit{a {b} c} ',
   '\\section{A heading}\\label{sec:a}\n', '\\subsection{Another heading}\n',
   '\\begin{proof}A proof.\\end{proof}', '\\begin{lemma}[Useful]Claim.\\end{lemma}',
+  '\\begin{proof}[Of Theorem~\\ref{sec:a}]Body.\\end{proof}',
+  '\\begin{quote}A quoted line.\\end{quote}',
+  '\n\\begin{quote}\nQuoted.\n\nTwo paragraphs.\n\\end{quote}\n',
+  '\\begin{quotation}Indented quotation.\\end{quotation}',
   '$a_{b} + \\frac{1}{N}$ ', '$$\\sum_{i=1}^n i$$',
   '\\begin{multline*}a=b\\\\c=d\\end{multline*}',
   '\\begin{align*}x&=y\\\\z&=w\\end{align*}',
@@ -67,7 +71,7 @@ function verify(src) {
   const segs = L.segment(src);
   assert.equal(L.serializeSegments(segs), src, 'segment round-trip');
   for (const seg of segs) {
-    if (seg.kind === 'para' || seg.kind === 'heading') {
+    if (seg.kind === 'para' || seg.kind === 'heading' || seg.kind === 'quote') {
       const t = L.tokenize(seg.src);
       assert.equal(L.serializeTokens(t), seg.src, 'segment token round-trip');
       checkTokens(t);

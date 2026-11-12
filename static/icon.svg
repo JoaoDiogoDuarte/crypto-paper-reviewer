@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- the paper: GNOME-style object with a darker lower edge -->
+  <rect x="22" y="14" width="84" height="104" rx="10" fill="#c0bfbc"/>
+  <rect x="22" y="10" width="84" height="104" rx="10" fill="#ffffff"/>
+  <rect x="22" y="10" width="84" height="104" rx="10" fill="none" stroke="#deddda" stroke-width="2"/>
+  <!-- the title and lines of text -->
+  <rect x="36" y="24" width="56" height="7" rx="3.5" fill="#3584e4"/>
+  <rect x="36" y="37" width="44" height="5" rx="2.5" fill="#deddda"/>
+  <rect x="36" y="94" width="40" height="5" rx="2.5" fill="#deddda"/>
+  <!-- the face: reading glasses, blush, a smile -->
+  <ellipse cx="44" cy="76" rx="6" ry="3.5" fill="#f66151" opacity=".35"/>
+  <ellipse cx="84" cy="76" rx="6" ry="3.5" fill="#f66151" opacity=".35"/>
+  <circle cx="50" cy="62" r="11" fill="#99c1f1" fill-opacity=".35" stroke="#241f31" stroke-width="4"/>
+  <circle cx="78" cy="62" r="11" fill="#99c1f1" fill-opacity=".35" stroke="#241f31" stroke-width="4"/>
+  <path d="M61 61q3-3 6 0" fill="none" stroke="#241f31" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="51" cy="63" r="3" fill="#241f31"/>
+  <circle cx="79" cy="63" r="3" fill="#241f31"/>
+  <circle cx="52.2" cy="61.8" r="1" fill="#fff"/>
+  <circle cx="80.2" cy="61.8" r="1" fill="#fff"/>
+  <path d="M58 80q6 5 12 0" fill="none" stroke="#241f31" stroke-width="3.5" stroke-linecap="round"/>
+  <!-- a little padlock -->
+  <path d="M95 92v-6a9 9 0 0 1 18 0v6" fill="none" stroke="#9a9996" stroke-width="5"/>
+  <rect x="88" y="94" width="32" height="26" rx="6" fill="#e5a50a"/>
+  <rect x="88" y="90" width="32" height="26" rx="6" fill="#f6d32d"/>
+  <circle cx="104" cy="101" r="3.5" fill="#986a44"/>
+  <rect x="102.5" y="102" width="3" height="7" rx="1.5" fill="#986a44"/>
+</svg>

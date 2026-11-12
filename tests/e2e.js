@@ -47,6 +47,10 @@ code line
 \end{lstlisting}
 
 \section{Conclusion}
+\begin{quote}
+A quoted sentence from another paper.
+\end{quote}
+
 Final words of the paper.
 \bibliographystyle{plain}
 \bibliography{refs}
@@ -131,7 +135,10 @@ class Page {
       }
       if (m.method === 'Fetch.requestPaused') {
         const id = m.params.requestId;
-        if (this.saveMode === 'fail') {
+        if (m.params.request.url.includes('__probe')) {
+          this.probed = true;
+          this.send('Fetch.fulfillRequest', { requestId: id, responseCode: 204 }).catch(() => {});
+        } else if (this.saveMode === 'fail') {
           this.send('Fetch.fulfillRequest', { requestId: id, responseCode: 500, responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
             body: Buffer.from(JSON.stringify({ error: 'disk on fire' })).toString('base64') }).catch(() => {});
         } else if (this.saveMode === 'drop') {
@@ -148,8 +155,18 @@ class Page {
   // 'fail' them with a 500, 'drop' the connection; null: normal
   async interceptSaves(mode) {
     this.saveMode = mode; this.held = this.held || [];
-    if (mode) await this.send('Fetch.enable', { patterns: [{ urlPattern: '*/api/save*', requestStage: 'Request' }] });
-    else { await this.release(); await this.send('Fetch.disable'); }
+    if (mode) {
+      await this.send('Fetch.enable', { patterns: [{ urlPattern: '*/api/save*', requestStage: 'Request' }] });
+      // under load Chrome can answer Fetch.enable before the interception is
+      // in place, and the next save would reach the server: wait until a
+      // probe request is caught (one that slips through gets a 403: no token)
+      this.probed = false;
+      for (let i = 0; i < 50 && !this.probed; i++) {
+        await this.eval(`fetch('/api/save?__probe', { method: 'POST' }).catch(() => {}).then(() => 0)`);
+        if (!this.probed) await sleep(50);
+      }
+      if (!this.probed) throw new Error('save interception never became active');
+    } else { await this.release(); await this.send('Fetch.disable'); }
   }
   async release() {
     const held = this.held || []; this.held = [];
@@ -172,7 +189,7 @@ class Page {
   async key(key, mods = {}) {
     const m = (mods.alt ? 1 : 0) | (mods.ctrl ? 2 : 0) | (mods.shift ? 8 : 0);
     const named = { Enter: [13, 'Enter', '\r'], Backspace: [8, 'Backspace', ''], Escape: [27, 'Escape', ''],
-      ArrowLeft: [37, 'ArrowLeft', ''], ArrowRight: [39, 'ArrowRight', ''], Delete: [46, 'Delete', ''] };
+      ArrowLeft: [37, 'ArrowLeft', ''], ArrowRight: [39, 'ArrowRight', ''], ArrowUp: [38, 'ArrowUp', ''], ArrowDown: [40, 'ArrowDown', ''], Delete: [46, 'Delete', ''] };
     let code, vk, text;
     if (named[key]) [vk, code, text] = named[key];
     else {
@@ -198,7 +215,8 @@ class Page {
     const expr = sel.startsWith('js:') ? sel.slice(3) : `document.querySelector(${JSON.stringify(sel)})`;
     // scroll it into view, then measure once the blocks around it have their
     // real sizes (off screen they are estimated: the first frame lies)
-    await this.eval(`(() => { const e = ${expr}; if (e) e.scrollIntoView({ block: 'center' }); })()`);
+    // a control in a menu (☰, ⋯, Heading): the menu is opened first, as a user would
+    await this.eval(`(() => { const e = ${expr}; if (e && typeof revealControl === 'function') revealControl(e); if (e && !e.closest('#chrome')) e.scrollIntoView({ block: 'center' }); })()`);
     await this.eval(`new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))`);
     const box = await this.eval(`(() => { const e = ${expr}; if (!e) return null;
       const r = e.getBoundingClientRect(); if (r.bottom < 0 || r.top > innerHeight) { e.scrollIntoView({ block: 'center' }); }
@@ -208,7 +226,7 @@ class Page {
       const s = seg && seg.firstChild.getBoundingClientRect();
       return { x: r2.left + r2.width / 2, y: r2.top + r2.height / 2, w: r2.width, from: s ? { x: s.left + 10, y: s.top + Math.min(8, s.height / 2) } : null }; })()`);
     if (!box || !box.w) throw new Error('nothing to click: ' + sel);
-    const base = { x: box.x, y: box.y, button: 'left', clickCount: opts.count || 1 };
+    const base = { x: box.x, y: box.y, button: 'left', clickCount: opts.count || 1, modifiers: opts.ctrl ? 2 : 0 };
     if (box.from) {
       // over the block, then sideways and down to the button, as a hand would
       await this.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: box.from.x, y: box.from.y });
@@ -584,6 +602,29 @@ const TESTS = {
     untouched(env, 'main.tex', 'sections/body.tex');
   },
 
+  async 'render: a quote environment is a block quote, edited in place and saved exactly'(env, page) {
+    const view = await page.eval(`(() => {
+      const seg = ORDER.find((s) => s.kind === 'quote');
+      if (!seg) return { seg: false };
+      const bq = seg.el.querySelector('blockquote');
+      const cs = bq ? getComputedStyle(bq) : null;
+      return { seg: true, tag: bq && bq.tagName, editable: bq && bq.contentEditable, text: bq && bq.textContent,
+        marginLeft: cs && parseFloat(cs.marginLeft), border: cs && (cs.borderLeftWidth + ' ' + cs.borderLeftStyle),
+        inPara: !!ORDER.find((s) => s.kind === 'para' && s.src.includes('A quoted sentence')) };
+    })()`);
+    eq(view.seg, true, 'a quote segment exists');
+    eq(view.tag, 'BLOCKQUOTE', 'rendered as a blockquote element');
+    eq(view.editable, 'true', 'the quote is editable in place');
+    has(view.text, 'A quoted sentence from another paper.', 'the quote text is shown');
+    eq(view.inPara, false, 'the quote is not inline in a paragraph');
+    if (!(view.marginLeft > 0)) throw new Error('the quote is not indented: margin-left=' + view.marginLeft);
+    eq(view.border, '3px solid', 'a left rule marks the quote');
+    await page.select('A quoted sentence', 'end');
+    await page.typeKeys(' (edited)');
+    await page.save();
+    onlyChange(env, 'main.tex', 'A quoted sentence from another paper.', 'A quoted sentence (edited) from another paper.');
+  },
+
   async 'wrap: $ around a selection makes it maths and keeps the text'(env, page) {
     await page.select('brown');
     await page.key('$', { shift: true });
@@ -635,9 +676,18 @@ const TESTS = {
     onlyChange(env, 'main.tex', 'lazy dog.', 'lazy dog (a) [b] "c".');
   },
 
-  async '$ with no selection opens a new formula'(env, page) {
+  async '$ with no selection types a dollar sign'(env, page) {
     await page.select('lazy dog', 'end');
     await page.key('$', { shift: true });
+    await sleep(100);
+    eq(await page.eval(`$('#drawer').hidden`), true, 'no formula editor');
+    await page.save();
+    onlyChange(env, 'main.tex', 'lazy dog.', 'lazy dog\\$.');
+  },
+
+  async 'Ctrl+M with no selection opens a new formula'(env, page) {
+    await page.select('lazy dog', 'end');
+    await page.key('m', { ctrl: true });
     await page.waitFor(`!$('#drawer').hidden`);
     await page.eval(`$('#drawer-src').value = '$z$'; $('#drawer-src').dispatchEvent(new Event('input'))`);
     await page.key('Enter', { ctrl: true });
@@ -684,6 +734,51 @@ const TESTS = {
     await page.paste(clip['text/plain'], Object.fromEntries(Object.entries(clip).filter(([k]) => k !== 'text/plain')));
     await page.save();
     onlyChange(env, 'main.tex', 'Final words', 'Final wordsWe study $x^2 + y^2$ here.');
+  },
+
+  async 'paste: LaTeX commands and a tie in plain text become chips'(env, page) {
+    await page.select('lazy dog', 'end');
+    await page.paste(' see Section~\\ref{sec:body} and \\textbf{bold}');
+    const r = await page.eval(`(() => {
+      const seg = ORDER.find((s) => s.kind === 'para' && s.src.includes('lazy dog'));
+      const ref = seg.edit.querySelector('.chip.ref');
+      const tie = seg.edit.querySelector('.chip.tie');
+      const strong = seg.edit.querySelector('strong');
+      return { ref: ref && ref.dataset.src, tie: tie && tie.dataset.src,
+        strong: strong && strong.dataset.prefix, refText: ref && ref.textContent,
+        want: labelValue('sec:body') || '??' };
+    })()`);
+    eq(r.ref, String.raw`\ref{sec:body}`, 'the pasted \\ref is a reference chip');
+    eq(r.tie, '~', 'the pasted ~ is a tie chip');
+    eq(r.strong, String.raw`\textbf{`, 'the pasted \\textbf wraps its text');
+    eq(r.refText, r.want, 'the chip shows the section number from the .aux');
+    await page.save();
+    onlyChange(env, 'main.tex', 'lazy dog.', 'lazy dog see Section~\\ref{sec:body} and \\textbf{bold}.');
+  },
+
+  async 'typing $...$ makes the typed text maths when the closing $ is typed'(env, page) {
+    await page.select('lazy dog', 'end');
+    await page.key('$', { shift: true });
+    await page.type('x^2');
+    await page.key('$', { shift: true });
+    const src = await page.eval(`(() => {
+      const seg = ORDER.find((s) => s.kind === 'para' && s.src.includes('lazy dog'));
+      const m = seg.edit.querySelector('.chip.math');
+      return m && m.dataset.src;
+    })()`);
+    eq(src, '$x^2$', 'the dollars and the text between them are one maths chip');
+    await page.save();
+    onlyChange(env, 'main.tex', 'lazy dog.', 'lazy dog$x^2$.');
+  },
+
+  async 'typing $ around a price stays a dollar sign'(env, page) {
+    await page.select('lazy dog', 'end');
+    await page.type(' costs 5');
+    await page.key('$', { shift: true });
+    await page.type(' or 10');
+    await page.key('$', { shift: true });
+    await page.save();
+    onlyChange(env, 'main.tex', 'lazy dog.', 'lazy dog costs 5\\$ or 10\\$.');
   },
 
   async 'Enter splits a paragraph, and editing after the save still works'(env, page) {
@@ -869,7 +964,7 @@ const TESTS = {
 // ------------------------------------------------------------ more tests:
 // every button, the dialogs, and the combinations people actually hit
 
-const tb = (act) => `#toolbar button[data-act="${act}"]`;
+const tb = (act) => `#chrome button[data-act="${act}"]`;
 const headBtn = (title, button) => `js:ORDER.find((s) => s.kind === 'heading' && s.src.includes(${JSON.stringify(title)})).el.querySelector('button[title^="${button}"]')`;
 const paraPlus = (text) => `js:ORDER.find((s) => s.kind === 'para' && s.src.includes(${JSON.stringify(text)})).el.querySelector('.tools button')`;
 const menuItem = (label) => `js:[...$('#menu').querySelectorAll('button')].find((b) => b.textContent === ${JSON.stringify(label)})`;
@@ -958,7 +1053,7 @@ Object.assign(TESTS, {
   async 'reading controls never throw, with or without a voice'(env, page) {
     await page.select('lazy dog', 'start');
     for (const b of ['#play', '#tts-next', '#tts-prev', '#pause', '#pause', '#stop', '#play', '#stop']) {
-      if (await page.eval(`document.querySelector('${b}').disabled`)) continue;
+      if (await page.eval(`document.querySelector('${b}').disabled || !document.querySelector('${b}').getClientRects().length`)) continue;
       await page.click(b);
     }
     await page.key('r', { alt: true }); await page.key('p', { alt: true }); await page.key('s', { alt: true });
@@ -985,9 +1080,14 @@ Object.assign(TESTS, {
     await page.click('#pause');
     eq((await st()).state, 'Paused', 'paused');
     eq(await page.eval(`$('#pause').getAttribute('aria-pressed')`), 'true', 'pause pressed');
-    await page.click('#play');   // play while paused resumes, it does not restart
+    eq(await page.eval(`$('#pause .label').textContent`), 'Resume', 'pause reads Resume');
+    eq(await page.eval(`$('#play').classList.contains('reading')`), false, 'read not marked while paused');
+    await page.click('#play');   // play while paused resumes the same phrase, it does not restart from the caret
     eq((await st()).state, 'Reading', 'play resumes');
-    eq(await page.eval(`__fake.spoken.length`), 3, 'resuming did not speak again');
+    eq(await page.eval(`$('#play').classList.contains('reading')`), true, 'read marked while reading');
+    const said = await page.eval(`__fake.spoken`);
+    eq(said.length, 4, 'a browser voice reads the phrase again on resume');
+    eq(said[3], said[2], 'the same phrase');
     // the page re-renders (a save, a rebuild) while reading: still controllable
     await page.eval(`render()`);
     s = await st(); eq(s.pause && s.stop, true, 'after a re-render');
@@ -1101,6 +1201,65 @@ Object.assign(TESTS, {
     onlyChange(env, 'main.tex', 'The quick', 'The \\textbf{quick}');
   },
 
+  async 'keys: chrome, block and dialog actions all have working shortcuts'(env, page) {
+    // ☰ menu
+    await page.key('m', { ctrl: true, alt: true });
+    eq(await page.eval(`!$('#mainmenu').hidden`), true, 'Ctrl+Alt+M opens the menu');
+    await page.key('Escape');
+    eq(await page.eval(`$('#mainmenu').hidden`), true, 'Escape closes the menu');
+    // columns and theme
+    await page.key('w', { ctrl: true, alt: true });
+    eq(await page.eval(`document.body.classList.contains('two')`), true, 'Ctrl+Alt+W: two columns on');
+    await page.key('w', { ctrl: true, alt: true });
+    eq(await page.eval(`document.body.classList.contains('two')`), false, 'Ctrl+Alt+W: off again');
+    const t0 = await page.eval(`document.documentElement.dataset.theme || 'auto'`);
+    await page.key('g', { ctrl: true, alt: true });
+    eq(await page.eval(`document.documentElement.dataset.theme || 'auto'`) !== t0, true, 'Ctrl+Alt+G cycles the theme');
+    // paper text size
+    await page.key('-', { ctrl: true, alt: true });
+    eq(await page.eval(`$('#textsize').textContent`) === '100%', false, 'Ctrl+Alt+- shrinks the paper text');
+    await page.key('=', { ctrl: true, alt: true });
+    await page.key('0', { ctrl: true, alt: true });
+    eq(await page.eval(`$('#textsize').textContent`), '100%', 'Ctrl+Alt+0 resets the text size');
+    // diff on and off
+    await page.key('v', { ctrl: true, alt: true });
+    eq(await page.eval(`DIFF.on`), true, 'Ctrl+Alt+V shows the diff');
+    await page.key('v', { ctrl: true, alt: true });
+    eq(await page.eval(`DIFF.on`), false, 'Ctrl+Alt+V leaves the diff');
+    // Keys… lists the new shortcuts
+    await page.key(',', { ctrl: true, alt: true });
+    await page.waitFor(`!$('#keysbox').hidden`);
+    const rows = await page.eval(`[...document.querySelectorAll('#keys-list .keyrow')].map((r) => r.textContent)`);
+    for (const k of ['Ctrl+Alt+M', 'Ctrl+Alt+W', 'Ctrl+Alt+V', 'Ctrl+Alt+S', 'Ctrl+Alt+A', 'Ctrl+Alt+X', 'Ctrl+Alt+B', 'Ctrl+Alt+ArrowUp'])
+      if (!rows.some((r) => r.includes(k))) throw new Error('Keys… misses ' + k);
+    await page.key('Escape');
+    eq(await page.eval(`$('#keysbox').hidden`), true, 'Escape closes Keys…');
+    // block actions in the text: split, add after, move, delete
+    await page.select('We study', 'start');
+    await page.key('s', { ctrl: true, alt: true });
+    await page.type('Split');
+    await page.save();
+    has(env.read('main.tex'), '\\section{Split}', 'Ctrl+Alt+S split the section at the cursor');
+    await page.select('We study', 'start');
+    await page.key('a', { ctrl: true, alt: true });
+    eq(await page.eval(`!$('#menu').hidden`), true, 'Ctrl+Alt+A opens the add menu');
+    await page.click(`js:[...document.querySelectorAll('#menu button')].find((b) => b.textContent === 'Paragraph')`);
+    await page.type('Added');
+    await page.save();
+    has(env.read('main.tex'), 'Added', 'Ctrl+Alt+A added a paragraph after the block');
+    // move the heading we just made up with Ctrl+Alt+Up
+    await page.select('Split', 'start');
+    await page.key('ArrowUp', { ctrl: true, alt: true });
+    await page.save();
+    const t2 = env.read('main.tex');
+    if (t2.indexOf('\\section{Split}') > t2.indexOf('Added')) throw new Error('Ctrl+Alt+Up did not move the section up');
+    // delete the heading with Ctrl+Alt+X (the confirm is auto-accepted)
+    await page.select('Split', 'start');
+    await page.key('x', { ctrl: true, alt: true });
+    await page.save();
+    hasNot(env.read('main.tex'), '\\section{Split}', 'Ctrl+Alt+X deleted the heading');
+  },
+
   async 'Paper dialog opens, saves metadata outside the paper, and closes'(env, page) {
     const before = fs.readdirSync(env.paper).sort().join(',');
     await page.click('#paperbtn');
@@ -1168,9 +1327,21 @@ Object.assign(TESTS, {
     untouched(env, 'main.tex');
   },
 
-  async '$ with no selection, then Escape, leaves no empty formula'(env, page) {
+  async 'a new formula applied with Ctrl+Enter: typing goes on after it'(env, page) {
+    await page.select('lazy dog', 'end');
+    await page.key('m', { ctrl: true });
+    await page.waitFor(visible('#drawer'));
+    await page.type('z');
+    await page.key('Enter', { ctrl: true });
+    await page.waitFor(`$('#drawer').hidden`);
+    await page.type(' more');
+    await page.save();
+    onlyChange(env, 'main.tex', 'lazy dog.', 'lazy dog$z$ more.');
+  },
+
+  async 'Ctrl+M with no selection, then Escape, leaves no empty formula'(env, page) {
     await page.select('brown', 'end');
-    await page.key('$', { shift: true });
+    await page.key('m', { ctrl: true });
     await page.waitFor(visible('#drawer'));
     await page.key('Escape');
     await page.waitFor(`$('#drawer').hidden`);
@@ -1546,6 +1717,115 @@ Object.assign(TESTS, {
     untouched(env, 'main.tex', 'sections/body.tex');
   },
 
+  async 'game editor: games arranged in a grid of cells, written as minipages'(env, page) {
+    await page.click("js:ORDER.find((s) => s.kind === 'figure').el.querySelector('div.small, img')", { count: 2 });
+    await page.waitFor(visible('#figview'));
+    const game = (t) => ['\\begin{gameenv}{' + t + '}', '  \\State $x \\gets y$', '\\end{gameenv}'].join('\n');
+    const src = ['\\begin{figure}', '\\begin{multicols}{1}', game('Circuit'), game('Oracle'), game('Adversary'),
+      '\\end{multicols}', '\\caption{C.}', '\\end{figure}'].join('\n');
+    await page.eval('(() => { const src = ' + JSON.stringify(src) +
+      '; FV.src = src; FV.games = parseGames(src); FV.tables = L.parseTabulars(src); FV.undo = []; showFigTab("games"); })()');
+    eq(await page.eval(`document.querySelectorAll('#fv-body .gcell').length`), 3, 'one column: a cell per game');
+    await page.click("js:[...document.querySelectorAll('#fv-body .games-layout button')].find((b) => b.textContent === '2')");
+    const out = await page.eval('figureWithEdits()');
+    has(out, '\\begin{minipage}[t]{.48\\linewidth}', 'minipages of half the width');
+    has(out, '\\begin{multicols}{1}', 'the wrapper keeps one column');
+    const lay = () => page.eval('(() => { const s = figureWithEdits(); const l = L.gameLayout(s, parseGames(s), []); return JSON.stringify(l.rows.map((r) => r.map((c) => c.map((g) => parseGames(s)[g].title)))); })()');
+    eq(await lay(), JSON.stringify([[['Circuit'], ['Oracle']], [['Adversary'], []]]), 'oracle beside the circuit, adversary below');
+    // the adversary goes under the circuit, in the same cell
+    await page.eval('stepGame(2, -1, 0)');
+    eq(await lay(), JSON.stringify([[['Circuit', 'Adversary'], ['Oracle']]]), 'stacked in a cell');
+    await page.eval('stepGame(1, 0, 1)');   // the adversary (second in the source now) to the right
+    eq(await lay(), JSON.stringify([[['Circuit'], ['Oracle', 'Adversary']]]), 'moved right, at the same height in the stack');
+    await page.click('#fv-undo');
+    eq(await lay(), JSON.stringify([[['Circuit', 'Adversary'], ['Oracle']]]), 'undo');
+    await page.click("js:[...document.querySelectorAll('#fv-body .games-layout button')].find((b) => b.textContent === '1')");
+    eq(await page.eval('figureWithEdits().includes("minipage")'), false, 'one column: no minipages');
+    await page.click('#fv-close');
+    untouched(env, 'main.tex', 'sections/body.tex');
+  },
+
+  async 'menus: every item of the ☰ menu takes its own clicks; back and forward'(env, page) {
+    await page.click('#menubtn');
+    const hits = await page.eval(`(() => [...$('#mainmenu').querySelectorAll('button')].filter((b) => b.getClientRects().length).map((b) => {
+      const r = b.getBoundingClientRect(); const h = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return (h && h.closest('button') || {}).id === b.id ? '' : b.id; }).filter(Boolean))()`);
+    eq(hits.join(), '', 'items covered by something else');
+    await page.key('Escape');
+    eq(await page.eval(`$('#mainmenu').hidden`), true, 'Escape closes the menu');
+    eq(await page.eval(`$('#navback').disabled`), true, 'nothing to go back to');
+    await page.eval(`window.scrollTo(0, 0); jumpTo(ORDER.filter((x) => x.el && x.el.isConnected).pop().el, 'End')`);
+    await sleep(200);
+    const far = await page.eval(`scrollY`);
+    await page.click('#navback');
+    await sleep(200);
+    eq(await page.eval(`scrollY < ${far}`), true, 'back');
+    await page.click('#navfwd');
+    await sleep(200);
+    eq(await page.eval(`Math.abs(scrollY - ${far}) < 40`), true, 'forward');
+  },
+
+  async 'rendering: \\lstinline, \\qedhere and maths in a theorem title'(env, page) {
+    const r = await page.eval(String.raw`(() => {
+      const d = document.createElement('div');
+      renderTokens(L.tokenize('use \\lstinline|x <$ d| and \\lstinline{y}; \\begin{lemma}[At $r$]x $a\\qedhere$\\end{lemma}'), d, {});
+      return { text: d.textContent, bad: d.querySelectorAll('.bad').length, title: d.querySelector('.thmtitle .katex') !== null };
+    })()`);
+    has(r.text, 'use x <$ d and y', 'verbatim text shown, not its source');
+    eq(r.bad, 0, 'qedhere typesets');
+    eq(r.title, true, 'the title maths is typeset');
+  },
+
+  async 'rendering: a proof\'s optional title is typeset, the reference resolved'(env, page) {
+    const r = await page.eval(String.raw`(() => {
+      const d = document.createElement('div');
+      renderTokens(L.tokenize('\\begin{proof}[Proof of Theorem~\\ref{sec:intro}]Body.\\end{proof}'), d, {});
+      const runin = d.querySelector('.chip.runin');
+      const ref = runin.querySelector('.chip.ref');
+      const end = [...d.querySelectorAll('.chip')].find((c) => c.dataset.src.includes('\\end{proof}'));
+      return { text: runin.textContent, hasRef: !!ref, ref: ref && ref.textContent,
+        want: labelValue('sec:intro') || '??', raw: runin.dataset.src, end: end.textContent, back: ser(d) };
+    })()`);
+    eq(r.hasRef, true, 'the \\ref in the proof title is a reference chip');
+    eq(r.ref, r.want, 'it shows the number from the .aux');
+    has(r.text, 'Proof of Theorem', 'the title reads as text');
+    eq(r.text.includes('\\ref'), false, 'no raw \\ref in the shown title');
+    eq(r.raw, String.raw`\begin{proof}[Proof of Theorem~\ref{sec:intro}]`, 'the whole \\begin..[..] stays as the chip source');
+    eq(r.end, ' ∎', 'the end mark is still there');
+    eq(r.back, String.raw`\begin{proof}[Proof of Theorem~\ref{sec:intro}]Body.\end{proof}`, 'the DOM round-trips to the exact source');
+    // a proof without a title keeps the plain run-in
+    const plain = await page.eval(String.raw`(() => {
+      const d = document.createElement('div');
+      renderTokens(L.tokenize('\\begin{proof}Body.\\end{proof}'), d, {});
+      return d.querySelector('.chip.runin').textContent;
+    })()`);
+    eq(plain, 'Proof. ', 'no optional title: plain Proof.');
+    untouched(env, 'main.tex');
+  },
+
+  async 'reader: edits are read as they are now; a redraw does not restart the phrase'(env, page) {
+    await fakeSpeech(page);
+    await page.select('lazy dog', 'start');
+    await page.click('#play');
+    has(await page.eval(`__fake.spoken[0]`), 'The quick brown fox', 'first phrase');
+    // the next phrase is edited while the first is read
+    await page.select('We study', 'start');
+    await page.type('Here ');
+    await page.eval(`__fake.finish()`);
+    has(await page.eval(`__fake.spoken[1]`), 'Here We study', 'the edited text is read');
+    // a redraw (a save) while reading: the phrase goes on
+    await page.eval(`commit(); render()`);
+    eq(await page.eval(`__fake.spoken.length`), 2, 'not read again after a redraw');
+    eq(await page.eval(`$('#tts-state').textContent`), 'Reading', 'still reading');
+    // paused, the phrase is edited: resume reads it as it is now
+    await page.click('#pause');
+    await page.select('Here We', 'start');
+    await page.type('So ');
+    await page.click('#pause');
+    has(await page.eval(`__fake.spoken[__fake.spoken.length - 1]`), 'So Here We study', 'resumed with the edit');
+    await page.click('#stop');
+  },
+
   // ---- combinations
   async 'a selection across two paragraphs: ( wraps nothing and deletes nothing'(env, page) {
     await selectSpan(page, 'lazy', 'A second');
@@ -1899,6 +2179,7 @@ Object.assign(TESTS, {
     await typeAt(page, 'lazy dog', ' kept');
     await page.interceptSaves('fail');
     await page.save();
+    await page.waitFor(`!$('#banner').hidden`, 5000, 'the error banner');
     has(await page.banner(), 'disk on fire', 'the error is shown');
     eq(await page.eval(`editedFiles().join()`), 'main.tex', 'still edited');
     untouched(env, 'main.tex');
@@ -2308,6 +2589,103 @@ Object.assign(TESTS, {
     await page.save();
     hasNot(env.read('main.tex'), 'paper', 'every match replaced');
     has(env.read('main.tex'), 'Final words of the essay.', 'replacement written');
+  },
+});
+
+Object.assign(TESTS, {
+  async 'game editor: underlined title, paper numbering, its formula editor keeps Ctrl+Z, Apply previews the game'(env, page) {
+    await page.click("js:ORDER.find((s) => s.kind === 'figure').el.querySelector('div.small, img')", { count: 2 });
+    await page.waitFor(visible('#figview'));
+    const src = ['\\begin{figure}', '\\begin{algorithmic}[1]', '\\Statex \\underline{$G_0$}', '\\State $x \\gets 1$',
+      '\\If{$x = 0$}', '  \\State \\Return $1$', '\\EndIf', '\\end{algorithmic}', '\\caption{A caption here.}\\label{fig:one}', '\\end{figure}'].join('\n');
+    await page.eval('(() => { const src = ' + JSON.stringify(src) + '; FV.src = src; FV.orig = src; FV.games = parseGames(src); FV.tables = L.parseTabulars(src); showFigTab("games"); })()');
+    eq(await page.eval(`!!document.querySelector('#fv-body .gline .chip.uline .chip.math')`), true, 'the title is underlined maths, not raw LaTeX');
+    eq(await page.eval(`[...document.querySelectorAll('#fv-body .gline .gno')].map((n) => n.textContent).join(',')`), ',1,2,3,4', 'numbered as in the paper');
+    // a formula of a game line: typing then Ctrl+Z undoes in the formula, the drawer stays
+    await page.click(`js:document.querySelectorAll('#fv-body .gline')[1].querySelector('.gtext .chip')`);
+    await page.waitFor(visible('#drawer'));
+    await page.type('+y'); await sleep(50);
+    await page.key('z', { ctrl: true }); await sleep(100);
+    eq(await page.eval(`$('#drawer').hidden`), false, 'the formula editor stays open');
+    eq(await page.eval(`FV.undo.length`), 0, 'the game draft was not undone');
+    await page.key('Escape'); await page.waitFor(`$('#drawer').hidden`);
+    // add a line, undo: the line goes, a toast says so; redo brings it back
+    await page.click(`js:document.querySelectorAll('#fv-body .gline')[1].querySelector('.gtext')`);
+    await page.click(`js:document.querySelectorAll('#fv-body .gline')[1].querySelector('.gtools button')`);
+    const n = await page.eval(`document.querySelectorAll('#fv-body .gline').length`);
+    await page.click('#fv-undo'); await sleep(50);
+    eq(await page.eval(`document.querySelectorAll('#fv-body .gline').length`), n - 1, 'undo');
+    await page.click('#fv-redo'); await sleep(50);
+    eq(await page.eval(`document.querySelectorAll('#fv-body .gline').length`), n, 'redo');
+    has(await page.eval(`[...document.querySelectorAll('.toast')].map((t) => t.textContent).join('|')`), 'Redone', 'said');
+    await page.click('#fv-apply');
+    await page.waitFor(`$('#figview').hidden`);
+    const fig = `ORDER.find((s) => s.kind === 'figure').el`;
+    eq(await page.eval(`!!${fig}.querySelector('.game-preview')`), true, 'the paper previews the edited game');
+    eq(await page.eval(`${fig}.querySelectorAll('.game-preview .gp-line').length`), n, 'every line but the blank ones');
+  },
+
+  async 'table cells: Ctrl+Z keeps the cursor in the cell'(env, page) {
+    await page.click("js:ORDER.find((s) => s.kind === 'figure').el.querySelector('div.small, img')", { count: 2 });
+    await page.waitFor(visible('#figview'));
+    const src = ['\\begin{table}', '\\begin{tabular}{lc}', 'Setting & Bound \\\\', 'Both & maybe \\\\', '\\end{tabular}', '\\end{table}'].join('\n');
+    await page.eval('(() => { const src = ' + JSON.stringify(src) + '; FV.src = src; FV.orig = src; FV.games = []; FV.tables = L.parseTabulars(src); showFigTab("cells"); })()');
+    await page.click(`js:document.querySelectorAll('#fv-body td[contenteditable=true]')[3]`);
+    await page.type('X'); await sleep(50);
+    await page.key('z', { ctrl: true }); await sleep(50);
+    eq(await page.eval(`document.querySelectorAll('#fv-body td[contenteditable=true]')[3].textContent`), 'maybe', 'undone');
+    eq(await page.eval(`document.activeElement === document.querySelectorAll('#fv-body td[contenteditable=true]')[3]`), true, 'the cursor stays in the cell');
+  },
+
+  async 'displayed equation: the cursor is on the empty line, the preview keeps its height'(env, page) {
+    await page.select('lazy dog', 'end');
+    await page.key('m', { ctrl: true, shift: true });
+    await page.waitFor(visible('#drawer'));
+    await page.type('\\frac{a}{b}'); await sleep(50);
+    eq(await page.eval(`$('#drawer-src').value`), '\\[\n  \\frac{a}{b}\n\\]', 'typed on the middle line');
+    const h = await page.eval(`$('#drawer-preview').getBoundingClientRect().height`);
+    await page.key('Backspace'); await page.key('Backspace'); await page.key('Backspace'); await sleep(50);
+    eq(await page.eval(`$('#drawer-preview').getBoundingClientRect().height`), h, 'the preview does not shrink');
+    await page.key('Escape');
+  },
+
+  async 'Ctrl+click a reference goes to its label, Alt+Left comes back'(env, page) {
+    env.write('main.tex', MAIN.replace('Final words of the paper.', 'Final words, see \\cref{sec:body}.'));
+    await page.send('Page.reload');
+    await page.waitFor(`typeof ORDER !== 'undefined' && ORDER.length > 0 && document.querySelector('#doc .chip.ref')`, 15000, 'reload');
+    await page.eval(`scrollTo(0, document.body.scrollHeight)`);
+    await page.click(`js:document.querySelector('#doc .chip.ref')`, { ctrl: true });
+    await sleep(100);
+    eq(await page.eval(`$('#drawer').hidden`), true, 'no editor opened');
+    const body = await page.eval(`(() => { const r = ORDER.find((s) => s.src.includes('\\\\label{sec:body}')).el.getBoundingClientRect(); return r.top > 0 && r.top < innerHeight; })()`);
+    eq(body, true, 'the labelled heading is on screen');
+    const mid = await page.eval(`scrollY`);
+    const before2 = await page.eval(`NAV.back[0].y`);   // (the click scrolls the reference into view first)
+    await page.key('ArrowLeft', { alt: true }); await sleep(800);
+    const now = await page.eval(`scrollY`);
+    eq(Math.abs(now - before2) < 5, true, `back where it was (${before2} -> ${mid} -> ${now})`);
+  },
+
+  async 'saving far down the page keeps the place'(env, page) {
+    await page.eval(`document.documentElement.style.setProperty('--doc-size', '30px')`);
+    const seg = `ORDER.find((s) => s.src.includes('Final words'))`;
+    await page.eval(`${seg}.el.scrollIntoView({ block: 'start' }); scrollBy(0, -200)`);
+    await page.select('Final words', 'end'); await page.type(' more');
+    const top = await page.eval(`${seg}.el.getBoundingClientRect().top`);
+    await page.save(); await sleep(2500);       // the build and the reload after it
+    const after = await page.eval(`${seg}.el.getBoundingClientRect().top`);
+    eq(Math.abs(after - top) < 4, true, `the block stays put (${top} -> ${after})`);
+  },
+
+  async 'text size changes the paper, not the toolbar'(env, page) {
+    const ui = await page.eval(`getComputedStyle($('#save')).fontSize`);
+    const p = `getComputedStyle(ORDER.find((s) => s.kind === 'para').edit).fontSize`;
+    const t0 = await page.eval(p);
+    await page.click('#textbigger'); await page.click('#textbigger');
+    eq(await page.eval(`getComputedStyle($('#save')).fontSize`), ui, 'toolbar unchanged');
+    eq(parseFloat(await page.eval(p)) > parseFloat(t0), true, 'paper text larger');
+    await page.click('#textsize');
+    eq(await page.eval(p), t0, 'reset');
   },
 });
 

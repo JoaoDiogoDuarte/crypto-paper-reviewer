@@ -110,8 +110,87 @@ def opt_fields(opts):
 
 
 def doc_class(text):
-    m = re.search(r'^[^%\n]*\\documentclass\s*(?:\[[^\]]*\])?\s*\{([^}]*)\}', text, re.M)
+    m = re.search(r'^[^%\n]*\\documentclass\s*(?:\[[^\]]*\])?\s*\{([^}]*)\}', active_tex(strip_comments(text)), re.M)
     return m.group(1) if m else 'article'
+
+
+# TeX conditionals whose outcome a static reading cannot know: both branches
+# are kept.  (\ifthenelse and friends are macros with braces, not ended by \fi.)
+UNKNOWN_IFS = {'if', 'ifcat', 'ifnum', 'ifdim', 'ifodd', 'ifvmode', 'ifhmode', 'ifmmode', 'ifinner', 'ifvoid',
+               'ifhbox', 'ifvbox', 'ifeof', 'ifcase', 'ifcsname', 'iffontchar', 'ifincsname', 'ifpdf',
+               'ifxetex', 'ifluatex', 'ifPDFTeX', 'ifXeTeX', 'ifLuaTeX', 'ifpdftex', 'ifabsnum', 'ifabsdim'}
+DEFINERS = {'def', 'gdef', 'edef', 'xdef', 'let', 'newcommand', 'renewcommand', 'providecommand',
+            'DeclareRobustCommand', 'NewDocumentCommand', 'DeclareMathOperator'}
+
+
+def active_tex(text):
+    r"""The text with the branches TeX would skip removed, for the
+    conditionals a reading can decide: \newif flags set by \footrue or
+    \foofalse, \ifdefined\x and \ifx\x\undefined (\x defined by \def,
+    \newcommand, \let... earlier in the text), \iftrue and \iffalse.
+    Other conditionals keep both branches.  Comments must be gone already."""
+    flags, defined = {}, set()
+    stack = []      # per open conditional: [value: True/False/None, in_else]
+    cut, start = [], None     # skipped ranges; start of the current one
+    tok = re.compile(r'\\([A-Za-z@]+|.)', re.S)
+
+    def active():
+        return all(v is None or v != e for v, e in stack)
+
+    def next_cs(pos):
+        m = re.compile(r'\s*\*?\s*\{?\s*\\([A-Za-z@]+)').match(text, pos)
+        return (m.group(1), m.end()) if m else (None, pos)
+
+    pos = 0
+    while True:
+        m = tok.search(text, pos)
+        if not m:
+            break
+        name, pos = m.group(1), m.end()
+        was = active()
+        if name == 'newif':
+            cs, pos = next_cs(pos)
+            if was and cs and cs.startswith('if'):
+                flags[cs[2:]] = False
+        elif name in DEFINERS:
+            cs, pos = next_cs(pos)
+            if was and cs:
+                defined.add(cs)
+        elif name == 'ifdefined':
+            cs, pos = next_cs(pos)
+            stack.append([cs in defined if cs else None, False])
+        elif name == 'ifx':
+            m2 = re.compile(r'\s*\\([A-Za-z@]+)\s*\\(undefined|relax)\b').match(text, pos)
+            if m2:
+                pos = m2.end()
+                stack.append([m2.group(1) not in defined, False])
+            else:
+                stack.append([None, False])
+        elif name in ('iftrue', 'iffalse'):
+            stack.append([name == 'iftrue', False])
+        elif name.startswith('if') and name[2:] in flags:
+            stack.append([flags[name[2:]], False])
+        elif name in UNKNOWN_IFS:
+            stack.append([None, False])
+        elif name == 'else' and stack:
+            stack[-1][1] = True
+        elif name == 'fi' and stack:
+            stack.pop()
+        elif was and (name.endswith('true') or name.endswith('false')):
+            base = name[:-4] if name.endswith('true') else name[:-5]
+            if base in flags:
+                flags[base] = name.endswith('true')
+        now = active()
+        if was and not now:
+            start = pos
+        elif not was and now and start is not None:
+            cut.append((start, m.start()))
+            start = None
+    if start is not None:
+        cut.append((start, len(text)))
+    for a, b in reversed(cut):
+        text = text[:a] + text[b:]
+    return text
 
 
 def extract(text):
@@ -529,7 +608,10 @@ def _convert(main_text, md, target, anonymous, theorems_used, resolve=None, all_
     body = t[begin + len('\\begin{document}'):]
     everything = preamble + body + all_text
     # the preamble: no class line, no old front matter
-    preamble = re.sub(r'^[^%\n]*\\documentclass\s*(\[[^\]]*\])?\s*\{[^}]*\}[^\n]*\n?', '', preamble, count=1, flags=re.M)
+    # every class line: a preamble may choose its class in an \if (two
+    # editions), and the converted one has exactly one
+    preamble = re.sub(r'(?m)^([^%\n]*?)\\documentclass\s*(\[[^\]]*\])?\s*\{[^}]*\}[ \t]*(\n?)',
+                      lambda m: m.group(1) + ('' if not m.group(1).strip() else m.group(3)), preamble)
     preamble = remove_cmds(preamble, FRONT_CMDS)
     pre_shims, shims = [], []
     # packages the target loads, forbids or replaces
@@ -568,7 +650,8 @@ def _convert(main_text, md, target, anonymous, theorems_used, resolve=None, all_
         pre_shims.append(THEOREM_GUARD)
     # cross-references
     uses_cref = bool(re.search(r'\\[cC]ref\b', everything))
-    preamble = re.sub(r'\\usepackage(\[[^\]]*\])?\{cleveref\}[ \t]*\n?', '', preamble) if target in NO_CLEVEREF else preamble
+    if target in NO_CLEVEREF:
+        preamble = drop_package(preamble, 'cleveref')   # also out of lists like {amsmath,cleveref}
     if target in NO_CLEVEREF:
         preamble = re.sub(r'\\(crefname|Crefname|creflabelformat)\{[^}]*\}(\{[^}]*\}){0,2}[ \t]*\n?', '', preamble)
         if uses_cref:
@@ -608,6 +691,16 @@ def _convert(main_text, md, target, anonymous, theorems_used, resolve=None, all_
     if target == 'ieee' and '\\part' in everything:
         shims.append('\\providecommand{\\part}[1]{\\section{#1}}')
         warnings.append('\\part is mapped to \\section for IEEEtran.')
+    # no target class has a working \chapter: map it to \section (star kept)
+    if '\\chapter' in everything:
+        shims.append('\\makeatletter\\def\\chapter{\\@ifstar{\\section*}{\\section}}\\makeatother')
+        warnings.append('\\chapter is mapped to \\section (no target class has chapters).')
+    # Springer-style \spnewtheorem declarations survive in the preamble; only
+    # llncs defines the command, so shim it everywhere else — before the
+    # preamble, because the preamble itself calls it
+    if '\\spnewtheorem' in preamble and target != 'llncs':
+        pre_shims.append('\\providecommand{\\spnewtheorem}[4]{\\newtheorem{#1}{#2}}')
+        warnings.append('\\spnewtheorem becomes \\newtheorem (only llncs defines it).')
     # the body: old front matter out
     body = remove_cmds(body, FRONT_CMDS + ['maketitle'])
     body = re.sub(r'\\begin\{(abstract|textabstract)\}.*?\\end\{\1\}\s*', '', body, count=1, flags=re.S)
@@ -615,7 +708,35 @@ def _convert(main_text, md, target, anonymous, theorems_used, resolve=None, all_
     # bibliography: exactly one style, the target's (none for iacrcc or biblatex)
     preamble = re.sub(r'\\bibliographystyle\{[^}]*\}[ \t]*\n?', '', preamble)
     body = re.sub(r'\\bibliographystyle\{[^}]*\}[ \t]*\n?', '', body)
-    biblatex = '\\printbibliography' in everything or re.search(r'\{[^}]*biblatex', preamble)
+    biblatex = '\\printbibliography' in everything or re.search(r'\\usepackage(?:\[[^\]]*\])?\{[^}]*\bbiblatex\b', preamble)
+    if biblatex:
+        # a biblatex paper into a bibtex class (every target here: even iacrcc
+        # defaults to bibtex and forbids setting its own style): swap the
+        # machinery, keep the .bib
+        res = [re.sub(r'\.bib$', '', n.strip()) for n in
+               re.findall(r'\\addbibresource(?:\[[^\]]*\])?\{([^}]*)\}', preamble + body)]
+        preamble = drop_package(preamble, 'biblatex')
+        preamble = re.sub(r'(?m)^[^%\n]*\\addbibresource(?:\[[^\]]*\])?\{[^}]*\}[ \t]*\n?', '', preamble)
+        body = re.sub(r'(?m)^[^%\n]*\\addbibresource(?:\[[^\]]*\])?\{[^}]*\}[ \t]*\n?', '', body)
+        mapped = set()
+        for cmd, rep in (('\\parencite', '\\citep'), ('\\smartcite', '\\citep'), ('\\textcite', '\\citet'),
+                         ('\\autocite', '\\cite'), ('\\footcite', '\\cite')):
+            if re.search(re.escape(cmd) + r'(?![a-zA-Z])', everything):
+                mapped.add(cmd + '→' + rep)
+                body = re.sub(re.escape(cmd) + r'(\[[^\]]*\])*', rep.replace('\\', '\\\\'), body)
+        if mapped:
+            warnings.append('biblatex citations become natbib/bibtex ones: ' + ', '.join(sorted(mapped))
+                            + ' (\\citep/\\citet become \\cite where natbib is absent).')
+        if res:
+            names = ','.join(res)
+            if re.search(r'\\printbibliography', body):
+                # no \bibliographystyle here: the block below adds the target's once
+                body = re.sub(r'\\printbibliography(?:\[[^\]]*\])?', '\\\\bibliography{' + names + '}', body)
+            elif '\\bibliography{' not in body:
+                body = body.replace('\\end{document}', '\\\\bibliography{' + names + '}\n\\end{document}')
+        else:
+            warnings.append('No \\addbibresource found: add a \\bibliography{...} to the converted file yourself.')
+        biblatex = False          # the file now speaks bibtex
     if bibstyle and not biblatex and '\\bibliography{' in body:
         body = body.replace('\\bibliography{', '\\bibliographystyle{' + bibstyle + '}\n\\bibliography{', 1)
     if target == 'ieee':

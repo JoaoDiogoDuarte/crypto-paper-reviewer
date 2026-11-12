@@ -51,7 +51,7 @@ for (const f of files) {
         if (L.tabularBody(t) !== seg.src.slice(t.bodyStart, t.bodyEnd)) fail(`${f}: tabular does not rebuild: ${seg.src.slice(t.bodyStart, t.bodyStart + 60)}`);
       }
     }
-    if (seg.kind !== 'para' && seg.kind !== 'heading') continue;
+    if (!['para', 'heading', 'quote'].includes(seg.kind)) continue;
     blocks++;
     const toks = L.tokenize(seg.src);
     if (L.serializeTokens(toks) !== seg.src) fail(`${f}: tokens: ${JSON.stringify(seg.src.slice(0, 80))}`);

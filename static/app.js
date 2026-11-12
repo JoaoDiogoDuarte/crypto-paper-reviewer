@@ -73,6 +73,56 @@ let lastTyping = 0;
 // shown, the page is not the document, and nothing may read it back.
 let DIFF_SHOWN = false;
 
+// ------------------------------------------------------- keeping the place
+//
+// The page is drawn again after a save, a build, an undo: the reader stays
+// at the same block, not the same pixel offset (pictures and formulas above
+// take their height only once loaded). The block at the top of the view is
+// remembered with its offset, put back, and held there while the page
+// settles, unless the reader scrolls meanwhile.
+function viewAnchor() {
+  const top = (document.querySelector('#toolbar') || document.querySelector('#bar'))?.getBoundingClientRect().bottom || 0;
+  const segs = (typeof ORDER !== 'undefined' ? ORDER : []).filter((s) => s.el && s.el.isConnected);
+  for (const [i, s] of segs.entries()) {
+    const r = s.el.getBoundingClientRect();
+    if (r.height && r.bottom > top) return { y: window.scrollY, i, file: s.file, src: s.src, top: r.top };
+  }
+  return { y: window.scrollY };
+}
+let anchorHold = null;
+// Only one thing places the view at a time: holding the place after a
+// redraw and bringing the phrase read aloud into view each stop the other
+// (both fighting gave a jitter).
+let revealSeq = 0;
+for (const ev of ['wheel', 'touchstart']) addEventListener(ev, () => { revealSeq++; }, { capture: true, passive: true });
+function restoreAnchor(a) {
+  if (!a) return;
+  if (anchorHold) anchorHold();
+  revealSeq++;
+  const find = () => {
+    const segs = ORDER.filter((s) => s.el && s.el.isConnected);
+    return segs.find((s) => s.file === a.file && s.src === a.src) ||
+      (segs[a.i] && segs[a.i].file === a.file ? segs[a.i] : null);
+  };
+  const put = () => {
+    const s = a.top !== undefined && find();
+    if (s) window.scrollBy(0, s.el.getBoundingClientRect().top - a.top);
+    else window.scrollTo(0, a.y);
+  };
+  put();
+  // hold the place for a moment while images and formulas load
+  const ro = new ResizeObserver(put);
+  ro.observe($('#doc'));
+  const stop = () => {
+    ro.disconnect(); clearTimeout(t);
+    for (const ev of ['wheel', 'touchstart', 'keydown', 'mousedown']) removeEventListener(ev, stop, true);
+    anchorHold = null;
+  };
+  const t = setTimeout(stop, 3000);
+  for (const ev of ['wheel', 'touchstart', 'keydown', 'mousedown']) addEventListener(ev, stop, true);
+  anchorHold = stop;
+}
+
 // ---------------------------------------------------------------- loading
 
 // Read the document from the server and render it.  Unsaved edits are kept,
@@ -80,7 +130,7 @@ let DIFF_SHOWN = false;
 // old base hash, so that saving it after it changed on disk is refused (and
 // asks) instead of overwriting the other version.
 async function load(keepScroll, discard = []) {
-  const y = window.scrollY;
+  const y = viewAnchor();
   const caret = captureEditorState();
   const oldMacros = DOC && JSON.stringify(DOC.macros);
   DOC = await (await fetch('/api/doc')).json();
@@ -94,7 +144,7 @@ async function load(keepScroll, discard = []) {
   render();
   fillMains();
   restoreEditorState(caret);
-  if (keepScroll) window.scrollTo(0, y);
+  if (keepScroll) restoreAnchor(y);
   setBuild(DOC.build);
   showWhere();
   if (new URLSearchParams(location.search).has('selftest')) selfTest();
@@ -203,8 +253,7 @@ let HEADS = {};
 function render() {
   unicodeEngine.v = undefined;      // the preamble may have changed
   DIFF_SHOWN = false;
-  const speech = typeof TTS !== 'undefined' ? TTS.capture() : null;
-  if (typeof TTS !== 'undefined') TTS.reset();
+  const speech = typeof TTS !== 'undefined' ? TTS.detach() : null;
   const doc = $('#doc');
   doc.textContent = '';
   ORDER = [];
@@ -232,7 +281,7 @@ function render() {
   watchEdits();
   markEdited();
   markBoxes();
-  if (speech) TTS.restore(speech);
+  if (speech) TTS.reattach(speech);
 }
 
 // Overfull and underfull boxes of the last build (from its .log, by file and
@@ -270,6 +319,7 @@ function markBoxes(list) {
     sum.onclick = () => {
       const marked = [...document.querySelectorAll('#doc .seg.boxwarn')];
       if (!marked.length) return;
+      navPush();
       markBoxes.at = ((markBoxes.at ?? -1) + 1) % marked.length;
       marked[markBoxes.at].scrollIntoView({ block: 'center', behavior: 'smooth' });
       marked[markBoxes.at].classList.add('boxflash');
@@ -279,7 +329,7 @@ function markBoxes(list) {
   }
   if (sum) {
     const parts = [over && `${over} overfull`, under && `${under} underfull`].filter(Boolean);
-    sum.textContent = parts.join(' · ');
+    sum.textContent = parts.length ? parts.join(', ') + ' box' + (over + under > 1 ? 'es' : '') : '';
     sum.hidden = !parts.length;
   }
 }
@@ -373,6 +423,7 @@ function renderSeg(seg, ctx) {
   switch (seg.kind) {
     case 'gap': case 'hidden': return null;
     case 'para': return renderPara(seg, ctx);
+    case 'quote': return renderQuote(seg, ctx);
     case 'heading': return renderHeading(seg, ctx);
     case 'code': return renderCode(seg);
     case 'figure': case 'table': return renderFloat(seg);
@@ -385,7 +436,7 @@ function wrapSeg(seg, inner, tools) {
   box.append(inner);
   const t = el('div', 'tools');
   const plus = el('button', '', '+');
-  plus.title = 'Add after this block';
+  plus.title = 'Add after this block (Ctrl+Alt+A)';
   plus.onclick = (e) => { e.stopPropagation(); addMenu(seg, plus); };
   t.append(plus);
   for (const b of tools || []) t.append(b);
@@ -406,6 +457,22 @@ function renderPara(seg, ctx) {
   if (!visible) { p.classList.add('quiet'); p.contentEditable = 'false'; }
   seg.edit = p;
   return wrapSeg(seg, p);
+}
+
+// A quote or quotation environment is a block of its own, shown as a block
+// quote indented as LaTeX prints it.  The \begin/\end stay hidden chips, so
+// an edited quote still saves back with its exact source.
+function renderQuote(seg, ctx) {
+  const env = (/^\s*\\begin\{([^}]+)\}/.exec(seg.src) || [])[1];
+  const q = el('blockquote', 'para' + (env === 'quotation' ? ' quotation' : ''));
+  q.contentEditable = 'true';
+  // italic theorem bodies: an open theorem environment carries over
+  if (ctx.env.length && L.THM_ENVS.has(ctx.env[ctx.env.length - 1])) q.classList.add('thm');
+  renderTokens(L.tokenize(seg.src), q, ctx);
+  const visible = [...q.childNodes].some((n) => n.nodeType === 3 ? n.data.trim() : !(n.classList.contains('hidden') || n.classList.contains('nl')));
+  if (!visible) { q.classList.add('quiet'); q.contentEditable = 'false'; }
+  seg.edit = q;
+  return wrapSeg(seg, q);
 }
 
 function renderHeading(seg, ctx) {
@@ -435,16 +502,16 @@ function renderHeading(seg, ctx) {
   seg.edit = t;
   seg.parts = h;
   const del = el('button', '', 'Delete');
-  del.title = 'Delete this heading (keeps the text under it)';
+  del.title = 'Delete this heading, Ctrl+Alt+X (keeps the text under it)';
   del.onclick = (e) => { e.stopPropagation(); if (confirm('Delete this heading?' + labelWarning(seg))) structural(() => removeSeg(seg)); };
   const up = el('button', '', 'Up');
-  up.title = 'Move this section up';
+  up.title = 'Move this section up (Ctrl+Alt+Up)';
   up.onclick = (e) => { e.stopPropagation(); moveSection(seg, -1); };
   const down = el('button', '', 'Down');
-  down.title = 'Move this section down';
+  down.title = 'Move this section down (Ctrl+Alt+Down)';
   down.onclick = (e) => { e.stopPropagation(); moveSection(seg, 1); };
   const merge = el('button', '', 'Merge');
-  merge.title = 'Combine this section with the previous one';
+  merge.title = 'Combine this section with the previous one (Ctrl+Alt+J)';
   merge.onclick = (e) => { e.stopPropagation(); if (confirm('Combine this section with the previous one?' + labelWarning(seg))) structural(() => removeSeg(seg)); };
   return wrapSeg(seg, node, [up, down, merge, del]);
 }
@@ -508,7 +575,12 @@ function renderFloat(seg) {
   if (seg.kind === 'figure') {
     const url = DOC.figs[seg.src];
     if (url) { const img = el('img'); img.src = url; img.alt = 'Figure'; box.append(img); }
-    else box.append(el('div', 'small', '(figure image is being rendered, or the source changed; it appears after the next build)'));
+    else {
+      // not cut yet (a new or changed figure): games can be shown from their source meanwhile
+      const live = previewGames(seg.src);
+      if (live) box.append(live, el('div', 'small stale-note', 'Preview: the typeset picture appears after the build'));
+      else box.append(el('div', 'small', '(figure image is being rendered, or the source changed; it appears after the next build)'));
+    }
   } else if (DOC.figs[seg.src]) {
     const img = el('img'); img.src = DOC.figs[seg.src]; img.alt = 'Table'; box.append(img);
   } else {
@@ -629,7 +701,12 @@ function renderChip(tok, ctx) {
     c.title = keys.map((k) => DOC.bib[k] || k).join('\n\n').replace(/\\[a-zA-Z]+|[{}]/g, '');
     return c;
   }
-  if (name === 'ec' || name === 'texttt' || name === 'url' || name === 'nolinkurl') return chip('ec', tok.s, arg());
+  if (name === 'ec' || name === 'texttt' || name === 'url' || name === 'nolinkurl' || name === 'lstinline') return chip('ec', tok.s, arg());
+  if (name === 'verb') {
+    // \verb|x|, \lstinline|x <$ d|, \mintinline{lang}|x|: the text between the delimiters
+    const m = /^\\(?:verb\*?|lstinline|mintinline)\s*(?:\[[^\]]*\])*(?:\{[^}]*\})?([^])([^]*?)\1$/.exec(tok.s);
+    return chip('ec', tok.s, m ? m[2] : tok.s);
+  }
   if (name === 'appendices' || name === 'appendix') { ctx.app = true; ctx.sec = 0; return chip('runin', tok.s, 'Appendices'); }
   if (name === 'bibliography' || name === 'printbibliography') return refList(tok.s);   // BibTeX or biblatex
   if (name === 'bibitem') {
@@ -655,6 +732,11 @@ function renderChip(tok, ctx) {
   }
   if (name === 'footnote') { const c = chip('src', tok.s, '†'); c.title = arg(); return c; }
   if (name === 'texorpdfstring') { const c = chip('', tok.s); renderTokens(L.tokenize(arg(0)), c, ctx); return c; }
+  // \underline{...}, maths inside included (a game's \Statex \underline{$\G{0}$})
+  if (name === 'underline') {
+    const m = /^\\underline\s*\{([^]*)\}$/.exec(tok.s);
+    if (m) { const c = chip('uline', tok.s); renderTokens(L.tokenize(m[1]), c, ctx); return c; }
+  }
   if (name === ',' || name === ' ' || name === ';' || name === '@') return chip('nl', tok.s, ' ');
   if (name === 'dots' || name === 'ldots') return chip('nl', tok.s, '…');
   if (name === 'verbatim' && /^tabular(?:\*|x)?$/.test(tok.env)) {
@@ -709,9 +791,25 @@ function envChip(tok, ctx) {
         n = String(ctx.counters[th.counter] = (ctx.counters[th.counter] || 0) + 1);
         if (tok.label && labelValue(tok.label)) n = labelValue(tok.label);
       }
-      return chip('thmhead', tok.s, `${th.name}${n ? ' ' + n : ''}${tok.opt ? ' (' + tok.opt + ')' : ''}. `);
+      // the optional title is typeset (maths, \cite, \emph), not shown as source
+      const c = chip('thmhead', tok.s, `${th.name}${n ? ' ' + n : ''}${tok.opt ? ' (' : '. '}`);
+      if (tok.opt) {
+        const t = el('span', 'thmtitle');
+        renderTokens(L.tokenize(tok.opt), t, {});
+        c.append(t, document.createTextNode('). '));
+      }
+      return c;
     }
-    if (tok.env === 'proof') return chip('runin', tok.s, (tok.opt || 'Proof') + '. ');
+    if (tok.env === 'proof') {
+      // the optional title is typeset (\ref, maths, \emph), not shown as source
+      const c = chip('runin', tok.s, tok.opt ? '' : 'Proof. ');
+      if (tok.opt) {
+        const t = el('span', 'thmtitle');
+        renderTokens(L.tokenize(tok.opt), t, {});
+        c.append(t, document.createTextNode('. '));
+      }
+      return c;
+    }
     if (tok.env === 'abstract') return chip('runin', tok.s, 'Abstract. ');
     if (/^(itemize|enumerate|description)$/.test(tok.env)) {
       (ctx.lists = ctx.lists || []).push({ env: tok.env, n: 0 });
@@ -746,7 +844,7 @@ const KATEX_CACHE = new Map();   // source -> rendered HTML (cleared when the ma
 // LaTeX that KaTeX lacks but papers use in maths and macros
 const KATEX_SHIMS = { '\\ensuremath': '#1', '\\xspace': '', '\\mathchoice': '#1', '\\boldmath': '',
   '\\unboldmath': '', '\\textsc': '\\text{#1}', '\\mbox': '\\text{#1}',
-  '\\protect': '', '\\nobreak': '', '\\allowbreak': '' };
+  '\\protect': '', '\\nobreak': '', '\\allowbreak': '', '\\qedhere': '', '\\qed': '' };
 // cryptocode's keywords (\pcreturn, \sample …) preview in running text too, not
 // only in the game editor; the paper's own definitions still win
 const katexMacros = () => ({ ...KATEX_SHIMS, ...CRYPTOCODE_MACROS, ...DOC.macros });
@@ -823,6 +921,7 @@ function refList(src) {
   const keys = Object.entries(DOC.aux.cites).sort((a, b) => (isNaN(a[1]) || isNaN(b[1]) ? String(a[1]).localeCompare(String(b[1])) : a[1] - b[1]));
   for (const [k, n] of keys) {
     const li = el('li');
+    li.dataset.key = k;
     li.textContent = `[${n}] ` + (DOC.bib[k] || k).replace(/\\[a-zA-Z]+\s*|[{}~]/g, (m) => (m === '~' ? ' ' : ''));
     ol.append(li);
   }
@@ -934,7 +1033,7 @@ function segSource(seg, warnings, changes, applyRules = true) {
     return t;
   };
   switch (seg.kind) {
-    case 'para': {
+    case 'para': case 'quote': {
       if (!seg.edit) return seg.src;
       const out = fix(ser(seg.edit), seg.src);
       if (!unicodeEngine() && out !== seg.src) {
@@ -1202,12 +1301,21 @@ function openDrawer(chipEl, seg, title, fresh = false) {
   const ta = $('#drawer-src');
   ta.value = chipEl.dataset.src;
   $('#drawer').hidden = false;
+  // the preview keeps a steady height while the formula is typed: room for
+  // a fraction or a sum from the start, and it never shrinks while open
+  const [, display] = mathBody(ta.value);
+  $('#drawer-preview').style.minHeight = chipEl.classList.contains('math') ? (display ? '5.5em' : '3em') : '';
   preview();
   ta.focus();
   const [body] = mathBody(ta.value);
   if (/^\s*x?\s*$/.test(body)) { // a new formula: put the cursor inside it
-    const i = ta.value.indexOf(body) + body.length - (body.endsWith(' ') ? 1 : 0);
-    ta.setSelectionRange(i, i);
+    // \[ (empty line) \]: on the empty line, not before the \]
+    const nl = body.lastIndexOf('\n');
+    const at = ta.value.indexOf(body);
+    const i = at + (nl > 0 ? nl : body.length - (body.endsWith(' ') ? 1 : 0));
+    // $ $: the space is selected, so what is typed replaces it
+    if (body === ' ') ta.setSelectionRange(at, at + 1);
+    else ta.setSelectionRange(i, i);
   } else if (body !== ta.value) { // an existing one: at the end of the maths, not after the closing $
     const i = ta.value.lastIndexOf(body) + body.length;
     ta.setSelectionRange(i, i);
@@ -1219,6 +1327,8 @@ function preview() {
   const p = $('#drawer-preview');
   p.textContent = '';
   renderTokens(L.tokenize(src), p, {});
+  const h = p.getBoundingClientRect().height;
+  if (h > parseFloat(getComputedStyle(p).minHeight || 0)) p.style.minHeight = h + 'px';
 }
 
 function applyDrawer(remove) {
@@ -1243,7 +1353,9 @@ function applyDrawer(remove) {
     drawerChip.replaceWith(frag);
     // a formula of a game line, table cell or game title: its editor reads it back
     if (host && host.closest('#fv-body, .fv-head')) host.dispatchEvent(new Event('input', { bubbles: true }));
-    if (last && last.isConnected && editableAt(selRange())) setCaretAfter(last);
+    // back to the text, just after the formula, to go on typing (the focus
+    // was in the drawer: typing after Ctrl+Enter used to go nowhere)
+    if (last && last.isConnected && host && host.isConnected) { host.focus({ preventScroll: true }); setCaretAfter(last); }
     closeDrawer(true);
   }
   markEdited();
@@ -1288,8 +1400,179 @@ function insertSource(src, title) {
 // --------------------------------------------------------------- events
 
 const doc = $('#doc');
+// a chip inside a chip (\underline{$x$}, {...}): the outer one holds the source
+function outerChip(n) {
+  let c = n.closest('.chip');
+  while (c && c.parentElement && c.parentElement.closest('.chip')) c = c.parentElement.closest('.chip');
+  return c;
+}
+// Ctrl+click (Cmd+click) on a reference or citation: go to what it names
+// (Lemma 4, the equation, the entry in the references), and back with Alt+Left.
+// Back and forward, as in a browser: every jump (a reference followed, a box
+// warning, a change of the diff, a find match) remembers where the view was.
+const NAV = { back: [], fwd: [], armed: false };
+function navUpdate() {
+  $('#navback').disabled = !NAV.back.length;
+  $('#navfwd').disabled = !NAV.fwd.length;
+}
+function navPush() {
+  NAV.back.push(viewAnchor());
+  if (NAV.back.length > 100) NAV.back.shift();
+  NAV.fwd = [];
+  NAV.armed = true;
+  navUpdate();
+}
+function navGo(from, to) {
+  if (!from.length) return;
+  to.push(viewAnchor());
+  restoreAnchor(from.pop());
+  NAV.armed = from.length > 0;
+  navUpdate();
+}
+const navBack = () => navGo(NAV.back, NAV.fwd);
+const navForward = () => navGo(NAV.fwd, NAV.back);
+$('#navback').onclick = navBack;
+$('#navfwd').onclick = navForward;
+function jumpTo(target, what) {
+  if (!target) { toast(`${what}: not found in this paper`, 'error'); return false; }
+  // a hidden \label: the nearest shown element before it, or its block
+  let t = target;
+  while (t && !(t.getClientRects().length && t.offsetParent !== null)) t = t.previousElementSibling || t.parentElement;
+  t = t || target.closest('.seg');
+  if (anchorHold) anchorHold();   // a place held after a reload would pull the page back
+  navPush();
+  t.scrollIntoView({ block: 'center' });
+  const box = t.closest('.seg') || t;
+  box.classList.add('boxflash');
+  setTimeout(() => box.classList.remove('boxflash'), 1200);
+  toast(`${what} · Alt+← goes back`);
+  return true;
+}
+// ------------------------------------------------------------ menus
+// Popovers: the main menu (☰), reading options (▾), headings, and the tools
+// that do not fit in the toolbar (⋯).  A button with data-pop opens one; a
+// click elsewhere, Escape or an action in it closes it (data-stay: toggles
+// that stay open, such as the theme).
+// The popovers sit at the top of #chrome, above both bars (inside a bar,
+// the bar after it painted over them and took their clicks).
+for (const p of document.querySelectorAll('#chrome .popover')) $('#chrome').append(p);
+const popOpener = (p) => document.querySelector(`[data-pop="${p.id}"]`);
+const popParent = (p) => { const b = popOpener(p); return b ? b.closest('.popover') : null; };
+function closePopovers(keep = null) {
+  const kept = new Set();
+  for (let p = keep; p; p = popParent(p)) kept.add(p);
+  for (const p of document.querySelectorAll('.popover:not([hidden])')) {
+    if (kept.has(p)) continue;
+    p.hidden = true;
+    const b = popOpener(p);
+    if (b) b.setAttribute('aria-expanded', 'false');
+  }
+}
+function openPopover(p) {
+  if (!p.children.length) return;
+  closePopovers(p);
+  p.hidden = false;
+  const b = popOpener(p);
+  if (b) b.setAttribute('aria-expanded', 'true');
+  // fixed, under its button
+  if (b && b.getClientRects().length) {
+    const r = b.getBoundingClientRect(), w = p.offsetWidth;
+    p.style.top = Math.round(r.bottom + 4) + 'px';
+    p.style.left = Math.round(Math.max(8, Math.min(r.left, innerWidth - w - 8))) + 'px';
+  }
+}
+addEventListener('resize', () => closePopovers());
+// open the menus a control is in (shortcuts, tests); true if it is shown
+function revealControl(e) {
+  const chain = [];
+  for (let p = e && e.closest('.popover'); p; p = popParent(p)) chain.unshift(p);
+  for (const p of chain) openPopover(p);
+  return !!e && !!e.getClientRects().length;
+}
+document.addEventListener('click', (e) => {
+  const opener = e.target.closest('[data-pop]');
+  if (opener) {
+    const p = document.getElementById(opener.dataset.pop);
+    if (p.hidden) openPopover(p); else closePopovers(popParent(p));
+    return;
+  }
+  const inside = e.target.closest('.popover');
+  if (!inside) { closePopovers(); return; }
+  const b = e.target.closest('button');
+  if (b && !b.hasAttribute('data-stay') && !b.closest('.textsize')) setTimeout(() => closePopovers(), 0);
+}, true);
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && document.querySelector('.popover:not([hidden])')) { closePopovers(); e.stopPropagation(); }
+}, true);
+
+// Button labels in their own span, so narrow windows show only the icons
+// (the title keeps the name and the shortcut).
+for (const b of document.querySelectorAll('#chrome button')) {
+  for (const n of [...b.childNodes]) {
+    if (n.nodeType === 3 && n.data.trim()) { const l = el('span', 'lbl', n.data.trim()); n.replaceWith(l); }
+  }
+  if (b.querySelector('.label')) b.querySelector('.label').classList.add('lbl');
+}
+
+// The editing toolbar keeps one row: what does not fit goes, from the
+// right, into the ⋯ menu.
+const TOOLMORE = { busy: false };
+function fitToolbar() {
+  if (TOOLMORE.busy) return;
+  TOOLMORE.busy = true;
+  const bar = $('#toolbar'), more = $('#toolmore'), group = $('#moregroup');
+  for (const n of [...more.children]) bar.insertBefore(n, group);
+  $('#toolmorebtn').hidden = true;
+  if (bar.scrollWidth > bar.clientWidth + 1) {
+    $('#toolmorebtn').hidden = false;
+    let guard = 60;
+    while (bar.scrollWidth > bar.clientWidth + 1 && guard--) {
+      const last = group.previousElementSibling;
+      if (!last) break;
+      more.prepend(last);
+    }
+    // a separator at either end of the menu or the bar means nothing
+    while (more.firstElementChild && more.firstElementChild.classList.contains('sep')) bar.insertBefore(more.firstElementChild, group);
+  }
+  TOOLMORE.busy = false;
+}
+new ResizeObserver(() => requestAnimationFrame(fitToolbar)).observe($('#toolbar'));
+// a control shown or hidden (the diff's navigation): fit again
+new MutationObserver((recs) => { if (recs.some((r) => r.target.id !== 'toolmorebtn')) requestAnimationFrame(fitToolbar); })
+  .observe($('#toolbar'), { attributes: true, attributeFilter: ['hidden'], subtree: true });
+
+function followRef(c) {
+  const src = c.dataset.src || '';
+  const keys = (/\{([^{}]*)\}\s*$/.exec(src) || [])[1];
+  if (!keys) return;
+  const key = keys.split(',')[0].trim();
+  if (c.classList.contains('cite')) {
+    jumpTo(document.querySelector(`#doc .refs li[data-key="${CSS.escape(key)}"]`), 'Reference [' + (DOC.aux.cites[key] || key) + ']');
+    return;
+  }
+  const needle = '\\label{' + key + '}';
+  const seg = ORDER.find((s) => !s.removed && s.el && s.el.isConnected && (s.src || '').includes(needle));
+  let target = null;
+  if (seg) target = [...seg.el.querySelectorAll('[data-src]')].find((n) => n.dataset.src.includes(needle)) || seg.el;
+  jumpTo(target, refText('cref', key));
+}
+// (in the text, only right after a jump: Alt+Left moves by words there on a Mac)
+document.addEventListener('keydown', (e) => {
+  const way = e.key === 'ArrowLeft' ? NAV.back : e.key === 'ArrowRight' ? NAV.fwd : null;
+  if (e.altKey && !e.ctrlKey && !e.metaKey && way && way.length &&
+      !e.target.closest('input, textarea') && (NAV.armed || !e.target.closest('[contenteditable=true]'))) {
+    e.preventDefault(); e.stopPropagation();
+    if (way === NAV.back) navBack(); else navForward();
+    NAV.armed = true;
+  } else if (e.key !== 'Alt') NAV.armed = false;
+}, true);
+addEventListener('mouseup', (e) => { if (e.button === 3) navBack(); else if (e.button === 4) navForward(); });
 doc.addEventListener('click', (e) => {
-  const c = e.target.closest('.chip');
+  if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+    const r = outerChip(e.target);
+    if (r && (r.classList.contains('ref') || r.classList.contains('cite'))) { e.preventDefault(); followRef(r); return; }
+  }
+  const c = outerChip(e.target);
   if (!c || c.classList.contains('nl') || c.classList.contains('tie') || c.classList.contains('parbreak')) return;
   if (c.closest('.refs')) return;
   e.preventDefault();
@@ -1300,7 +1583,7 @@ doc.addEventListener('input', () => { lastTyping = Date.now(); markEditedSoon();
 // The same in the figure window (game lines, cells, titles): most game lines
 // are one formula, editable only this way.
 $('#fv-body').addEventListener('click', (e) => {
-  const c = e.target.closest('.chip');
+  const c = outerChip(e.target);
   if (!c || !c.closest('[contenteditable=true]') || c.classList.contains('nl') || c.classList.contains('tie')) return;
   e.preventDefault();
   openDrawer(c, null, c.classList.contains('math') ? 'Edit maths' : 'Edit LaTeX');
@@ -1316,9 +1599,11 @@ function markEditedSoon() { clearTimeout(markTimer); markTimer = setTimeout(mark
 const LATEX_MIME = 'application/x-paper-editor-latex';
 
 // Plain text: formulas between dollars ($...$, $$...$$, \(...\), \[...\])
-// become formulas; everything else is text.  A $ is a dollar sign unless it
-// opens and closes a formula: no space just inside, no digit right after
-// the closing one (so "5$ or 10$" stays text); \$ is a dollar sign.
+// become formulas, and so do control words with their arguments and ties
+// (\ref{...}, \textbf{…}, ~), as when the LaTeX is copied inside the app;
+// everything else is text.  A $ is a dollar sign unless it opens and closes
+// a formula: no space just inside, no digit right after the closing one
+// (so "5$ or 10$" stays text); \$ is a dollar sign.
 function pastedNodes(text) {
   const nodes = [];
   let buf = '';
@@ -1347,6 +1632,20 @@ function pastedNodes(text) {
         math(text.slice(i, j + 1), false); i = j + 1; continue;
       }
     }
+    // a control word with the groups attached to it (\ref{sec:intro},
+    // \textbf{…}): the chip it renders as, as when copied inside the app
+    if (text[i] === '\\' && /[A-Za-z@]/.test(text[i + 1] || '')) {
+      const t0 = L.tokenize(text.slice(i))[0];
+      if (t0) {
+        flush();
+        const frag = document.createDocumentFragment();
+        renderTokens([t0], frag, {});
+        for (const n of [...frag.childNodes]) nodes.push(n);
+        i += L.serializeTokens([t0]).length;
+        continue;
+      }
+    }
+    if (text[i] === '~') { flush(); nodes.push(chip('tie', '~', '\u00a0')); i++; continue; }
     buf += text[i++];
   }
   flush();
@@ -1429,20 +1728,39 @@ $('#cols').onclick = () => {
   // No document exists yet in that case, so defer any rerender.
   if (DOC) commit();
   const caret = DOC ? captureEditorState() : null;
-  const y = window.scrollY;
+  const y = viewAnchor();
   const two = document.body.classList.toggle('two');
   $('#cols').setAttribute('aria-pressed', String(two));
-  $('#cols').title = two ? 'Two columns: on (click for one column)' : 'One column (click for two columns)';
+  $('#cols').title = (two ? 'Two columns: on (click for one column)' : 'One column (click for two columns)') + ' (Ctrl+Alt+W)';
   if (DOC) toast(two ? 'Two columns' : 'One column');
   if (DOC) {
     render();
     restoreEditorState(caret);
-    window.scrollTo(0, y);
+    restoreAnchor(y);
   }
   try { localStorage.setItem('cols', two ? '2' : '1'); } catch (e) { /* storage unavailable */ }
 };
 try { if (localStorage.getItem('cols') === '2') $('#cols').click(); } catch (e) { /* storage unavailable */ }
 $('#help').onclick = () => { $('#helpbox').hidden = false; };
+// The paper's text size, apart from the interface (browser zoom changes both).
+const TEXT_SIZES = [12, 13, 14, 15, 16, 17, 18, 20, 22, 24, 27, 30];
+function setTextSize(px, say = true) {
+  px = TEXT_SIZES.includes(px) ? px : 16;
+  const y = DOC ? viewAnchor() : null;
+  document.documentElement.style.setProperty('--doc-size', px + 'px');
+  $('#textsize').textContent = Math.round(px / 16 * 100) + '%';
+  $('#textsmaller').disabled = px === TEXT_SIZES[0];
+  $('#textbigger').disabled = px === TEXT_SIZES[TEXT_SIZES.length - 1];
+  if (y) restoreAnchor(y);
+  if (say) toast('Text size ' + $('#textsize').textContent);
+  try { localStorage.setItem('docsize', String(px)); } catch (e) { /* storage unavailable */ }
+}
+const textSizeNow = () => parseInt(getComputedStyle(document.documentElement).getPropertyValue('--doc-size')) || 16;
+$('#textsmaller').onclick = () => setTextSize(TEXT_SIZES[Math.max(0, TEXT_SIZES.indexOf(textSizeNow()) - 1)]);
+$('#textbigger').onclick = () => setTextSize(TEXT_SIZES[Math.min(TEXT_SIZES.length - 1, TEXT_SIZES.indexOf(textSizeNow()) + 1)]);
+$('#textsize').onclick = () => setTextSize(16);
+try { setTextSize(+localStorage.getItem('docsize') || 16, false); } catch (e) { setTextSize(16, false); }
+
 $('#save').onclick = () => save();
 $('#pdfbtn').onclick = async () => {
   const r = await fetch('/pdf', { method: 'HEAD' }).catch(() => null);
@@ -1450,6 +1768,15 @@ $('#pdfbtn').onclick = async () => {
   window.open('/pdf?' + Date.now(), '_blank');
   toast('Opened the PDF');
 };
+async function requestBuild(clean) {
+  const r = await fetch('/api/build', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
+    body: JSON.stringify({ clean }) }).catch(() => null);
+  if (!r || !r.ok) { toast('Could not start the build', 'error'); return; }
+  setBuild({ state: 'running', message: clean ? 'clean build queued' : 'build queued' });
+  toast(clean ? 'Clean build started' : 'Build started');
+}
+$('#rebuildbtn').onclick = () => requestBuild(false);
+$('#cleanbtn').onclick = () => requestBuild(true);
 $('#reloadbtn').onclick = async () => {
   const edited = editedFiles();
   const discard = edited.length && confirm(`Reload from disk and drop your unsaved edits in ${edited.join(', ')}?\n(Cancel reloads the other files and keeps your edits.)`) ? edited : [];
@@ -1518,11 +1845,11 @@ async function saveOnce() {
     // new structure (a paragraph break, a heading) is shown as a chip until
     // it is parsed again
     commit(apply);
-    const y = window.scrollY;
+    const y = viewAnchor();
     const caret = captureEditorState();
     render();
     restoreEditorState(caret);
-    window.scrollTo(0, y);
+    restoreAnchor(y);
   } else {
     for (const seg of ORDER) if (seg.touched) { seg.src = segSource(seg, [], null, apply); seg.touched = false; }
     markEdited();
@@ -1540,6 +1867,12 @@ async function saveOnce() {
 }
 
 // Leaving the page (closing the tab, reloading) with unsaved edits asks first.
+// this page, for the server: when the last page closes, a server that opened
+// its own window stops (a reload says goodbye and comes back at once)
+const CLIENT_ID = Math.random().toString(36).slice(2, 12);
+addEventListener('pagehide', () => {
+  try { navigator.sendBeacon('/api/bye', JSON.stringify({ token: TOKEN, c: CLIENT_ID })); } catch (e) { /* none */ }
+});
 window.addEventListener('beforeunload', (e) => {
   if (!DOC) return;
   let edited = false;
@@ -1645,9 +1978,24 @@ $('#external-later').onclick = () => {
 // disk.  A changed file without edits here is reloaded at once; one with
 // edits asks (once per version on disk).  Nothing happens while typing,
 // while a dialog or the LaTeX drawer is open, or while saving.
+let FIGVER;
+async function refreshFigures() {
+  const d = await (await fetch('/api/doc')).json();
+  DOC.figs = d.figs || {};
+  for (const seg of ORDER) {
+    if ((seg.kind !== 'figure' && seg.kind !== 'table') || seg.touched || !seg.el) continue;
+    const url = DOC.figs[seg.src];
+    const box = seg.el.querySelector(':scope > div:first-child');
+    const shown = box && box.querySelector(':scope > img, :scope > .tabular-preview, :scope > .game-preview, :scope > div.small:not(.stale-note)');
+    if (!url || !shown || (shown.tagName === 'IMG' && shown.getAttribute('src') === url && !shown.classList.contains('stale'))) continue;
+    const img = el('img'); img.src = url; img.alt = seg.kind === 'figure' ? 'Figure' : 'Table';
+    shown.replaceWith(img);
+    for (const n of box.querySelectorAll(':scope > .stale-note')) n.remove();
+  }
+}
 async function poll() {
   try {
-    const s = SAVING ? null : await (await fetch('/api/state')).json();
+    const s = SAVING ? null : await (await fetch('/api/state?c=' + CLIENT_ID)).json();
     if (s && !SAVING) {
       setBuild(s.build);
       if (s.boxes) markBoxes(s.boxes);
@@ -1663,6 +2011,9 @@ async function poll() {
         if (quiet.length || newBuild) await load(true);
         if (ask.length) showExternal(ask.map((n) => [n, s.hashes[n]]));
       }
+      // the figures are cut after the PDF is built: show the new pictures
+      // (an edited game, a table) when they are ready
+      if (s.figver !== undefined && s.figver !== FIGVER) { FIGVER = s.figver; await refreshFigures(); }
     }
   } catch (e) { /* server restarting */ }
   setTimeout(poll, 2000);
@@ -1671,18 +2022,29 @@ async function poll() {
 // -------------------------------------------------------------- speech
 
 const TTS = (() => {
-  let queue = [], idx = 0, speaking = false, paused = false, current = null, audio = null, prefetched = null;
+  // The queue holds the phrases of a few blocks at a time (from `end` on, the
+  // blocks are not read yet): building it is cheap after an edit or a jump.
+  let queue = [], idx = 0, end = 0;      // idx: the next phrase to read
+  let cur = null, curRange = null;       // the phrase read (or paused on), and its live range
+  let heard = '';                        // the text of the audio of `cur`
+  let stale = false;                     // the page was edited since the phrases were taken
+  let speaking = false, paused = false, current = null, audio = null;
   let anchor = null;
   let generation = 0;
+  const clips = new Map();               // url -> Promise<{ src, span }>: fetched audio, ahead of time
   const synth = window.speechSynthesis;
   const voiceSel = $('#voice');
   const positionKey = () => 'paper-editor:tts:' + location.pathname + ':' + (DOC && DOC.main || '');
 
   function setState(state) { $('#tts-state').textContent = state; }
   function updateControls() {
+    const reading = speaking && !paused;
     $('#pause').disabled = !speaking;
     $('#stop').disabled = !speaking;
     $('#pause').setAttribute('aria-pressed', String(paused));
+    $('#play').classList.toggle('reading', reading);
+    $('#ttsbar').classList.toggle('active', speaking);
+    $('#pause').querySelector('.label').textContent = paused ? 'Resume' : 'Pause';
   }
   function savePosition(item) {
     try { localStorage.setItem(positionKey(), JSON.stringify({ file: item.seg.file, src: item.seg.src, text: item.text })); }
@@ -1713,7 +2075,20 @@ const TTS = (() => {
     if (!voiceSel.options.length) voiceSel.append(new Option('no voices', ''));
   }
   if (synth) synth.onvoiceschanged = fillVoices;
-  voiceSel.onchange = () => { try { localStorage.setItem('voice', voiceSel.value); } catch (e) { /* none */ } };
+  voiceSel.onchange = () => {
+    try { localStorage.setItem('voice', voiceSel.value); } catch (e) { /* none */ }
+    if (speaking && !paused) again();
+  };
+  $('#rate').onchange = () => {
+    try { localStorage.setItem('rate', $('#rate').value); } catch (e) { /* none */ }
+    if (audio) audio.playbackRate = rate();
+    else if (speaking && !paused) again();     // a browser voice takes the rate per phrase
+  };
+  try {                                 // the chosen speed survives a reload, like the voice
+    const savedRate = localStorage.getItem('rate');
+    if (savedRate && [...$('#rate').options].some((o) => o.value === savedRate)) $('#rate').value = savedRate;
+  } catch (e) { /* none */ }
+  const rate = () => parseFloat($('#rate').value) || 1;
 
   function startSeg() {
     const sel = getSelection();
@@ -1730,20 +2105,32 @@ const TTS = (() => {
     return 0;
   }
 
-  function build(from) {
+  // The phrases of one block, as the page shows it now.
+  function phrases(seg) {
+    if (!seg || !seg.el || seg.removed) return [];
+    const node = (seg.kind === 'para' || seg.kind === 'quote') ? (seg.edit.classList.contains('quiet') ? null : seg.edit)
+      : (seg.kind === 'heading' || seg.kind === 'figure' || seg.kind === 'table') ? seg.edit : null;
+    if (!node) return [];
+    const map = speechMap(node);
+    return phraseBounds(map.text).map(([a, b]) => ({ seg, text: map.text.slice(a, b), range: () => rangeFor(map, a, b) }));
+  }
+  function build(from, to = ORDER.length) {
     const q = [];
-    for (let i = from; i < ORDER.length; i++) {
-      const seg = ORDER[i];
-      if (!seg.el || seg.removed) continue;
-      const node = seg.kind === 'para' ? (seg.edit.classList.contains('quiet') ? null : seg.edit)
-        : (seg.kind === 'heading' || seg.kind === 'figure' || seg.kind === 'table') ? seg.edit : null;
-      if (!node) continue;
-      const map = speechMap(node);
-      for (const [a, b] of phraseBounds(map.text)) {
-        q.push({ seg, text: map.text.slice(a, b), range: () => rangeFor(map, a, b) });
-      }
-    }
+    for (let i = from; i < to; i++) q.push(...phrases(ORDER[i]));
     return q;
+  }
+  function startAt(i) { queue = []; idx = 0; end = Math.max(0, i); extend(); }
+  function extend(ahead = 3) {
+    while (queue.length - idx < ahead && end < ORDER.length) queue.push(...phrases(ORDER[end++]));
+  }
+  // the block before the queue, put in front of it: for « Prev at its start
+  function prepend() {
+    let i = queue.length ? ORDER.indexOf(queue[0].seg) : end;
+    while (--i >= 0) {
+      const p = phrases(ORDER[i]);
+      if (p.length) { queue.unshift(...p); idx += p.length; return p.length; }
+    }
+    return 0;
   }
 
   // Index of the phrase holding the caret; the last phrase that starts at or
@@ -1763,25 +2150,39 @@ const TTS = (() => {
     }
     return best;
   }
+  // The queue from the phrase of `seg` holding `caret`; false if it has none.
+  function seek(seg, caret) {
+    const i = ORDER.indexOf(seg);
+    if (i < 0 || !seg.el || seg.removed) return false;
+    startAt(i);
+    const k = caretIndex(queue, seg, caret);
+    if (k < 0) return false;
+    idx = k; extend();
+    return true;
+  }
 
-  // Find a remembered phrase anywhere in its file, by source, then by text.
+  // Find a remembered phrase in its file: by the block's source, then by
+  // text anywhere, then the same block and phrase number (the page was drawn
+  // again after an edit of that very phrase).
   function locate(state) {
     const segs = ORDER.filter((s) => s.file === state.file && !s.removed);
     const fragment = (state.text || '').trim().slice(0, 60);
-    const passes = [
-      (s) => s.src === state.src,
-      (s) => true,
-    ];
-    for (const ok of passes) {
+    const at = (seg, k) => { startAt(ORDER.indexOf(seg)); idx = k; extend(); return true; };
+    for (const ok of [(s) => s.src === state.src, () => true]) {
       for (const seg of segs) {
         if (!ok(seg)) continue;
-        const queue = build(ORDER.indexOf(seg));
-        let index = queue.findIndex((item) => item.seg === seg && item.text === state.text);
-        if (index < 0 && fragment.length >= 20) index = queue.findIndex((item) => item.seg === seg && item.text.includes(fragment));
-        if (index >= 0) return { queue, index };
+        const p = phrases(seg);
+        let k = p.findIndex((item) => item.text === state.text);
+        if (k < 0 && fragment.length >= 20) k = p.findIndex((item) => item.text.includes(fragment));
+        if (k >= 0) return at(seg, k);
       }
     }
-    return null;
+    const seg = state.at !== undefined && ORDER[state.at];
+    if (seg && seg.file === state.file) {
+      const n = phrases(seg).length;
+      if (n) return at(seg, Math.min(state.k || 0, n - 1));
+    }
+    return false;
   }
 
   function currentCaret() {
@@ -1795,19 +2196,39 @@ const TTS = (() => {
     return { seg, range: range.cloneRange() };
   }
 
-  function prepareQueue() {
+  // Where Read starts: the caret, the last place clicked, the remembered
+  // position, the first block on screen.
+  function prepare() {
     for (const c of [currentCaret(), anchor]) {
-      if (!c || !c.seg.el || c.seg.removed || !ORDER.includes(c.seg)) continue;
-      const queue = build(ORDER.indexOf(c.seg));
-      const index = caretIndex(queue, c.seg, c.range);
-      if (index >= 0) return { queue, index };
+      if (c && c.seg.el && !c.seg.removed && ORDER.includes(c.seg) && seek(c.seg, c.range)) return;
     }
     const saved = savedPosition();
-    if (saved) {
-      const found = locate(saved);
-      if (found) return found;
-    }
-    return { queue: build(startSeg()), index: 0 };
+    if (saved && locate(saved)) return;
+    startAt(startSeg());
+  }
+
+  // After edits: the phrases again, from the block being read, and `cur` the
+  // phrase now where it was (its live range followed the typing).
+  function refresh() {
+    stale = false;
+    if (!cur || !curRange) return;
+    const at = curRange.cloneRange();
+    at.collapse(true);
+    if (!seek(cur.seg, at)) return;     // the block is gone: carry on with the queue
+    cur = queue[idx++];
+    curRange = cur.range();
+  }
+  let editTimer = 0;
+  function edited() {
+    if (!cur) return;
+    stale = true;
+    // the highlight follows the phrase while it is typed in
+    clearTimeout(editTimer);
+    editTimer = setTimeout(() => {
+      if (!cur || !stale) return;
+      refresh();
+      markPhrase(curRange, false);
+    }, 150);
   }
 
   function play() {
@@ -1815,19 +2236,27 @@ const TTS = (() => {
     if (speaking) return;
     stop();
     if (!voiceSel.value) { banner('No text-to-speech voice is available. See the README of the editor for how to install one.'); return; }
-    ({ queue, index: idx } = prepareQueue());
+    prepare();
     speaking = true; paused = false;
     updateControls();
     next();
   }
 
+  function halt() {
+    generation++;
+    if (synth) synth.cancel();
+    if (audio) { audio.done = true; audio.pause(); audio = null; }
+  }
+
   function jump(delta) {
-    if (!queue.length) {
-      ({ queue, index: idx } = prepareQueue());
-    }
-    const target = Math.max(0, Math.min(queue.length - 1, (speaking ? idx - 1 : idx) + delta));
-    stop();
-    idx = target;
+    if (stale) refresh();
+    if (!speaking || !queue.length) prepare();
+    let target = (cur && queue.includes(cur) ? queue.indexOf(cur) : idx) + delta;
+    while (target < 0) { const n = prepend(); if (!n) { target = 0; break; } target += n; }
+    idx = Math.max(0, target);
+    extend();
+    if (idx >= queue.length) idx = Math.max(0, queue.length - 1);
+    halt();
     if (queue[idx]) { speaking = true; paused = false; next(); }
   }
 
@@ -1840,91 +2269,189 @@ const TTS = (() => {
 
   function next(run = generation) {
     if (run !== generation) return;
+    if (stale) refresh();
+    extend();
     if (!speaking || idx >= queue.length) { stop(); return; }
-    const item = queue[idx++];
+    cur = queue[idx++];
+    curRange = cur.range();
+    say(run);
+  }
+  // read the current phrase again from its start (a new voice or speed, an
+  // edit of it, a resume with a browser voice)
+  function again() {
+    if (!cur) return;
+    halt();
+    if (stale) refresh();
+    curRange = cur.range();
+    say(generation);
+  }
+
+  function say(run) {
+    const item = cur;
     savePosition(item);
     setState(paused ? 'Paused' : 'Reading');
     updateControls();
     highlight(item.seg);
-    markPhrase(item.range());
-    const rate = parseFloat($('#rate').value);
+    markPhrase(curRange, true, true);   // reading wins over a recent keystroke
+    heard = item.text;
     const [engine, name] = voiceSel.value.split(/\|(.*)/s);
     if (engine !== 'browser') {
-      // server audio: this phrase (prefetched when possible) and the next
-      const url = (it) => `/api/tts?engine=${encodeURIComponent(engine)}&voice=${encodeURIComponent(name)}&text=${encodeURIComponent(it.text)}`;
-      audio = prefetched && prefetched.src.endsWith(url(item).slice(1)) ? prefetched : new Audio(url(item));
-      prefetched = idx < queue.length ? new Audio(url(queue[idx])) : null;
-      if (prefetched) prefetched.preload = 'auto';
-      audio.playbackRate = rate;
-      audio.onended = () => next(run);
-      audio.onerror = () => { if (run !== generation) return; banner('Speech failed for this voice; see the server output.'); next(run); };
-      audio.play().catch(() => {});
+      clip(engine, name, item.text).then((c) => {
+        if (run !== generation) return;
+        const a = new Audio(c.src);
+        audio = a;
+        a.playbackRate = rate();
+        const finish = () => {
+          if (a.done || run !== generation) return;
+          a.done = true; a.pause();
+          if (audio === a) audio = null;
+          next(run);
+        };
+        a.onended = finish;
+        a.onerror = () => { if (run === generation && !a.done) { banner('Speech failed for this voice; see the server output.'); stop(); } };
+        // the voice's own silence before and after the phrase is skipped:
+        // phrases follow each other as in speech, not with a second between
+        const span = c.span;
+        if (span && span.start > 0.08) a.currentTime = span.start - 0.05;
+        if (span) {
+          const stopAt = span.end + 0.3;
+          const tick = () => {
+            if (a.done || run !== generation) return;
+            if (!a.paused && a.currentTime >= stopAt) { finish(); return; }
+            requestAnimationFrame(tick);
+          };
+          requestAnimationFrame(tick);
+        }
+        if (!paused) a.play().catch(() => {});
+      }, (e) => {
+        if (run !== generation) return;
+        banner('Speech failed for this voice: ' + e.message);
+        stop();
+      });
+      // the next phrases are fetched (and made by the server) meanwhile
+      extend();
+      for (const it of queue.slice(idx, idx + 2)) clip(engine, name, it.text).catch(() => {});
       return;
     }
+    if (paused) return;
     const u = new SpeechSynthesisUtterance(item.text);
     const v = voices().find((x) => x.name === name);
     if (v) { u.voice = v; u.lang = v.lang; }
-    u.rate = rate;
+    u.rate = rate();
     u.onend = () => next(run);
     u.onerror = (e) => { if (run === generation && e.error !== 'interrupted' && e.error !== 'canceled') next(run); };
     synth.speak(u);
   }
 
+  function clip(engine, voice, text) {
+    const url = `/api/tts?engine=${encodeURIComponent(engine)}&voice=${encodeURIComponent(voice)}&text=${encodeURIComponent(text)}`;
+    if (!clips.has(url)) {
+      const p = (async () => {
+        const r = await fetch(url);
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'HTTP ' + r.status);
+        const blob = await r.blob();
+        return { src: URL.createObjectURL(blob), span: await speechSpan(blob).catch(() => null) };
+      })();
+      p.catch(() => clips.delete(url));
+      clips.set(url, p);
+      if (clips.size > 16) {
+        const [k, old] = clips.entries().next().value;
+        clips.delete(k);
+        old.then((c) => setTimeout(() => URL.revokeObjectURL(c.src), 60000), () => {});
+      }
+    }
+    return clips.get(url);
+  }
+
+  // Where the voice speaks in a clip, in seconds: the first and the last
+  // sample above a small fraction of the loudest.
+  let actx = null;
+  async function speechSpan(blob) {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return null;
+    actx = actx || new Ctx();
+    const buf = await actx.decodeAudioData(await blob.arrayBuffer());
+    const data = buf.getChannelData(0);
+    let peak = 0;
+    for (let i = 0; i < data.length; i++) { const v = Math.abs(data[i]); if (v > peak) peak = v; }
+    if (!peak) return null;
+    const th = Math.max(0.002, peak * 0.012);
+    let a = 0, b = data.length - 1;
+    while (a < b && Math.abs(data[a]) < th) a++;
+    while (b > a && Math.abs(data[b]) < th) b--;
+    return { start: a / buf.sampleRate, end: b / buf.sampleRate };
+  }
+
   function stop() {
-    generation++;
+    halt();
     speaking = false;
     paused = false;
-    if (synth) synth.cancel();
-    if (audio) { audio.pause(); audio = null; }
-    prefetched = null;
+    cur = null; curRange = null; stale = false;
     highlight(null);
     markPhrase(null);
     setState('Stopped');
     updateControls();
   }
 
+  // Pause keeps the place.  A browser voice is stopped and the phrase is read
+  // again from its start on resume (speechSynthesis.pause is unreliable); a
+  // phrase edited while paused is read as it is now.
   function pause() {
     if (!speaking) return;
     paused = !paused;
     setState(paused ? 'Paused' : 'Reading');
     updateControls();
-    if (audio) { if (paused) audio.pause(); else audio.play(); return; }
-    if (paused) synth.pause(); else synth.resume();
+    if (paused) {
+      if (audio) audio.pause();
+      else { generation++; if (synth) synth.cancel(); }
+      return;
+    }
+    if (stale) refresh();
+    if (audio && cur && cur.text === heard) audio.play().catch(() => {});
+    else again();
   }
 
   function setAnchor(seg, range) { anchor = { seg, range: range.cloneRange() }; }
 
-  function reset() { stop(); queue = []; idx = 0; anchor = null; setState('Ready'); }
+  function reset() { stop(); queue = []; idx = 0; end = 0; anchor = null; setState('Ready'); }
 
-  function capture() {
-    const item = speaking && queue[idx - 1];
-    return item ? { file: item.seg.file, src: item.seg.src, text: item.text, paused } : null;
+  // The page is drawn again (a save, a build): the voice goes on, and the
+  // phrase is found again in the new page.
+  function detach() {
+    if (!speaking || !cur) { reset(); return null; }
+    const p = phrases(cur.seg);
+    const state = { file: cur.seg.file, src: cur.seg.src, text: cur.text, paused,
+      at: ORDER.indexOf(cur.seg), k: Math.max(0, p.findIndex((x) => x.text === cur.text)) };
+    highlight(null);
+    markPhrase(null);
+    queue = []; idx = 0; end = 0; cur = null; curRange = null; anchor = null; stale = false;
+    return state;
   }
-
-  function restore(state) {
+  function reattach(state) {
     if (!state) return;
-    const found = locate(state);
-    if (!found) return;
-    ({ queue, index: idx } = found);
-    speaking = true; paused = false;
+    if (!locate(state)) { stop(); return; }
+    cur = queue[idx++];
+    curRange = cur.range();
+    highlight(cur.seg);
+    markPhrase(curRange, false);
     updateControls();
-    next();
-    if (state.paused) pause();
+    if (cur.text !== heard && !paused) again();
   }
 
   function testPrepare() {
-    const prepared = prepareQueue();
-    return { text: prepared.queue[prepared.index]?.text || null, index: prepared.index };
+    prepare();
+    return { text: queue[idx]?.text || null, index: idx };
   }
 
-  return { play, stop, pause, prev: () => jump(-1), next: () => jump(1), setAnchor, reset, capture, restore, fillVoices, loadServerVoices, build,
-    testPrepare, testSavePosition: savePosition };
+  return { play, stop, pause, prev: () => jump(-1), next: () => jump(1), setAnchor, reset, detach, reattach,
+    edited, fillVoices, loadServerVoices, build, testPrepare, testSavePosition: savePosition };
 })();
 $('#play').onclick = () => TTS.play();
 $('#tts-prev').onclick = () => TTS.prev();
 $('#tts-next').onclick = () => TTS.next();
 $('#stop').onclick = () => TTS.stop();
 $('#pause').onclick = () => TTS.pause();
+$('#doc').addEventListener('input', () => TTS.edited());
 
 function rangeContainsCaret(phrase, caret) {
   try {
@@ -1943,6 +2470,51 @@ function updateSpeechAnchor() {
 }
 
 document.addEventListener('selectionchange', updateSpeechAnchor);
+
+// The caret must never rest past trailing hidden chips (a block's \end{...},
+// a trailing comment): they are display:none, but End/arrows can still put the
+// caret after them, and text typed there would land outside the environment.
+// Clamp a collapsed caret to the last visible position of its block.
+function lastVisiblePos(node) {
+  for (let i = node.childNodes.length - 1; i >= 0; i--) {
+    const c = node.childNodes[i];
+    if (c.nodeType === 3) { if (c.data.length) return { node: c, offset: c.data.length }; continue; }
+    if (c.nodeType !== 1 || c.classList.contains('hidden') || c.classList.contains('tools') || c.classList.contains('nl')) continue;
+    // a visible chip (maths, citation): the caret goes after it, never inside it
+    if (c.classList.contains('chip')) return { node, offset: i + 1 };
+    const r = lastVisiblePos(c);
+    if (r) return r;
+  }
+  return null;
+}
+function clampCaretToVisibleEnd() {
+  const s = getSelection();
+  if (!s.rangeCount || !s.isCollapsed) return;
+  const a = s.anchorNode;
+  if (!a || !(a.isContentEditable || (a.parentElement && a.parentElement.isContentEditable))) return;
+  const seg = segOf(a.nodeType === 1 ? a : a.parentElement);
+  if (!seg || !seg.edit || !seg.edit.contains(a)) return;
+  const end = lastVisiblePos(seg.edit);
+  if (!end) return;
+  const r = document.createRange();
+  r.setStart(a, s.anchorOffset);
+  const er = document.createRange();
+  er.setStart(end.node, end.offset);
+  if (r.compareBoundaryPoints(Range.START_TO_START, er) > 0) {
+    const nr = document.createRange();
+    nr.setStart(end.node, end.offset);
+    nr.collapse(true);
+    s.removeAllRanges();
+    s.addRange(nr);
+  }
+}
+document.addEventListener('selectionchange', clampCaretToVisibleEnd);
+// and before the text lands: the selectionchange task can run after the first
+// character is already inserted, so clamp on beforeinput as well
+document.addEventListener('beforeinput', (e) => {
+  if (/^insert/.test(e.inputType || '')) clampCaretToVisibleEnd();
+}, true);
+
 $('#doc').addEventListener('click', () => {
   setTimeout(updateSpeechAnchor, 0);
 });
@@ -2001,11 +2573,14 @@ function rangeFor(map, a, b) {
   let started = false;
   for (const p of map.parts) {
     if (!started && a < p.end) {
-      if (p.kind === 'text') r.setStart(p.node, Math.max(0, a - p.start)); else r.setStartBefore(p.node);
+      // offsets are clamped: the text may have been edited since the map was made
+      if (!p.node.isConnected) return null;
+      if (p.kind === 'text') r.setStart(p.node, Math.min(p.node.length, Math.max(0, a - p.start))); else r.setStartBefore(p.node);
       started = true;
     }
     if (started && b <= p.end) {
-      if (p.kind === 'text') r.setEnd(p.node, Math.max(0, b - p.start)); else r.setEndAfter(p.node);
+      if (!p.node.isConnected) return started ? r : null;
+      if (p.kind === 'text') r.setEnd(p.node, Math.min(p.node.length, Math.max(0, b - p.start))); else r.setEndAfter(p.node);
       return r;
     }
   }
@@ -2014,22 +2589,28 @@ function rangeFor(map, a, b) {
 
 // Highlight the phrase being read (CSS Custom Highlight API) and keep it on
 // screen.  Without the API, the block highlight remains.
-function markPhrase(range) {
+function markPhrase(range, reveal = true, force = false) {
   if (window.CSS && CSS.highlights) {
     if (range) CSS.highlights.set('tts', new Highlight(range)); else CSS.highlights.delete('tts');
   }
-  if (range) revealRange(range, true);
+  if (range && reveal) revealRange(range, true, force);
 }
 
 // Bring a range into view below the bars, a third of the way down.  Blocks
 // off screen are not laid out (content-visibility) and their size is only
 // estimated: a far range is first brought near by its element, then placed.
 // The first line counts: a range across two columns is as tall as they are.
-function revealRange(range, smooth) {
+function revealRange(range, smooth, force = false) {
+  // the writer is typing: the caret's place wins over the reader's — unless
+  // the reader itself asked (force), because following a phrase you are
+  // listening to must not leave it hidden behind the bars
+  if (!force && Date.now() - lastTyping < 1500) return;
   const top = chromeBottom();
   const first = () => range.getClientRects()[0] || range.getBoundingClientRect();
   let r = first();
   if (r.top >= top + 12 && r.bottom <= innerHeight - 40) return;
+  if (anchorHold) anchorHold();
+  const seq = ++revealSeq;
   const far = r.bottom < -innerHeight / 2 || r.top > innerHeight * 1.5 || (!r.width && !r.height);
   if (far) {
     const n = range.startContainer;
@@ -2045,7 +2626,7 @@ function revealRange(range, smooth) {
   if (!glide) {
     let tries = 0;
     const settle = () => requestAnimationFrame(() => requestAnimationFrame(() => {
-      if (!range.startContainer.isConnected) return;
+      if (!range.startContainer.isConnected || seq !== revealSeq) return;
       const q = first(), want = top + (innerHeight - top) / 3;
       if (Math.abs(q.top - want) > 4 && tries++ < 20) { window.scrollBy(0, q.top - want); settle(); }
     }));
@@ -2280,9 +2861,9 @@ function restore(from, to) {
   if (!texts) return;
   to.push(cur);
   for (const [n, t] of Object.entries(texts)) if (FILES[n]) FILES[n].text = t;
-  const y = window.scrollY;
+  const y = viewAnchor();
   render();
-  window.scrollTo(0, y);
+  restoreAnchor(y);
 }
 const undo = () => restore(HISTORY.undo, HISTORY.redo);
 const redo = () => restore(HISTORY.redo, HISTORY.undo);
@@ -2444,7 +3025,7 @@ function escapeIn(s, chars) {
   return out;
 }
 
-// $ or Ctrl+M: the selection becomes inline maths; with no selection, a new
+// Ctrl+M (or $ over a selection): the selection becomes inline maths; with no selection, a new
 // formula opens in the drawer.
 function mathAtSelection() {
   const sel = getSelection();
@@ -2463,6 +3044,54 @@ function mathAtSelection() {
   r.insertNode(frag);
   setCaretAfter(math);
   markEditedSoon();
+}
+
+// $ typed at the caret with an unclosed $ before it in the same run of text:
+// the closing $ turns what was typed between the dollars into one maths
+// chip.  The same heuristics as on paste: no space just inside the dollars,
+// no digit right after the closing one (so "5$ or 10$" stays text).
+function closeMathAtCaret() {
+  const sel = getSelection();
+  if (!sel.rangeCount || !sel.isCollapsed) return false;
+  const r = sel.getRangeAt(0);
+  if (!editableAt(r) || r.startContainer.nodeType !== 3) return false;
+  // the text before the caret, back to the previous chip (a chip already
+  // closed any earlier $)
+  const run = [[r.startContainer, r.startOffset]];
+  let before = r.startContainer.data.slice(0, r.startOffset);
+  for (let p = r.startContainer.previousSibling; p && p.nodeType === 3; p = p.previousSibling) {
+    run.unshift([p, p.data.length]);
+    before = p.data + before;
+  }
+  if (!before || /\s$/.test(before)) return false;
+  if (/^[0-9]/.test(r.startContainer.data.slice(r.startOffset))) return false;
+  let open = -1;
+  for (let k = before.length - 1; k >= 0; k--) {
+    if (before[k] !== '$' || (k > 0 && before[k - 1] === '\\')) continue;
+    if (/\s/.test(before[k + 1] || '')) continue;
+    open = k; break;
+  }
+  if (open < 0) return false;
+  const body = before.slice(open + 1);
+  if (!body) return false;
+  for (let k = 0; k < body.length; k++) if (body[k] === '$' && (k === 0 || body[k - 1] !== '\\')) return false;
+  let pos = 0, startNode = null, startOff = 0;
+  for (const [tn, len] of run) {
+    if (open < pos + len) { startNode = tn; startOff = open - pos; break; }
+    pos += len;
+  }
+  if (!startNode) return false;
+  snapshot();
+  const bodyRange = document.createRange();
+  bodyRange.setStart(startNode, startOff + 1);   // the opening $ is not part of the formula
+  bodyRange.setEnd(r.startContainer, r.startOffset);
+  const math = mathChip('$' + mathSourceOf(bodyRange.cloneContents()) + '$', false);
+  bodyRange.setStart(startNode, startOff);
+  bodyRange.deleteContents();
+  bodyRange.insertNode(math);
+  setCaretAfter(math);
+  markEditedSoon();
+  return true;
 }
 
 // Insert chips at the caret: a paragraph break, maths, raw LaTeX.
@@ -2666,7 +3295,6 @@ const TEXT_KEYS = {
   'C-i': () => wrap('\\emph{', 'em'),
   'C-I': () => wrap('\\textit{', 'em'),
   'C-m': mathAtSelection, 'C-M': () => insertMath(true),
-  '$': mathAtSelection,
   'C-\\': () => insertLatex('\\cref{}', 'Insert LaTeX'),
   'C-M-r': () => insertLatex('\\cref{}', 'Insert a reference'),
   'C-M-c': () => insertLatex('\\cite{}', 'Insert a citation'),
@@ -2704,6 +3332,13 @@ document.addEventListener('keydown', (e) => {
     if (!wrapLiteral(...WRAP_PAIRS[e.key])) banner('Select text inside one paragraph to wrap it.');
     return;
   }
+  // $ typed over a selection makes it maths; typed at the caret, it closes
+  // a formula opened with an earlier $ (otherwise it types a dollar sign; a
+  // new formula is Ctrl+M)
+  if (e.key === '$' && !e.ctrlKey && !e.altKey && !e.metaKey && !TEXT_KEYS[k]) {
+    if (!getSelection().isCollapsed) { e.preventDefault(); mathAtSelection(); return; }
+    if (closeMathAtCaret()) e.preventDefault();
+  }
   if (TEXT_KEYS[k]) { e.preventDefault(); TEXT_KEYS[k](); return; }
   // the browser's own bold, italic, underline would bypass the editor (and
   // keep working after the shortcut is moved to another key)
@@ -2711,14 +3346,14 @@ document.addEventListener('keydown', (e) => {
   const seg = segOf(e.target);
   if (e.key === 'Enter' && !e.ctrlKey && !e.altKey) {
     e.preventDefault();
-    if (seg.kind === 'para') insertBreak();
+    if (seg.kind === 'para' || seg.kind === 'quote') insertBreak();
     // Enter in a heading goes on to the section's text: the start of the
     // paragraph after it, or, when none follows (a new section), a new one.
     // (It used to do nothing, and what came next was typed into the heading.)
     else if (seg.kind === 'heading') {
       const i = ORDER.indexOf(seg);
       const next = ORDER.slice(i + 1).find((x) => x.kind !== 'gap' && x.kind !== 'hidden');
-      if (next && next.kind === 'para' && next.edit && next.file === seg.file) {
+      if (next && (next.kind === 'para' || next.kind === 'quote') && next.edit && next.file === seg.file) {
         const r = document.createRange(); r.setStart(next.edit, 0); r.collapse(true);
         next.edit.focus(); const sel2 = getSelection(); sel2.removeAllRanges(); sel2.addRange(r);
       } else structural(() => { insertAfter(seg, PLACEHOLDER); return PLACEHOLDER; });
@@ -2745,6 +3380,22 @@ document.addEventListener('keydown', (e) => {
     }
   }
 });
+
+// Keys that only work while their own dialog is open: the choices of the
+// outside-change bar, Enter in the open dialog, the figure viewer's tabs.
+document.addEventListener('keydown', (e) => {
+  if (e.ctrlKey || e.altKey || e.metaKey || e.target.closest('input, textarea, select')) return;
+  if (!$('#external').hidden && 'robl'.includes(e.key)) {
+    e.preventDefault();
+    ({ r: $('#external-reload'), o: $('#external-overwrite'), b: $('#external-backup'), l: $('#external-later') })[e.key].click();
+  } else if (!$('#openbox').hidden && e.key === 'Enter') {
+    e.preventDefault(); $('#open-confirm').click();
+  } else if (!$('#figview').hidden && /^[1-6]$/.test(e.key)) {
+    // only the tabs on show count (the Games and Cells tabs hide when not used)
+    const tabs = [...document.querySelectorAll('#figview .fv-tabs button')].filter((b) => b.getBoundingClientRect().width > 0);
+    if (tabs[+e.key - 1]) { e.preventDefault(); tabs[+e.key - 1].click(); }
+  }
+}, true);
 
 // ============================================================== palette
 //
@@ -3132,6 +3783,7 @@ function paintFind(scroll) {
 function stepFind(d) {
   if (!FIND.matches.length) return;
   FIND.cur = (FIND.cur + d + FIND.matches.length) % FIND.matches.length;
+  navPush();
   paintFind(true);
 }
 
@@ -3205,7 +3857,8 @@ const THEMES = ['auto', 'light', 'dark'];
 function setTheme(t) {
   if (t === 'auto') document.documentElement.removeAttribute('data-theme');
   else document.documentElement.dataset.theme = t;
-  $('#theme').textContent = { auto: '◐ Auto', light: '☀ Light', dark: '☾ Dark' }[t];
+  $('#theme').innerHTML = `<svg class="ic" aria-hidden="true"><use href="#i-${t === 'auto' ? 'auto' : t}"/></svg> ` +
+    'Theme: ' + { auto: 'follow the system', light: 'light', dark: 'dark' }[t];
   if (setTheme.ready) toast('Colours: ' + { auto: 'follow the system', light: 'light', dark: 'dark' }[t]);
   setTheme.ready = true;
   try { localStorage.setItem('theme', t); } catch (e) { /* storage unavailable */ }
@@ -3283,10 +3936,10 @@ for (const name of Object.keys(SAID)) {
   ACTIONS[name] = announced(name, fn);
   for (const keys of [TEXT_KEYS, GLOBAL_KEYS]) for (const k of Object.keys(keys)) if (keys[k] === fn) keys[k] = ACTIONS[name];
 }
-for (const b of document.querySelectorAll('#toolbar button')) {
+for (const b of document.querySelectorAll('#toolbar button, #headpop button')) {
   // keep the caret in the text when a button is pressed
   b.addEventListener('mousedown', (e) => e.preventDefault());
-  b.addEventListener('click', () => ACTIONS[b.dataset.act]());
+  if (b.dataset.act) b.addEventListener('click', () => ACTIONS[b.dataset.act]());
 }
 Object.assign(TEXT_KEYS, { 'C-M-c': citePalette, 'C-M-C': citePalette, 'C-M-r': refPalette, 'C-M-R': refPalette });
 Object.assign(GLOBAL_KEYS, { 'C-f': () => openFind(false), 'C-h': () => openFind(true) });
@@ -3585,7 +4238,7 @@ function showPeek(seg) {
   const head = el('div', 'peek-head');
   head.append(el('span', '', `Changed since the last save · ${seg.file}`));
   const revert = el('button', '', '↶ Revert block');
-  revert.title = 'Put this block back as it was at the last save (Ctrl+Z undoes)';
+  revert.title = 'Put this block back as it was at the last save (Ctrl+Alt+Backspace; Ctrl+Z undoes)';
   revert.onclick = () => {
     const orig = seg.src;
     hidePeek();
@@ -3719,10 +4372,10 @@ function diffOff() {
   $('#diffnav').hidden = true;
   $('#diffbase').hidden = true;
   $('#diffbtn').setAttribute('aria-pressed', 'false');
-  $('#diffbtn').title = 'Show what changed (read-only while on)';
-  const y = window.scrollY;
+  $('#diffbtn').title = 'Show what changed, Ctrl+Alt+V (read-only while on)';
+  const y = viewAnchor();
   render();
-  window.scrollTo(0, y);
+  restoreAnchor(y);
 }
 
 // Leave the diff view if it is on (the page is rendered again from the
@@ -3740,6 +4393,7 @@ function diffStep(d) {
   if (DIFF.marks[DIFF.cur]) DIFF.marks[DIFF.cur].classList.remove('diff-current');
   DIFF.cur = (DIFF.cur + d + DIFF.marks.length) % DIFF.marks.length;
   const e = DIFF.marks[DIFF.cur];
+  navPush();
   e.classList.add('diff-current');
   e.scrollIntoView({ block: 'center', behavior: 'smooth' });
   $('#diffcount').textContent = `${DIFF.cur + 1} of ${DIFF.marks.length}`;
@@ -3750,11 +4404,11 @@ ACTIONS.diff = () => {
   if (DIFF.on) return diffOff();
   DIFF.on = true;
   $('#diffbtn').setAttribute('aria-pressed', 'true');
-  $('#diffbtn').title = 'Leave the diff view';
+  $('#diffbtn').title = 'Leave the diff view (Ctrl+Alt+V)';
   $('#diffbase').hidden = false;
   diffOn();
 };
-$('#diffbase').onchange = () => { if (DIFF.on) { const y = scrollY; render(); scrollTo(0, y); DIFF.on = true; diffOn(); } };
+$('#diffbase').onchange = () => { if (DIFF.on) { const y = viewAnchor(); render(); restoreAnchor(y); DIFF.on = true; diffOn(); } };
 $('#diffprev').onclick = () => diffStep(-1);
 $('#diffnext').onclick = () => diffStep(1);
 // no editing while diffing
@@ -3919,23 +4573,46 @@ function gameCheckpoint(editor = null) {
   FV.lastEditor = editor;
   updateGameActions();
 }
-function setGameDraft(src) {
+// The editable fields of the window (game lines, titles, cells), in order.
+const fvFields = () => [...document.querySelectorAll('#fv-body [contenteditable=true]')];
+function setGameDraft(src, restoreFocus = false) {
+  // the window is drawn again: keep the cursor in the same field, and show
+  // which lines changed (an undo is otherwise hard to see)
+  const fields = fvFields();
+  const at = fields.indexOf(document.activeElement);
+  const before = new Map();
+  for (const f of fields) before.set(f.textContent, (before.get(f.textContent) || 0) + 1);
   FV.src = src;
   FV.games = parseGames(src);
   FV.tables = L.parseTabulars(src);
   FV.latexEdited = false;
   FV.lastEditor = null;
   showFigTab(FV.tab === 'cells' ? 'cells' : 'games');
+  if (!restoreFocus) return;
+  const now = fvFields();
+  for (const f of now) {
+    const n = before.get(f.textContent) || 0;
+    if (n) before.set(f.textContent, n - 1);
+    else { const row = f.closest('.gline, td') || f; row.classList.add('fv-flash'); setTimeout(() => row.classList.remove('fv-flash'), 900); }
+  }
+  const f = at >= 0 && now[Math.min(at, now.length - 1)];
+  if (f) {
+    f.focus();
+    const r = document.createRange(); r.selectNodeContents(f); r.collapse(false);
+    getSelection().removeAllRanges(); getSelection().addRange(r);
+  }
 }
 function undoGame() {
-  if (!FV.undo.length) return;
+  if (!FV.undo.length) { toast('Nothing to undo'); return; }
   FV.redo.push(figureWithEdits());
-  setGameDraft(FV.undo.pop());
+  setGameDraft(FV.undo.pop(), true);
+  toast('Undone (in this window)');
 }
 function redoGame() {
-  if (!FV.redo.length) return;
+  if (!FV.redo.length) { toast('Nothing to redo'); return; }
   FV.undo.push(figureWithEdits());
-  setGameDraft(FV.redo.pop());
+  setGameDraft(FV.redo.pop(), true);
+  toast('Redone (in this window)');
 }
 function changeGameSource(transform) {
   const current = figureWithEdits();
@@ -4045,61 +4722,246 @@ function gameChangeColor(line, color) {
   showFigTab('games');
 }
 
-function renderGames(body) {
-  const grid = el('div', 'games-grid');
-  FV.games.forEach((g, gi) => {
-    const box = el('div', 'game' + (g.kind === 'proc' ? ' gproc' : ''));
-    const head = el('div', 'game-title');
-    if (g.title !== null) {
-      const t = el('span'); t.contentEditable = 'true';
-      renderTokens(L.tokenize(g.title), t, {});
-      t.addEventListener('input', () => { gameCheckpoint(t); g.newTitle = ser(t); });
-      t.addEventListener('blur', () => { FV.lastEditor = null; });
-      head.append(t);
-    } else head.append(el('span', 'small', g.kind === 'proc' ? 'procedure' : g.env));
-    const actions = el('span', 'game-actions');
-    const handle = el('span', 'game-drag', 'Drag');
-    handle.title = 'Drag a game onto another panel to move it; unsafe LaTeX boundaries block moving';
+// A reading preview of a figure made of games, from its source: shown in the
+// paper after Apply, until the next build brings the typeset picture.  Only
+// when games and layout (minipages, \hfill, the caption) are all there is.
+function previewGames(src) {
+  const games = parseGames(src);
+  if (!games.length) return null;
+  let rest = src;
+  for (const g of [...games].reverse()) rest = rest.slice(0, g.start) + rest.slice(g.end);
+  for (let m; (m = /\\caption\s*(\[[^\]]*\])?\s*\{/.exec(rest));) {
+    const e = L.groupEnd(rest, m.index + m[0].length - 1);
+    if (e < 0) return null;
+    rest = rest.slice(0, m.index) + rest.slice(e);
+  }
+  rest = rest.replace(/%[^\n]*/g, '')
+    .replace(/\\(begin|end)\{(figure\*?|minipage|center|subfigure|algorithm\*?)\}(\s*\[[^\]]*\])*(\s*\{[^{}]*\})*/g, '')
+    .replace(new RegExp('\\\\(begin|end)\\{(' + ['multicols', ...multicolEnvs()].map((e) => e.replace(/\*/g, '\\*')).join('|') + ')\\}(\\s*\\{\\d+\\})?', 'g'), '')
+    .replace(/\\(hfill|centering|quad|qquad|noindent|par|small|footnotesize|scriptsize|medskip|smallskip|bigskip|columnbreak|gamebreak|null)(?![A-Za-z])|\\mbox\{\}|\\\\/g, '')
+    .replace(/\\([hv]space\*?|label)\s*\{[^{}]*\}/g, '');
+  if (rest.trim()) return null;
+  const wrap = el('div', 'game-preview');
+  const math = (tex, into) => {
+    try { katex.render(tex, into, { throwOnError: false, macros: { ...katexMacros(), ...CRYPTOCODE_MACROS } }); }
+    catch (e) { into.textContent = tex; }
+  };
+  for (const g of games) {
+    const box = el('div', 'gp-game');
+    if (g.title) { const t = el('div', 'gp-title'); renderTokens(L.tokenize(g.title), t, {}); box.append(t); }
+    let depth = 0, no = 0;
+    for (const l of g.lines) {
+      if (g.kind === 'proc') {
+        if (!l.content.trim()) continue;
+        const row = el('div', 'gp-line'); math(l.content.replace(/\\\\\s*$/, ''), row); box.append(row);
+        continue;
+      }
+      if (l.raw) continue;   // blank lines and comments print nothing
+      if (BLOCK_CLOSE.has(l.cmd) || l.cmd === 'ElsIf' || l.cmd === 'Else') depth = Math.max(0, depth - 1);
+      const row = el('div', 'gp-line');
+      row.append(el('span', 'gp-no', l.cmd === 'Statex' ? '' : ++no + ':'));
+      const body = el('span', 'gp-body');
+      body.style.paddingLeft = (depth * 1.2) + 'em';
+      if (KW[l.kind]) body.append(el('b', '', KW[l.kind] + ' '));
+      const mark = colorMarked(l);
+      const text = el('span', mark ? 'gp-mark' : '');
+      if (mark) text.dataset.mark = mark[1];
+      renderTokens(L.tokenize(mark ? mark[2] : l.content), text, {});
+      body.append(text);
+      if (/^(If|ElsIf)$/.test(l.cmd)) body.append(el('b', '', ' then'));
+      if (/^(For|ForAll|While)$/.test(l.cmd)) body.append(el('b', '', ' do'));
+      const c = /\\Comment\s*\{([^]*)\}/.exec(l.suffix || '');
+      if (c) { const cm = el('span', 'gp-comment', '▹ '); renderTokens(L.tokenize(c[1]), cm, {}); body.append(cm); }
+      row.append(body);
+      box.append(row);
+      if (BLOCK_OPEN.has(l.cmd) || l.cmd === 'ElsIf' || l.cmd === 'Else') depth++;
+    }
+    wrap.append(box);
+  }
+  // laid out as in the paper: a grid of cells, a cell a stack of games
+  const lay = L.gameLayout(src, games, multicolEnvs());
+  if (lay.ok && lay.cols > 1) {
+    const boxes = [...wrap.children];
+    wrap.textContent = '';
+    wrap.classList.add('gp-grid');
+    wrap.style.gridTemplateColumns = `repeat(${lay.cols}, minmax(0, max-content))`;
+    for (const row of lay.rows) for (const cell of row) {
+      const c = el('div', 'gp-cell');
+      for (const gi of cell) c.append(boxes[gi]);
+      wrap.append(c);
+    }
+  }
+  return wrap;
+}
+
+// Environments of the paper that open multicols (\newenvironment{games}[1]{…
+// \begin{multicols}{#1}…}): their argument is a number of columns.
+function multicolEnvs() {
+  const out = new Set();
+  for (const f of Object.values(FILES)) {
+    for (const m of (f.text || '').matchAll(/\\(?:re)?newenvironment\*?\s*\{([A-Za-z*]+)\}/g))
+      if (/\\begin\{multicols\}/.test(f.text.slice(m.index, m.index + 400))) out.add(m[1]);
+  }
+  return [...out];
+}
+// Change the arrangement of the games: `change(rows, cols)` edits the rows
+// (cells of game indexes) in place and returns the number of columns.
+function arrangeGames(change) {
+  return changeGameSource((src, games) => {
+    const lay = L.gameLayout(src, games, multicolEnvs());
+    if (!lay.ok) { banner('The games cannot be arranged here (' + lay.reason + '); arrange them in the LaTeX tab.'); return src; }
+    const rows = lay.rows.map((r) => r.map((c) => c.slice()));
+    const cols = change(rows, lay.cols);
+    if (!cols) return src;
+    return L.writeGameLayout(src, games, lay, cols, rows);
+  });
+}
+function findGame(rows, gi) {
+  for (let r = 0; r < rows.length; r++)
+    for (let c = 0; c < rows[r].length; c++) {
+      const k = rows[r][c].indexOf(gi);
+      if (k >= 0) return { r, c, k };
+    }
+  return null;
+}
+// put game gi in row r, column c, at place k of its stack (the end if omitted);
+// a row past the last is a new one
+function placeGame(gi, r, c, k) {
+  return arrangeGames((rows, cols) => {
+    const from = findGame(rows, gi);
+    if (!from) return 0;
+    while (rows.length <= r) rows.push(Array.from({ length: cols }, () => []));
+    const cell = rows[r][c];
+    if (!cell) return 0;
+    rows[from.r][from.c].splice(from.k, 1);
+    if (cell === rows[from.r][from.c] && k !== undefined && k > from.k) k--;
+    cell.splice(k === undefined ? cell.length : Math.max(0, Math.min(k, cell.length)), 0, gi);
+    return cols;
+  });
+}
+function stepGame(gi, dr, dc) {
+  const lay = L.gameLayout(figureWithEdits(), parseGames(figureWithEdits()), multicolEnvs());
+  const at = lay.ok && findGame(lay.rows, gi);
+  if (!at) return;
+  if (dc) return placeGame(gi, at.r, at.c + dc, at.k);
+  const stack = lay.rows[at.r][at.c];
+  if (at.k + dr >= 0 && at.k + dr < stack.length) return placeGame(gi, at.r, at.c, at.k + dr + (dr > 0 ? 1 : 0));
+  if (dr < 0) return at.r > 0 && placeGame(gi, at.r - 1, at.c);
+  return placeGame(gi, at.r + 1, at.c, 0);
+}
+// another number of columns: the cells keep their order, row by row
+function setGameColumns(n) {
+  return arrangeGames((rows) => {
+    let cells = rows.flat().filter((c) => c.length);
+    if (n === 1) cells = cells.flat().map((g) => [g]);
+    rows.length = 0;
+    for (let i = 0; i < cells.length; i += n) rows.push(cells.slice(i, i + n));
+    return n;
+  });
+}
+
+function gameBox(g, gi, lay, at) {
+  const box = el('div', 'game' + (g.kind === 'proc' ? ' gproc' : ''));
+  box.dataset.game = gi;
+  const head = el('div', 'game-title');
+  if (g.title !== null) {
+    const t = el('span'); t.contentEditable = 'true';
+    renderTokens(L.tokenize(g.title), t, {});
+    t.addEventListener('input', () => { gameCheckpoint(t); g.newTitle = ser(t); });
+    t.addEventListener('blur', () => { FV.lastEditor = null; });
+    head.append(t);
+  } else head.append(el('span', 'small', g.kind === 'proc' ? 'procedure' : g.env));
+  const actions = el('span', 'game-actions');
+  const action = (label, title, fn, cls = '') => {
+    const b = el('button', cls, label); b.type = 'button'; b.title = title; b.setAttribute('aria-label', title);
+    b.onclick = fn; actions.append(b); return b;
+  };
+  if (at) {
+    const rows = lay.rows, stack = rows[at.r][at.c];
+    action('←', 'Move to the cell on the left', () => stepGame(gi, 0, -1), 'gmove').disabled = at.c === 0;
+    action('→', 'Move to the cell on the right', () => stepGame(gi, 0, 1), 'gmove').disabled = at.c >= lay.cols - 1;
+    action('↑', 'Move up: above the game over it, or into the row above', () => stepGame(gi, -1, 0), 'gmove').disabled = at.r === 0 && at.k === 0;
+    action('↓', 'Move down: below the game under it, or into the row below (a new row after the last)', () => stepGame(gi, 1, 0), 'gmove')
+      .disabled = at.r === rows.length - 1 && stack.length === 1 && rows[at.r].every((c, k) => k === at.c || !c.length);
+    const handle = el('span', 'game-drag', '⠿');
+    handle.title = 'Drag onto a cell of the grid (or onto a game, to go above it)';
     handle.draggable = true;
     handle.addEventListener('dragstart', (e) => {
       FV.dragIndex = gi;
       e.dataTransfer.effectAllowed = 'move';
       e.dataTransfer.setData('text/plain', String(gi));
+      box.classList.add('dragging');
     });
-    handle.addEventListener('dragend', () => { FV.dragIndex = -1; });
-    const action = (label, title, fn) => {
-      const b = el('button', '', label); b.type = 'button'; b.title = title;
-      b.onclick = fn; actions.append(b); return b;
-    };
-    action('Left', 'Move game to previous position if source is a safe sibling', () => gameMove(gi, gi - 1)).disabled = gi === 0;
-    action('Right', 'Move game to next position if source is a safe sibling', () => gameMove(gi, gi + 1)).disabled = gi === FV.games.length - 1;
-    action('Copy', 'Duplicate this game block', () => gameDuplicate(gi)).disabled = g.kind !== 'algo' || g.env !== 'gameenv';
-    action('Delete', 'Remove this game block', () => gameRemove(gi));
+    handle.addEventListener('dragend', () => { FV.dragIndex = -1; box.classList.remove('dragging'); });
     actions.append(handle);
-    head.append(actions);
-    box.addEventListener('dragover', (e) => { if (FV.dragIndex >= 0) e.preventDefault(); });
+    // a game dropped on this one goes above it, in its cell
+    box.addEventListener('dragover', (e) => { if (FV.dragIndex >= 0 && FV.dragIndex !== gi) { e.preventDefault(); e.stopPropagation(); box.classList.add('drop-above'); } });
+    box.addEventListener('dragleave', () => box.classList.remove('drop-above'));
     box.addEventListener('drop', (e) => {
-      e.preventDefault();
-      const from = FV.dragIndex;
-      FV.dragIndex = -1;
-      if (from >= 0) gameMove(from, gi);
+      e.preventDefault(); e.stopPropagation();
+      box.classList.remove('drop-above');
+      const from = FV.dragIndex; FV.dragIndex = -1;
+      if (from >= 0 && from !== gi) placeGame(from, at.r, at.c, at.k);
     });
-    box.append(head);
-    let depth = 0;
-    g.lines.forEach((l, li) => {
-      if (g.kind === 'proc') { box.append(procLine(g, l, li)); return; }
-      // the empty lines a body starts and ends with (\begin{...}\n ... \n\end): not shown
-      if (l.raw && !l.prefix.trim() && (li === 0 || li === g.lines.length - 1)) return;
-      if (BLOCK_CLOSE.has(l.cmd) || l.cmd === 'ElsIf' || l.cmd === 'Else') depth = Math.max(0, depth - 1);
-      box.append(algoLine(g, l, li, depth));
-      if (BLOCK_OPEN.has(l.cmd) || l.cmd === 'ElsIf' || l.cmd === 'Else') depth++;
-    });
-    grid.append(box);
+  }
+  action('Copy', 'Duplicate this game block', () => gameDuplicate(gi)).disabled = g.kind !== 'algo' || g.env !== 'gameenv';
+  action('Delete', 'Remove this game block', () => gameRemove(gi));
+  head.append(actions);
+  box.append(head);
+  let depth = 0, no = 0;
+  g.lines.forEach((l, li) => {
+    if (g.kind === 'proc') { box.append(procLine(g, l, li)); return; }
+    // the empty lines a body starts and ends with (\begin{...}\n ... \n\end): not shown
+    if (l.raw && !l.prefix.trim() && (li === 0 || li === g.lines.length - 1)) return;
+    if (BLOCK_CLOSE.has(l.cmd) || l.cmd === 'ElsIf' || l.cmd === 'Else') depth = Math.max(0, depth - 1);
+    // numbered as in the paper: \Statex and comments get no number
+    box.append(algoLine(g, l, li, depth, l.raw || l.cmd === 'Statex' ? '' : String(++no)));
+    if (BLOCK_OPEN.has(l.cmd) || l.cmd === 'ElsIf' || l.cmd === 'Else') depth++;
   });
-  body.append(grid);
+  return box;
+}
+
+function renderGames(body) {
+  const src = figureWithEdits();
+  const lay = L.gameLayout(src, parseGames(src), multicolEnvs());
+  if (!lay.ok) {
+    const grid = el('div', 'games-grid');
+    FV.games.forEach((g, gi) => grid.append(gameBox(g, gi, lay, null)));
+    body.append(el('p', 'small', 'These games cannot be arranged here (' + lay.reason + '): arrange them in the LaTeX tab.'), grid);
+  } else {
+    const bar = el('div', 'games-layout');
+    bar.append(el('span', 'small', 'Columns'));
+    for (let n = 1; n <= 4; n++) {
+      const b = el('button', '', String(n)); b.type = 'button';
+      b.title = n === 1 ? 'One game under another' : `A grid of ${n} columns (minipages side by side)`;
+      b.setAttribute('aria-pressed', String(lay.cols === n));
+      b.onclick = () => { if (lay.cols !== n) setGameColumns(n); };
+      bar.append(b);
+    }
+    bar.append(el('span', 'small', 'Drag ⠿ or use the arrows to place games in the grid; a cell can hold several games, one under the other.'));
+    body.append(bar);
+    const grid = el('div', 'games-grid games-cells');
+    grid.style.gridTemplateColumns = `repeat(${lay.cols}, minmax(0, 1fr))`;
+    const cell = (r, c, games, fresh) => {
+      const d = el('div', 'gcell' + (games.length ? '' : ' empty') + (fresh ? ' fresh' : ''));
+      if (!games.length) d.append(el('div', 'gcell-hint', fresh ? 'Drop here: a new row' : 'Empty: drop a game here'));
+      for (const gi of games) d.append(gameBox(FV.games[gi], gi, lay, { r, c, k: games.indexOf(gi) }));
+      d.addEventListener('dragover', (e) => { if (FV.dragIndex >= 0) { e.preventDefault(); d.classList.add('drop'); } });
+      d.addEventListener('dragleave', (e) => { if (!d.contains(e.relatedTarget)) d.classList.remove('drop'); });
+      d.addEventListener('drop', (e) => {
+        e.preventDefault(); d.classList.remove('drop');
+        const from = FV.dragIndex; FV.dragIndex = -1;
+        if (from >= 0) placeGame(from, r, c);
+      });
+      return d;
+    };
+    lay.rows.forEach((row, r) => row.forEach((games, c) => grid.append(cell(r, c, games, false))));
+    if (lay.cols > 1) for (let c = 0; c < lay.cols; c++) grid.append(cell(lay.rows.length, c, [], true));
+    body.append(grid);
+  }
   body.append(el('p', 'small', 'Add: insert common statements, conditions and loops. Up/Down or Alt+Up/Down: reorder safe statements. ' +
     'Mark: coloured xcolor boxes. Ctrl+Z/Ctrl+Shift+Z: undo/redo; Ctrl+Enter: Apply; Ctrl+S: Apply and Save. ' +
-    'Drag game headers to reorder compatible sibling gameenv blocks. Changes are not written until Apply, then Save.'));
+    'Changes are not written until Apply, then Save.'));
 }
 
 function gameMoveLine(g, index, offset) {
@@ -4122,10 +4984,10 @@ function gameMoveLine(g, index, offset) {
   return true;
 }
 
-function algoLine(g, l, li, depth) {
+function algoLine(g, l, li, depth, no = String(li + 1)) {
   const row = el('div', 'gline');
   row.dataset.game = String(FV.games.indexOf(g)); row.dataset.line = String(li);
-  row.append(el('span', 'gno', String(li + 1)));
+  row.append(el('span', 'gno', no));
   const pad = el('span'); pad.style.width = (depth * 1.4) + 'em'; pad.style.flex = 'none';
   row.append(pad);
   if (l.raw) {
@@ -4310,13 +5172,18 @@ function applyFigure() {
   if (seg.edit && seg.parts.caption !== undefined) { seg.edit.textContent = ''; renderTokens(L.tokenize(seg.parts.caption), seg.edit, {}); }
   // the picture shows the old source until the next build: a table can be
   // previewed now; a figure is dimmed, with a note, so it does not mislead
-  const img = seg.el && seg.el.querySelector(':scope > div:first-child > img');
-  if (img) {
-    const live = seg.kind === 'table' ? previewTabular(src) : null;
-    if (live) img.replaceWith(live);
-    else if (!img.classList.contains('stale')) {
-      img.classList.add('stale');
-      img.after(el('div', 'small stale-note', 'Changed: the picture updates after the next save'));
+  // (a preview put there by an earlier Apply is replaced too)
+  const box = seg.el && seg.el.querySelector(':scope > div:first-child');
+  const shown = box && box.querySelector(':scope > img, :scope > .tabular-preview, :scope > .game-preview, :scope > div.small:not(.stale-note)');
+  if (shown) {
+    const live = seg.kind === 'table' ? previewTabular(src) : previewGames(src);
+    for (const n of box.querySelectorAll(':scope > .stale-note')) n.remove();
+    if (live) {
+      shown.replaceWith(live);
+      if (seg.kind === 'figure') live.after(el('div', 'small stale-note', 'Preview of your edit: the typeset picture comes back after the next save'));
+    } else {
+      if (shown.tagName === 'IMG') shown.classList.add('stale');
+      shown.after(el('div', 'small stale-note', 'Changed: the picture updates after the next save'));
     }
   }
   markEdited();
@@ -4355,6 +5222,8 @@ $('#fv-close').onclick = () => closeFigure();
 // Ctrl+Z/Y in Games operates on game drafts, not the document history.
 document.addEventListener('keydown', (e) => {
   if ($('#figview').hidden || !(e.ctrlKey || e.metaKey) || e.altKey) return;
+  // the formula editor over the window keeps its own keys (undo in its text, Ctrl+Enter applies the formula)
+  if (e.target.closest && e.target.closest('#drawer')) return;
   const key = e.key.toLowerCase();
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault(); e.stopPropagation(); applyFigure();
@@ -4447,7 +5316,7 @@ const ACTION_DEFS = [
   ['bold', 'Bold (\\textbf)', 'text', ['C-b'], () => wrap('\\textbf{', 'strong')],
   ['emph', 'Emphasis (\\emph)', 'text', ['C-i'], () => wrap('\\emph{', 'em')],
   ['italic', 'Italic (\\textit)', 'text', ['C-I'], () => wrap('\\textit{', 'em')],
-  ['math', 'Inline maths (the selection, or a new formula)', 'text', ['C-m', '$'], () => mathAtSelection()],
+  ['math', 'Inline maths (the selection, or a new formula)', 'text', ['C-m'], () => mathAtSelection()],
   ['display', 'Displayed equation', 'text', ['C-M'], () => insertMath(true)],
   ['cite', 'Cite (search)', 'text', ['C-M-c'], () => citePalette()],
   ['ref', 'Reference (search)', 'text', ['C-M-r'], () => refPalette()],
@@ -4455,7 +5324,36 @@ const ACTION_DEFS = [
   ['section', 'Section heading at the cursor', 'text', ['C-M-1'], () => headingAtCaret('section')],
   ['subsection', 'Subsection heading at the cursor', 'text', ['C-M-2'], () => headingAtCaret('subsection')],
   ['paragraph', '\\paragraph heading at the cursor', 'text', ['C-M-3'], () => headingAtCaret('paragraph')],
-  ['splitsection', 'Split section at the cursor', 'text', [], () => splitSectionAtCaret()],
+  ['splitsection', 'Split section at the cursor', 'text', ['C-M-s'], () => splitSectionAtCaret()],
+  ['newpara', 'New paragraph at the cursor', 'text', [], () => insertBreak()],
+  ['addblock', 'Add a block after the one at the cursor', 'text', ['C-M-a'], () => {
+    const s = caretSeg();
+    if (s) addMenu(s, s.el || s.edit); else toast('Put the cursor in the text first', 'error');
+  }],
+  ['delblock', 'Delete the heading at the cursor', 'text', ['C-M-x'], () => {
+    const s = headingSegAtCaret();
+    if (s && confirm('Delete this heading?' + labelWarning(s))) structural(() => removeSeg(s));
+  }],
+  ['moveup', 'Move the section at the cursor up', 'text', ['C-M-ArrowUp'], () => { const s = headingSegAtCaret(); if (s) moveSection(s, -1); }],
+  ['movedown', 'Move the section at the cursor down', 'text', ['C-M-ArrowDown'], () => { const s = headingSegAtCaret(); if (s) moveSection(s, 1); }],
+  ['combine', 'Combine the section at the cursor with the previous one', 'text', ['C-M-j'], () => {
+    const s = headingSegAtCaret();
+    if (s && confirm('Combine this section with the previous one?' + labelWarning(s))) structural(() => removeSeg(s));
+  }],
+  ['revertblock', 'Revert the block at the cursor to the last save', 'text', ['C-M-Backspace'], () => {
+    const s = caretSeg();
+    if (!s) return toast('Put the cursor in the text first', 'error');
+    if (!s.touched && segSource(s, []) === s.src) return toast('This block has no unsaved changes');
+    const orig = s.src;
+    structural(() => { s.src = orig; });
+    markEdited();
+    toast('Block reverted to the last save', 'ok');
+  }],
+  ['figedit', 'Open the figure or table at the cursor in the viewer', 'text', ['C-M-f'], () => {
+    const s = caretSeg();
+    if (s && (s.kind === 'figure' || s.kind === 'table')) openFigure(s);
+    else toast('Put the cursor in a figure or table for that', 'error');
+  }],
   ['colourblind', 'Colour-blind palette on or off', 'global', ['C-M-k'], () => setColourBlind(!document.documentElement.dataset.cb)],
   ['linestart', 'Start of line', 'text', ['C-a'], () => getSelection().modify('move', 'backward', 'lineboundary')],
   ['lineend', 'End of line', 'text', ['C-e'], () => getSelection().modify('move', 'forward', 'lineboundary')],
@@ -4465,7 +5363,41 @@ const ACTION_DEFS = [
   ['cut', 'Cut the region, or the line', 'text', ['M-w'], () => cutRegionOrLine()],
   ['duplicate', 'Duplicate the region, or the line', 'text', ['C-p'], () => duplicate()],
   ['expand', 'Expand the selection', 'text', ['C-+', 'C-='], () => expandRegion()],
+  // the chrome: every button of the bars and the ☰ menu has a key too
+  ['menu', 'Open or close the ☰ menu', 'global', ['C-M-m'], () => $('#menubtn').click()],
+  ['open', 'Open a paper directory…', 'global', ['C-M-o'], () => $('#openbtn').click()],
+  ['history', 'Save history…', 'global', ['C-M-t'], () => $('#historybtn').click()],
+  ['reload', 'Reload the document from disk', 'global', ['C-M-l'], () => $('#reloadbtn').click()],
+  ['build', 'Build the PDF now', 'global', ['C-M-b'], () => $('#rebuildbtn').click()],
+  ['cleanbuild', 'Clean build (set the .aux, .bbl aside first)', 'global', ['C-M-B'], () => $('#cleanbtn').click()],
+  ['pdf', 'Open the rendered PDF', 'global', ['C-M-d'], () => $('#pdfbtn').click()],
+  ['paper', 'Paper metadata and conversion…', 'global', ['C-M-p'], () => $('#paperbtn').click()],
+  ['keys', 'Keyboard shortcuts…', 'global', ['C-M-,'], () => $('#keysbtn').click()],
+  ['help', 'Help', 'global', ['C-M-h'], () => $('#help').click()],
+  ['theme', 'Colour scheme: auto, light, dark', 'global', ['C-M-g'], () => $('#theme').click()],
+  ['cols', 'One or two columns', 'global', ['C-M-w'], () => $('#cols').click()],
+  ['textsmaller', 'Smaller paper text', 'global', ['C-M--'], () => $('#textsmaller').click()],
+  ['textbigger', 'Larger paper text', 'global', ['C-M-='], () => $('#textbigger').click()],
+  ['textreset', 'Reset the paper text size', 'global', ['C-M-0'], () => $('#textsize').click()],
+  ['diff', 'Show or leave the diff of what changed', 'global', ['C-M-v'], () => ACTIONS.diff()],
+  ['diffprev', 'Previous change in the diff', 'global', ['C-M-['], () => { if (DIFF.on) $('#diffprev').click(); }],
+  ['diffnext', 'Next change in the diff', 'global', ['C-M-]'], () => { if (DIFF.on) $('#diffnext').click(); }],
+  ['ttsopts', 'Reading speed and voice', 'global', ['C-M-u'], () => $('#ttsopts').click()],
 ];
+
+// the block the caret is in, for the block actions above
+function caretSeg() {
+  const s = getSelection();
+  if (!s.rangeCount) return null;
+  const n = s.anchorNode;
+  return n ? segOf(n.nodeType === 1 ? n : n.parentElement) : null;
+}
+function headingSegAtCaret() {
+  const seg = caretSeg();
+  if (!seg) { toast('Put the cursor in the text first', 'error'); return null; }
+  if (seg.kind !== 'heading') { toast('Put the cursor in a heading for that', 'error'); return null; }
+  return seg;
+}
 let USER_KEYS = {};
 
 function applyKeymap() {
@@ -4619,9 +5551,9 @@ async function restoreHistory(b, which) {
   if (edited.length && !confirm(`${edited.join(', ')} ${edited.length === 1 ? 'has' : 'have'} unsaved edits, which the restored version replaces (Undo brings them back). Restore?`)) return;
   snapshot();
   for (const [n, t] of Object.entries(texts)) if (FILES[n]) FILES[n].text = t;
-  const y = window.scrollY;
+  const y = viewAnchor();
   render();
-  window.scrollTo(0, y);
+  restoreAnchor(y);
   $('#historybox').hidden = true;
   const changed = Object.keys(texts).filter((n) => FILES[n] && FILES[n].text !== FILES[n].disk);
   banner((changed.length ? `Restored ${changed.join(', ')} as ${which} that save: save to keep it, or undo.` : 'The files are already as in that version.') +
@@ -4896,6 +5828,18 @@ function drawPaper() {
   refreshMissing();
   go.onclick = async () => {
     if (!(await saveMetadata(true))) return;
+    // the converter reads the files from disk, so unsaved edits would be lost
+    // from the converted copy — offer to save first, or say so explicitly
+    const dirty = editedFiles();
+    if (dirty.length) {
+      if (confirm(`You have unsaved edits in ${dirty.join(', ')}. The converter reads the files from disk, so they will NOT be in the converted document. Save them first?`)) {
+        await save();
+        const still = editedFiles();
+        if (still.length) { result.textContent = `Could not save ${still.join(', ')}; not converting.`; return; }
+      } else if (!confirm('Convert the on-disk version anyway? Your unsaved edits will not be included.')) {
+        return;
+      }
+    }
     result.textContent = 'Converting and building…';
     const send = (overwrite) => fetch('/api/convert', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
       body: JSON.stringify({ target: MD.target, anonymous: MD.anon, name: name.value, overwrite,

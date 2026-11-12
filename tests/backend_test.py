@@ -30,7 +30,7 @@ class FakeBuilder:
     def log(self, message):
         self.logs.append(message)
 
-    def request(self):
+    def request(self, clean=False):
         self.requests += 1
 
 
@@ -44,6 +44,10 @@ class BackendTest(unittest.TestCase):
             f.write('\\documentclass{article}\n\\begin{document}\nMain.\\end{document}\n')
         with open(self.other, 'w') as f:
             f.write('\\documentclass{article}\n\\begin{document}\nOther.\\end{document}\n')
+        # open_paper records the paper opened last: never in the user's config
+        recent = mock.patch.object(server, 'RECENT_FILE', os.path.join(self.tmp, 'config', 'recent.json'))
+        recent.start()
+        self.addCleanup(recent.stop)
         server.open_paper(self.main, state=self.state)
         server.ensure_state()
         server.BUILDER = FakeBuilder()
@@ -493,6 +497,109 @@ class BackendTest(unittest.TestCase):
         self.assertIn('-g', run.call_args.args[0])
         self.assertTrue(os.listdir(os.path.join(server.CACHE, 'bad-aux')))
 
+    def test_aux_truncated_in_writefile_is_retried(self):
+        builder = server.Builder.__new__(server.Builder)
+        builder.aux = {}
+        builder.auxver = 1
+        builder.state = {'state': 'idle', 'message': '', 'at': 0}
+        builder.log = lambda message: None
+        old_config = server.CONFIG
+        server.CONFIG = {'build': ['latexmk', '-pdf', 'main.tex']}
+        failed = server.subprocess.CompletedProcess([], 1,
+            stdout='! File ended while scanning use of \\@writefile.', stderr='')
+        passed = server.subprocess.CompletedProcess([], 0, stdout='', stderr='')
+        try:
+            with mock.patch('server.subprocess.run', side_effect=[failed, passed]) as run:
+                builder.build_once()
+        finally:
+            server.CONFIG = old_config
+        self.assertEqual(builder.state['state'], 'ok')
+        self.assertEqual(run.call_count, 2)
+
+    def test_clean_build_sets_build_files_aside(self):
+        for suffix in ('.aux', '.bbl', '.fdb_latexmk'):
+            with open(os.path.join(self.tmp, 'main' + suffix), 'w') as out:
+                out.write('x')
+        builder = server.Builder.__new__(server.Builder)
+        builder.log = lambda message: None
+        builder.clean_files()
+        for suffix in ('.aux', '.bbl', '.fdb_latexmk'):
+            self.assertFalse(os.path.exists(os.path.join(self.tmp, 'main' + suffix)))
+        self.assertTrue(os.path.isfile(os.path.join(self.tmp, 'main.tex')))
+        kept = os.listdir(os.path.join(server.CACHE, 'clean'))
+        self.assertEqual(len(kept), 1)
+
+    def test_main_with_documentclass_in_an_input_and_a_wrapper_edition(self):
+        folder = os.path.join(self.tmp, 'split')
+        os.makedirs(os.path.join(folder, 'sections'))
+        files = {
+            'preamble.tex': '\\documentclass{article}\n',
+            'main.tex': '\\input{preamble}\n\\begin{document}\n\\input{sections/a}\n\\end{document}\n',
+            'main-mobile.tex': '% \\documentclass{x} \\begin{document}\n\\def\\mobile{1}\n\\input{main.tex}\n',
+            'macros.tex': '\\newcommand\\x{y}\n',
+            'sections/a.tex': 'Text.\n',
+        }
+        for name, text in files.items():
+            with open(os.path.join(folder, name), 'w') as out:
+                out.write(text)
+        os.utime(os.path.join(folder, 'main.tex'), (1, 1))
+        with open(os.path.join(folder, 'main-mobile.pdf'), 'w') as out:
+            out.write('x')   # the wrapper built last still comes second
+        self.assertEqual(server.find_mains(folder), ['main.tex', 'main-mobile.tex'])
+        os.remove(os.path.join(folder, 'main.tex'))
+        self.assertEqual(server.find_mains(folder), [])
+
+    def test_class_chosen_in_an_if_of_an_input_preamble(self):
+        folder = os.path.join(self.tmp, 'editions')
+        os.makedirs(folder)
+        files = {
+            'preamble.tex': '\\newif\\ifmobile\n\\ifdefined\\swapmobile\\mobiletrue\\else\\mobilefalse\\fi\n'
+                            '\\ifmobile\n  \\documentclass[12pt]{article}\n\\else\n  \\documentclass[conference]{IEEEtran}\n\\fi\n',
+            'main.tex': '\\input{preamble}\n\\title{Two Editions}\n\\begin{document}\n\\maketitle\nText.\n\\end{document}\n',
+            'main-mobile.tex': '\\def\\swapmobile{1}\n\\input{main.tex}\n',
+        }
+        for name, text in files.items():
+            with open(os.path.join(folder, name), 'w') as out:
+                out.write(text)
+        server.open_paper(os.path.join(folder, 'main.tex'), None, self.state)
+        self.assertEqual(server.docclass(), 'IEEEtran/conference')
+        self.assertEqual(server.metadata()['extracted']['source_class'], 'IEEEtran')
+        self.assertEqual(server.metadata()['extracted']['title'], 'Two Editions')
+        server.open_paper(os.path.join(folder, 'main-mobile.tex'), None, self.state)
+        self.assertEqual(server.docclass(), 'article/12pt')
+        self.assertEqual(server.metadata()['extracted']['title'], 'Two Editions')
+        with self.assertRaisesRegex(ValueError, 'open main.tex and convert that'):
+            server.run_convert('article', False, 'x.tex', True)
+
+    def test_active_tex_decides_only_what_it_can(self):
+        t = server.convert.active_tex
+        self.assertEqual(t('\\iftrue A\\else B\\fi').replace(' ', ''), '\\iftrueA\\else\\fi')
+        self.assertIn('B', t('\\iffalse A\\else B\\fi'))
+        self.assertNotIn('A', t('\\iffalse A\\else B\\fi'))
+        both = t('\\ifpdf A\\else B\\fi')
+        self.assertIn('A', both); self.assertIn('B', both)
+        nested = t('\\newif\\ifdraft \\drafttrue\\ifdraft \\ifnum1=1 C\\else D\\fi\\else E\\fi')
+        self.assertIn('C', nested); self.assertIn('D', nested); self.assertNotIn('E', nested)
+        self.assertNotIn('U', t('\\def\\foo{}\\ifx\\foo\\undefined U\\else V\\fi'))
+        self.assertNotIn('V', t('\\ifx\\foo\\undefined U\\else V\\fi'))
+        self.assertNotIn('W', t('\\iffalse \\def\\y{} \\fi \\ifdefined\\y W\\fi'))
+
+    def test_clean_build_of_a_main_in_a_subfolder(self):
+        os.makedirs(os.path.join(self.tmp, 'sub'))
+        shutil.copy(self.main, os.path.join(self.tmp, 'sub', 'main.tex'))
+        server.open_paper(os.path.join(self.tmp, 'sub', 'main.tex'), self.tmp, self.state)
+        with open(os.path.join(self.tmp, 'sub', 'main.aux'), 'w') as out:
+            out.write('x')
+        builder = server.Builder.__new__(server.Builder)
+        builder.log = lambda message: None
+        builder.clean_files()
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, 'sub', 'main.aux')))
+
+    def test_online_bib_entities_are_escaped_inside_the_value(self):
+        bib = server.format_bib('@article{x, title = "A &amp; B", journal={J &amp; K}, year=2020}', 'k')
+        self.assertIn('title = "A \\& B",', bib)
+        self.assertIn('journal = {J \\& K},', bib)
+
     def test_multiline_aux_labels_are_not_truncated(self):
         data = ('\\newlabel{thm:one}{{1}{2}{A long title\ncontinued}{theorem.1}{}}\n'
                 '\\bibcite{a}{{12}{2026}}\n'
@@ -508,7 +615,7 @@ class BackendTest(unittest.TestCase):
     def test_chrome_app_launch(self, popen, which):
         server.open_browser('http://127.0.0.1:8765/', 'chrome-app')
         popen.assert_called_once_with(
-            ['/usr/bin/google-chrome', '--app=http://127.0.0.1:8765/'],
+            ['/usr/bin/google-chrome', '--app=http://127.0.0.1:8765/', '--class=crypto-paper-reviewer'],
             stdout=server.subprocess.DEVNULL, stderr=server.subprocess.DEVNULL)
 
 

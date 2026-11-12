@@ -82,3 +82,5 @@ second `latexmk` on the same paper while the editor is running.
   fixture-based conversion tests.
 - The README screenshots and editing GIF were recorded by driving headless
   Chrome over a built copy of `tests/fixtures/ieee-conf`.
+  `node tests/record_demos.js [name …]` re-records the GIFs of
+  `docs/demos.md` that it has scripts for (needs latexmk and ffmpeg).

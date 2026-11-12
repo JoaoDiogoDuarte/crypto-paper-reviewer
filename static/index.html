@@ -5,44 +5,65 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="token" content="__TOKEN__">
 <title>Crypto Paper Reviewer</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Crect width=%2716%27 height=%2716%27 rx=%273%27 fill=%27%230b5fcc%27/%3E%3Ctext x=%278%27 y=%2712%27 font-size=%2711%27 text-anchor=%27middle%27 fill=%27white%27 font-family=%27serif%27%3E%C2%A7%3C/text%3E%3C/svg%3E">
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <!-- One sticky block holds every bar: nothing can scroll between them. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><symbol id="i-open" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M1.75 4.25a1 1 0 0 1 1-1h3.2l1.5 1.5h5.8a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1H2.75a1 1 0 0 1-1-1z"/></symbol><symbol id="i-save" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v7.5M4.75 6.5 8 9.75l3.25-3.25M2.5 11v1.75c0 .55.45 1 1 1h9c.55 0 1-.45 1-1V11"/></symbol><symbol id="i-history" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2.6 8.6A5.5 5.5 0 1 0 4.1 4.1M2.4 2.2v2.6H5M8 5v3.2l2 1.3"/></symbol><symbol id="i-reload" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.7 2.2v2.6h-2.6"/></symbol><symbol id="i-pdf" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 1.75h5.25l3 3v9.5H4zM9 1.75v3.25h3.25M6 9h4M6 11.5h3"/></symbol><symbol id="i-build" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2.75 13.25 8.5 7.5M7 4.25l2.5-2 4.25 4.25-2 2.5z"/></symbol><symbol id="i-clean" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2.25 9.2 6.8l4.55 1.2L9.2 9.2 8 13.75 6.8 9.2 2.25 8 6.8 6.8z"/></symbol><symbol id="i-columns" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="1.75" y="2.75" width="12.5" height="10.5" rx="1.5"/><path d="M8 2.75v10.5"/></symbol><symbol id="i-paper" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M10.5 2.25l3.25 3.25L6 13.25H2.75V10zM9 3.75 12.25 7"/></symbol><symbol id="i-keys" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="4" width="13" height="8" rx="1.5"/><path d="M4 6.6h.01M6.6 6.6h.01M9.4 6.6h.01M12 6.6h.01M5 9.5h6"/></symbol><symbol id="i-auto" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5.75"/><path d="M8 2.25a5.75 5.75 0 0 1 0 11.5z" fill="currentColor"/></symbol><symbol id="i-light" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="2.75"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1.06 1.06M11.54 11.54l1.06 1.06M3.4 12.6l1.06-1.06M11.54 4.46l1.06-1.06"/></symbol><symbol id="i-dark" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13.25 9.6A5.75 5.75 0 1 1 6.4 2.75a4.6 4.6 0 0 0 6.85 6.85z"/></symbol><symbol id="i-cb" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8s-2.5 4.5-6.5 4.5S1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2"/></symbol><symbol id="i-help" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6"/><path d="M6.3 6.3a1.8 1.8 0 1 1 2.5 1.7c-.5.2-.8.6-.8 1.1v.3M8 11.3h.01"/></symbol><symbol id="i-find" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="7" cy="7" r="4.25"/><path d="M10.2 10.2l3.3 3.3"/></symbol><symbol id="i-undo" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 6.5h5.5a3 3 0 0 1 0 6H7M6.75 4.25 4.5 6.5l2.25 2.25"/></symbol><symbol id="i-redo" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 6.5H6a3 3 0 0 0 0 6h3M9.25 4.25 11.5 6.5 9.25 8.75"/></symbol><symbol id="i-split" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="4.25" cy="4.5" r="1.75"/><circle cx="4.25" cy="11.5" r="1.75"/><path d="M5.8 5.4 13.5 11.5M5.8 10.6 13.5 4.5"/></symbol><symbol id="i-close" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4l8 8M12 4l-8 8"/></symbol><symbol id="i-prev" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3.5 5.5 8l4.5 4.5"/></symbol><symbol id="i-next" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5 10.5 8 6 12.5"/></symbol><symbol id="i-back" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13 8H3.5M7.5 4 3.5 8l4 4"/></symbol><symbol id="i-fwd" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h9.5M8.5 4l4 4-4 4"/></symbol><symbol id="i-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 6.5 8 10l3.5-3.5"/></symbol><symbol id="i-menu" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2.75 4.25h10.5M2.75 8h10.5M2.75 11.75h10.5"/></symbol><symbol id="i-more" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8h.01M8 8h.01M12.5 8h.01" stroke-width="2.2"/></symbol><symbol id="i-heading" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 3v10M10.5 3v10M3.5 8h7"/></symbol></svg>
 <div id="chrome">
 <header id="bar">
+  <span class="group navgroup">
+    <button id="navback" title="Back (Alt+←): where you were before following a reference, a box warning or a change" aria-label="Back" disabled><svg class="ic" aria-hidden="true"><use href="#i-back"/></svg></button>
+    <button id="navfwd" title="Forward (Alt+→)" aria-label="Forward" disabled><svg class="ic" aria-hidden="true"><use href="#i-fwd"/></svg></button>
+  </span>
   <span id="title-wrap"><span id="title">Crypto Paper Reviewer</span><span id="sub"><span id="where" title="The main file being edited"></span><span id="dirty"></span><span id="build" aria-live="polite"></span></span></span>
   <span class="group">
-    <button id="openbtn" title="Open a paper directory" aria-label="Open a paper"><i>⌂</i> Open</button>
-    <button id="save" title="Save edited files (Ctrl+S)" aria-label="Save"><i>⤓</i> Save</button>
-    <button id="historybtn" title="Earlier versions: every save keeps the text it replaced" aria-label="History"><i>⟲</i> History</button>
-    <button id="reloadbtn" title="Reload the document from disk (unsaved edits are kept unless you confirm)" aria-label="Reload from disk"><i>↻</i> Reload</button>
-    <button id="pdfbtn" title="Open the rendered PDF" aria-label="Open the PDF"><i>⎙</i> PDF</button>
+    <button id="save" title="Save edited files (Ctrl+S)" aria-label="Save"><svg class="ic" aria-hidden="true"><use href="#i-save"/></svg> Save</button>
   </span>
   <span class="group" id="ttsbar">
-    <button id="play" aria-label="Play or resume reading" title="Read aloud from the sentence at the cursor (Alt+R)"><i>▶</i> Read</button>
-    <button id="tts-prev" aria-label="Previous sentence" title="Previous sentence (Ctrl+Alt+Left)"><i>«</i> Prev</button>
-    <button id="tts-next" aria-label="Next sentence" title="Next sentence (Ctrl+Alt+Right)"><i>»</i> Next</button>
-    <button id="pause" aria-label="Pause or resume reading" title="Pause or resume (Alt+P)"><i>❚❚</i> Pause</button>
-    <button id="stop" aria-label="Stop reading" title="Stop (Alt+S)"><i>■</i> Stop</button>
-    <select id="rate" aria-label="Reading speed" title="Speed">
+    <button id="play" aria-label="Play or resume reading" title="Read aloud from the sentence at the cursor (Alt+R)"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 2.8v10.4L13 8z"/></svg> <span class="label">Read</span></button>
+    <button id="tts-prev" aria-label="Previous sentence" title="Previous sentence (Ctrl+Alt+Left)"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3h2v10H3zM13.5 3v10L6 8z"/></svg> Prev</button>
+    <button id="pause" aria-label="Pause or resume reading" title="Pause or resume (Alt+P)"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 3h3v10H4zM9 3h3v10H9z"/></svg> <span class="label">Pause</span></button>
+    <button id="tts-next" aria-label="Next sentence" title="Next sentence (Ctrl+Alt+Right)"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M11 3h2v10h-2zM2.5 3v10L10 8z"/></svg> Next</button>
+    <button id="stop" aria-label="Stop reading" title="Stop (Alt+S)"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9" rx="1"/></svg> Stop</button>
+    <button id="ttsopts" data-pop="ttspop" title="Reading speed and voice (Ctrl+Alt+U)" aria-label="Reading speed and voice"><svg class="ic" aria-hidden="true"><use href="#i-chevron"/></svg></button>
+    <div class="popover" id="ttspop" hidden>
+      <label class="menurow"><span class="menulabel">Speed</span><select id="rate" aria-label="Reading speed" title="Speed">
       <option value="0.8">0.8×</option><option value="1" selected>1×</option>
       <option value="1.2">1.2×</option><option value="1.4">1.4×</option><option value="1.7">1.7×</option>
-    </select>
-    <select id="voice" aria-label="Reading voice" title="Voice"></select>
-    <span id="tts-state" aria-live="polite">Ready</span>
+    </select></label>
+      <label class="menurow"><span class="menulabel">Voice</span><select id="voice" aria-label="Reading voice" title="Voice"></select></label>
+      <div class="menurow"><span class="menulabel">State</span><span id="tts-state" aria-live="polite">Ready</span></div>
+    </div>
   </span>
   <span class="group">
-    <select id="mainsel" title="Document of this project" hidden></select>
-    <button id="cols" title="Switch between one and two columns" aria-label="Two columns" aria-pressed="false"><i>◫</i> 2 columns</button>
-    <button id="paperbtn" title="Metadata and conversion (source fields are detected automatically)" aria-label="Paper metadata and conversion"><i>✎</i> Paper</button>
-    <button id="keysbtn" title="Keyboard shortcuts: see and change them" aria-label="Keys"><i>⌨</i> Keys</button>
-    <button id="theme" title="Colour scheme: follow the system, light or dark" aria-label="Colour scheme">Auto</button>
-    <button id="cbmode" title="Colour-blind friendly colours for changes and marks" aria-label="Colour-blind mode" aria-pressed="false"><i>◑</i> CB</button>
-    <button id="help" title="Help" aria-label="Help"><i>?</i> Help</button>
+    <button id="pdfbtn" title="Open the rendered PDF (Ctrl+Alt+D)" aria-label="Open the PDF"><svg class="ic" aria-hidden="true"><use href="#i-pdf"/></svg> PDF</button>
+    <button id="menubtn" data-pop="mainmenu" title="Menu: open, history, build, layout, settings, help (Ctrl+Alt+M)" aria-label="Main menu"><svg class="ic" aria-hidden="true"><use href="#i-menu"/></svg></button>
+    <div class="popover menu" id="mainmenu" hidden role="menu">
+      <select id="mainsel" title="Document of this project" hidden></select>
+      <button id="openbtn" title="Open a paper directory (Ctrl+Alt+O)" aria-label="Open a paper"><svg class="ic" aria-hidden="true"><use href="#i-open"/></svg> Open…</button>
+      <button id="historybtn" title="Earlier versions: every save keeps the text it replaced (Ctrl+Alt+T)" aria-label="History"><svg class="ic" aria-hidden="true"><use href="#i-history"/></svg> History…</button>
+      <button id="reloadbtn" title="Reload the document from disk, Ctrl+Alt+L (unsaved edits are kept unless you confirm)" aria-label="Reload from disk"><svg class="ic" aria-hidden="true"><use href="#i-reload"/></svg> Reload from disk</button>
+      <hr>
+      <button id="rebuildbtn" title="Build the PDF again now (Ctrl+Alt+B)" aria-label="Rebuild the PDF"><svg class="ic" aria-hidden="true"><use href="#i-build"/></svg> Build the PDF now</button>
+      <button id="cleanbtn" title="Clean build, Ctrl+Alt+Shift+B: set aside the .aux, .bbl and other build files, then build from scratch (fixes a damaged .aux)" aria-label="Clean build"><svg class="ic" aria-hidden="true"><use href="#i-clean"/></svg> Clean build</button>
+      <hr>
+      <div class="menurow"><span class="menulabel">Text size</span><span class="textsize" role="group" aria-label="Text size of the paper">
+      <button id="textsmaller" title="Smaller paper text, Ctrl+Alt+- (the toolbar keeps its size)" aria-label="Smaller text">A−</button>
+      <button id="textsize" title="Paper text size: click to reset (Ctrl+Alt+0)" aria-label="Reset text size">100%</button>
+      <button id="textbigger" title="Larger paper text, Ctrl+Alt+= (the toolbar keeps its size)" aria-label="Larger text">A+</button>
+    </span></div>
+      <button id="cols" data-stay title="Switch between one and two columns (Ctrl+Alt+W)" aria-label="Two columns" aria-pressed="false"><svg class="ic" aria-hidden="true"><use href="#i-columns"/></svg> 2 columns</button>
+      <button id="theme" data-stay title="Colour scheme: follow the system, light or dark (Ctrl+Alt+G)" aria-label="Colour scheme">Auto</button>
+      <button id="cbmode" data-stay title="Colour-blind friendly colours for changes and marks" aria-label="Colour-blind mode" aria-pressed="false"><svg class="ic" aria-hidden="true"><use href="#i-cb"/></svg> Colour-blind colours</button>
+      <hr>
+      <button id="paperbtn" title="Metadata and conversion, Ctrl+Alt+P (source fields are detected automatically)" aria-label="Paper metadata and conversion"><svg class="ic" aria-hidden="true"><use href="#i-paper"/></svg> Paper…</button>
+      <button id="keysbtn" title="Keyboard shortcuts: see and change them (Ctrl+Alt+,)" aria-label="Keys"><svg class="ic" aria-hidden="true"><use href="#i-keys"/></svg> Keys…</button>
+      <button id="help" title="Help (Ctrl+Alt+H)" aria-label="Help"><svg class="ic" aria-hidden="true"><use href="#i-help"/></svg> Help</button>
+    </div>
   </span>
 </header>
 <nav id="toolbar" aria-label="Editing">
@@ -56,22 +77,27 @@
   <button data-act="ref" title="Reference a section, theorem, figure, table or equation (Ctrl+Alt+R)" aria-label="Reference"><i>→#</i> Ref</button>
   <button data-act="latex" title="Insert any LaTeX (Ctrl+\)" aria-label="LaTeX"><i>\{}</i> LaTeX</button>
   <span class="sep"></span>
-  <button data-act="section" title="Section heading at the cursor (Ctrl+Alt+1)" aria-label="Section"><i>§</i> Section</button>
-  <button data-act="subsection" title="Subsection heading at the cursor (Ctrl+Alt+2)" aria-label="Subsection"><i>§§</i> Subsection</button>
-  <button data-act="paragraph" title="\paragraph heading at the cursor (Ctrl+Alt+3)" aria-label="Paragraph heading"><i>§§§</i> Para heading</button>
-  <button data-act="splitsection" title="Split the current section at the cursor" aria-label="Split section"><i>✂</i> Split section</button>
-  <button data-act="newpara" title="New paragraph at the cursor (Enter)" aria-label="New paragraph"><i>¶</i> New para</button>
+            <span class="tgroup"><button id="headbtn" data-pop="headpop" title="Headings and paragraphs" aria-label="Headings"><svg class="ic" aria-hidden="true"><use href="#i-heading"/></svg> Heading <svg class="ic" aria-hidden="true"><use href="#i-chevron"/></svg></button>
+  <div class="popover menu" id="headpop" hidden role="menu">
+    <button data-act="section" title="Section heading at the cursor (Ctrl+Alt+1)" aria-label="Section"><i>§</i> Section</button>
+    <button data-act="subsection" title="Subsection heading at the cursor (Ctrl+Alt+2)" aria-label="Subsection"><i>§§</i> Subsection</button>
+    <button data-act="paragraph" title="\paragraph heading at the cursor (Ctrl+Alt+3)" aria-label="Paragraph heading"><i>§§§</i> Para heading</button>
+    <button data-act="splitsection" title="Split the current section at the cursor (Ctrl+Alt+S)" aria-label="Split section"><svg class="ic" aria-hidden="true"><use href="#i-split"/></svg> Split section</button>
+    <button data-act="newpara" title="New paragraph at the cursor (Enter)" aria-label="New paragraph"><i>¶</i> New para</button>
+  </div></span>
   <span class="sep"></span>
-  <button data-act="find" title="Find (Ctrl+F), find and replace (Ctrl+H)" aria-label="Find and replace"><i>⌕</i> Find</button>
+  <button data-act="find" title="Find (Ctrl+F), find and replace (Ctrl+H)" aria-label="Find and replace"><svg class="ic" aria-hidden="true"><use href="#i-find"/></svg> Find</button>
   <span class="sep"></span>
-  <button data-act="diff" id="diffbtn" title="Show what changed (read-only while on)" aria-label="Diff" aria-pressed="false"><i>±</i> Diff</button>
+  <button data-act="diff" id="diffbtn" title="Show what changed, Ctrl+Alt+V (read-only while on)" aria-label="Diff" aria-pressed="false"><i>±</i> Diff</button>
   <select id="diffbase" title="Compare with" hidden>
     <option value="save">since the last save</option>
     <option value="head">since the last commit</option>
   </select>
-  <span id="diffnav" hidden><button id="diffprev" title="Previous change" aria-label="Previous change"><i>‹</i> Prev</button><span id="diffcount"></span><button id="diffnext" title="Next change" aria-label="Next change"><i>›</i> Next</button></span>
-  <button data-act="undo" title="Undo (Ctrl+Z)" aria-label="Undo"><i>↶</i> Undo</button>
-  <button data-act="redo" title="Redo (Ctrl+Shift+Z)" aria-label="Redo"><i>↷</i> Redo</button>
+  <span id="diffnav" hidden><button id="diffprev" title="Previous change (Ctrl+Alt+[)" aria-label="Previous change"><svg class="ic" aria-hidden="true"><use href="#i-prev"/></svg> Prev</button><span id="diffcount"></span><button id="diffnext" title="Next change (Ctrl+Alt+])" aria-label="Next change"><svg class="ic" aria-hidden="true"><use href="#i-next"/></svg> Next</button></span>
+  <button data-act="undo" title="Undo (Ctrl+Z)" aria-label="Undo"><svg class="ic" aria-hidden="true"><use href="#i-undo"/></svg> Undo</button>
+  <button data-act="redo" title="Redo (Ctrl+Shift+Z)" aria-label="Redo"><svg class="ic" aria-hidden="true"><use href="#i-redo"/></svg> Redo</button>
+  <span class="tgroup" id="moregroup"><button id="toolmorebtn" data-pop="toolmore" title="More editing tools" aria-label="More editing tools" hidden><svg class="ic" aria-hidden="true"><use href="#i-more"/></svg></button>
+  <div class="popover menu" id="toolmore" hidden role="menu"></div></span>
 </nav>
 <div id="findbar" hidden>
   <input id="find-q" placeholder="Find" spellcheck="false" title="Text only: maths and LaTeX chips are not searched">
@@ -80,11 +106,11 @@
   <label title="Match case"><input type="checkbox" id="find-case"> Aa</label>
   <label title="Whole words"><input type="checkbox" id="find-word"> W</label>
   <span id="find-count"></span>
-  <button id="find-prev" title="Previous (Shift+Enter)" aria-label="Previous match"><i>‹</i> Prev</button>
-  <button id="find-next" title="Next (Enter)" aria-label="Next match"><i>›</i> Next</button>
+  <button id="find-prev" title="Previous (Shift+Enter)" aria-label="Previous match"><svg class="ic" aria-hidden="true"><use href="#i-prev"/></svg> Prev</button>
+  <button id="find-next" title="Next (Enter)" aria-label="Next match"><svg class="ic" aria-hidden="true"><use href="#i-next"/></svg> Next</button>
   <button id="find-one" title="Replace this match"><i>⇄</i> Replace</button>
   <button id="find-all" title="Replace every match"><i>⇉</i> All</button>
-  <button id="find-close" title="Close (Esc)" aria-label="Close find"><i>✕</i> Close</button>
+  <button id="find-close" title="Close (Esc)" aria-label="Close find"><svg class="ic" aria-hidden="true"><use href="#i-close"/></svg> Close</button>
   <span class="small">text only: maths and LaTeX chips are not searched</span>
 </div>
 <div id="banner" hidden></div>
@@ -175,16 +201,17 @@
   <h3 id="help-title">Editing</h3>
   <ul>
     <li>Type anywhere in the text. <kbd>Enter</kbd> starts a new paragraph; <kbd>Backspace</kbd> at the start of a paragraph joins it to the one before.</li>
-    <li><kbd>$</kbd> or <kbd>Ctrl</kbd>+<kbd>M</kbd>: inline maths (of the selection, if any). <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd>: displayed maths.</li>
+    <li><kbd>Ctrl</kbd>+<kbd>M</kbd>: inline maths (of the selection, if any; <kbd>$</kbd> over a selection too, otherwise <kbd>$</kbd> types a dollar sign). <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd>: displayed maths.</li>
     <li>A bracket, brace or quote typed over a selection wraps it. Pasted <code>$…$</code> becomes maths.</li>
     <li><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd>: cite (search by key, title, author or year; Ctrl+Enter picks several; not found? search online and add it to references.bib).</li>
     <li><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>R</kbd>: reference a section, theorem, figure, table or equation.</li>
     <li><kbd>Ctrl</kbd>+<kbd>F</kbd>: find and replace. <kbd>Ctrl</kbd>+<kbd>\</kbd>: insert any LaTeX.</li>
     <li><kbd>Ctrl</kbd>+<kbd>I</kbd> / <kbd>Ctrl</kbd>+<kbd>B</kbd>: <code>\emph</code> / <code>\textbf</code>.</li>
     <li>Click maths, a reference or any grey chip to edit its LaTeX; <kbd>Ctrl</kbd>+<kbd>Enter</kbd> applies.</li>
+    <li><kbd>Ctrl</kbd>+click a reference or citation: go to it (Lemma 4, the equation, the reference entry); <kbd>Alt</kbd>+<kbd>←</kbd> goes back.</li>
     <li>Hover a block and use <b>＋</b> to add a paragraph, heading or displayed maths after it, or <b>✕</b> to delete a heading.</li>
     <li>Heading tools move sections up or down and combine a section with the one before it; put the cursor in a section and use <b>Split section</b> to divide it.</li>
-    <li>Headings, figure and table captions are edited in place; listings in their box.</li>
+    <li>Headings, figure and table captions are edited in place; listings in their box. <code>quote</code>/<code>quotation</code> blocks show indented, and are edited in place too.</li>
     <li>Games: Ctrl+Z/Ctrl+Shift+Z undo or redo a draft; Alt+Up/Down moves a safe statement. Ctrl+Enter applies the figure; Ctrl+S applies and saves.</li>
     <li>Game panels can be dragged or moved with Left/Right only when their LaTeX blocks are safe siblings. Mark uses xcolor boxes.</li>
     <li><kbd>Ctrl</kbd>+<kbd>S</kbd> saves. Saving writes only the files you changed, applies the house rules, and rebuilds the PDF.</li>

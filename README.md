@@ -49,11 +49,16 @@ That is enough to start. Reading aloud with offline voices is optional:
 
     ./run ~/papers/my-paper              # a paper folder (finds the main file)
     ./run ~/papers/my-paper/main.tex     # or a main file
+    ./run                                # the paper opened last, else a folder chooser
+    ./run --install-desktop              # adds it to the applications menu (Linux)
 
 It opens in its own browser window and is reachable only from your machine
 (it listens on `127.0.0.1` and refuses requests addressed to any other host).
-**Open…** switches to another paper or another main file in the same folder.
-Stop it with `Ctrl+C` in the terminal.
+**Open…** (in the ☰ menu) switches to another paper or another main file in
+the same folder. Closing the window stops the editor, once any build in
+progress has finished (`--keep-running` keeps it running; with `--no-open`
+it always keeps running). `Ctrl+C` in the terminal stops it too. When port
+8765 is taken, by another paper's editor for example, a free port is used.
 
 | Option | Meaning |
 | --- | --- |

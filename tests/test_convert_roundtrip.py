@@ -209,6 +209,10 @@ class ServerChainTest(unittest.TestCase):
         self.paper = os.path.join(self.tmp, 'paper')
         shutil.copytree(os.path.join(FIX, 'ieee-conf'), self.paper)
         subprocess.run(['git', 'init', '-q', self.paper], check=True)
+        from unittest import mock   # the paper opened last: never in the user's config
+        recent = mock.patch.object(server, 'RECENT_FILE', os.path.join(self.tmp, 'recent.json'))
+        recent.start()
+        self.addCleanup(recent.stop)
         server.open_paper(os.path.join(self.paper, 'main.tex'), state=os.path.join(self.tmp, 'state'))
         server.ensure_state()
 
