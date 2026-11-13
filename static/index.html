@@ -31,10 +31,9 @@
     <button id="stop" aria-label="Stop reading" title="Stop (Alt+S)"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9" rx="1"/></svg> Stop</button>
     <button id="ttsopts" data-pop="ttspop" title="Reading speed and voice (Ctrl+Alt+U)" aria-label="Reading speed and voice"><svg class="ic" aria-hidden="true"><use href="#i-chevron"/></svg></button>
     <div class="popover" id="ttspop" hidden>
-      <label class="menurow"><span class="menulabel">Speed</span><select id="rate" aria-label="Reading speed" title="Speed">
-      <option value="0.8">0.8×</option><option value="1" selected>1×</option>
-      <option value="1.2">1.2×</option><option value="1.4">1.4×</option><option value="1.7">1.7×</option>
-    </select></label>
+      <label class="menurow"><span class="menulabel">Speed</span><span class="rateslide">
+        <input type="range" id="rate" min="0.5" max="2" step="0.05" value="1" aria-label="Reading speed" title="Reading speed">
+        <b id="rateval">1×</b></span></label>
       <label class="menurow"><span class="menulabel">Voice</span><select id="voice" aria-label="Reading voice" title="Voice"></select></label>
       <div class="menurow"><span class="menulabel">State</span><span id="tts-state" aria-live="polite">Ready</span></div>
       <hr>

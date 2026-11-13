@@ -77,8 +77,9 @@ under ⋯. In narrow windows both show icons only; hovering a button names it.
   words; with nothing selected or clicked it starts at the top of the paper.
   While reading, Prev and Next move by sentence; the ▾ beside **Read** also has
   **Read from here** (the cursor, or the last place clicked), **Read from
-  section start** and **Read from the beginning**. Speed and voice are under
-  the same ▾, which stays tinted while
+  section start** and **Read from the beginning**. Speed (a slider from
+  0.5× to 2× in steps of 0.05, e.g. 1.1×) and voice are under the
+  same ▾, which stays tinted while
   reading. Edits are read as they are now (a phrase edited while paused is
   read again from its start on resume), and a save does not interrupt the
   phrase being read. See *Reading aloud* below for the voices.

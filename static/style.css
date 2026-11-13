@@ -444,7 +444,7 @@ select {
   border-color: var(--mac-control-border);
   background-color: var(--mac-raised);
 }
-input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
+input[type="checkbox"], input[type="radio"], input[type="range"] { accent-color: var(--accent); }
 ::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
 
 /* The title bar and edit toolbar use an opaque material so manuscript text
@@ -1045,6 +1045,9 @@ body.two #chrome #cols:hover, body.diffing #chrome #diffbtn:hover { background: 
 #chrome .popover button:hover:not(:disabled) { background: color-mix(in srgb, currentColor 9%, transparent); }
 #chrome .popover button:active:not(:disabled) { background: color-mix(in srgb, currentColor 16%, transparent); }
 #chrome .popover select { border: 0; border-radius: 6px; padding: 4px 6px; background: color-mix(in srgb, currentColor 8%, transparent); }
+#chrome .popover .rateslide { display: inline-flex; align-items: center; gap: 8px; }
+#chrome .popover .rateslide input[type="range"] { width: 9em; }
+#chrome .popover .rateslide b { min-width: 2.6em; text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
 #chrome .popover button[aria-pressed="true"] { font-weight: 600; }
 .popover hr { border: 0; border-top: 1px solid color-mix(in srgb, var(--fg) 10%, transparent); margin: 4px 6px; }
 .popover .menurow { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 4px 10px; }

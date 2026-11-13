@@ -1160,6 +1160,19 @@ Object.assign(TESTS, {
     await page.click('#stop');
   },
 
+  async 'reader: the speed slider takes any value, and the choice survives'(env, page) {
+    await fakeSpeech(page);
+    await page.eval(`$('#rate').value = '1.1';
+      $('#rate').dispatchEvent(new Event('input')); $('#rate').dispatchEvent(new Event('change'))`);
+    eq(await page.eval(`localStorage.getItem('rate')`), '1.1', 'the speed is remembered');
+    eq(await page.eval(`$('#rateval').textContent`), '1.1×', 'the slider reads out its value');
+    await page.select('lazy dog', 'start');
+    await page.click('#play');
+    const spokenAt = await page.eval(`__fake.cur.rate`);
+    eq(Math.abs(spokenAt - 1.1) < 0.001, true, 'the phrase is spoken at the chosen rate');
+    await page.click('#stop');
+  },
+
   async 'reader: reading keeps going to the end, then stops by itself'(env, page) {
     await fakeSpeech(page);
     await page.select('Final words', 'start');

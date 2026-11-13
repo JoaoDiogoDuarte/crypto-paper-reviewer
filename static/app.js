@@ -2075,15 +2075,22 @@ const TTS = (() => {
     try { localStorage.setItem('voice', voiceSel.value); } catch (e) { /* none */ }
     if (speaking && !paused) again();
   };
-  $('#rate').onchange = () => {
+  const showRate = () => { $('#rateval').textContent = (Math.round(parseFloat($('#rate').value) * 20) / 20) + '×'; };
+  $('#rate').addEventListener('input', () => {   // while dragging: the number follows, and so does a playing clip
+    showRate();
+    if (audio) audio.playbackRate = rate();
+  });
+  $('#rate').addEventListener('change', () => {   // released: the speed applies to reading
+    showRate();
     try { localStorage.setItem('rate', $('#rate').value); } catch (e) { /* none */ }
     if (audio) audio.playbackRate = rate();
     else if (speaking && !paused) again();     // a browser voice takes the rate per phrase
-  };
+  });
   try {                                 // the chosen speed survives a reload, like the voice
-    const savedRate = localStorage.getItem('rate');
-    if (savedRate && [...$('#rate').options].some((o) => o.value === savedRate)) $('#rate').value = savedRate;
+    const saved = parseFloat(localStorage.getItem('rate'));
+    if (saved >= 0.5 && saved <= 2) $('#rate').value = saved;
   } catch (e) { /* none */ }
+  showRate();
   const rate = () => parseFloat($('#rate').value) || 1;
 
   // The phrases of one block, as the page shows it now.
