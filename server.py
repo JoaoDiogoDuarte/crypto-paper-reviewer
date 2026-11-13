@@ -1303,7 +1303,9 @@ def speak(engine, voice, text):
                     buf += chunk['data']
             return buf
         try:
-            audio = asyncio.run(run())
+            # the network stream can stall without erroring: a phrase that
+            # never arrives must not hang the reader on that sentence
+            audio = asyncio.run(asyncio.wait_for(run(), timeout=30))
         except Exception as e:
             raise TTSError(f'edge: {e}')
     elif engine == 'google':

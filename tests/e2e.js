@@ -414,6 +414,10 @@ async function fakeSpeech(page) {
     fake.finish = () => { const u = fake.cur; fake.cur = null; if (u && u.onend) u.onend({}); };
     window.__fake = fake;
     Object.defineProperty(window, 'speechSynthesis', { value: synth, configurable: true });
+    // server voices would arrive late and re-fill the voice list behind the
+    // test's back, mid-reading (edge takes seconds to answer); say there are none
+    const realfetch = window.fetch;
+    window.fetch = (u, o) => String(u).startsWith('/api/voices') ? Promise.resolve(new Response('[]')) : realfetch(u, o);
   })()` });
   await page.eval(`window.__old = true`);
   await page.send('Page.reload');
@@ -1107,24 +1111,53 @@ Object.assign(TESTS, {
     await page.click('#play');
     has(await page.eval(`__fake.spoken[1]`), 'The quick brown fox', 'first sentence');
     await page.click('#stop');
-    // caret in another paragraph wins over the remembered position
+    // caret in another paragraph: reading starts there, not at the top
     await page.select('encryption schemes', 'end');
     await page.click('#play');
     has(await page.eval(`__fake.spoken[2]`), 'A second paragraph', 'other paragraph');
   },
 
-  async 'reader: with no caret it resumes where it stopped, in any block of the file'(env, page) {
+  async 'reader: with nothing selected or clicked, reading starts at the top of the paper'(env, page) {
     await fakeSpeech(page);
     await page.select('Final words', 'start');
     await page.click('#play');
     await page.click('#stop');
     const n = await page.eval(`__fake.spoken.length`);
-    await page.eval(`TTS.reset()`);
+    await page.eval(`TTS.reset()`);                    // forgets the caret and the place last clicked
     await page.eval(`getSelection().removeAllRanges()`);
     await page.click('#play');
     const spoken = await page.eval(`__fake.spoken`);
     eq(spoken.length, n + 1, 'spoke one phrase');
-    has(spoken[n], 'Final words', 'resumed in the last block');
+    has(spoken[n], 'Introduction', 'started at the first heading');
+    await page.click('#stop');
+  },
+
+  async 'reader: an utterance whose end is lost does not wedge the reader'(env, page) {
+    await fakeSpeech(page);
+    await page.select('Detail text lives here', 'start');
+    await page.click('#play');                         // the fake never fires the utterance's onend
+    const n = await page.eval(`__fake.spoken.length`);
+    await page.waitFor(`__fake.spoken.length > ${n} || $('#tts-state').textContent === 'Stopped'`,
+      30000, 'a lost utterance to be noticed');
+    has(await page.eval(`$('#tts-state').textContent`), 'Reading', 'still reading after moving on');
+    await page.click('#stop');
+  },
+
+  async 'reader: read from here, from the section start, and from the beginning'(env, page) {
+    await fakeSpeech(page);
+    const last = () => page.eval(`__fake.spoken[__fake.spoken.length - 1]`);
+    await page.select('Other papers exist', 'start');
+    await page.click('#readhere');
+    has(await last(), 'Other papers exist', 'read from here');
+    await page.click('#stop');
+    await page.select('Final words', 'start');            // inside the Conclusion section
+    await page.click('#readsection');
+    has(await last(), 'Conclusion', 'read from the section start');
+    await page.click('#stop');
+    await page.select('lazy dog', 'end');
+    await page.click('#readtop');
+    has(await last(), 'Introduction', 'read from the beginning');
+    await page.click('#stop');
   },
 
   async 'reader: reading keeps going to the end, then stops by itself'(env, page) {

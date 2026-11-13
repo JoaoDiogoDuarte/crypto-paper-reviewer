@@ -10,7 +10,7 @@ from the DOM and compares it with the source (nothing is saved), checks that
 every formula renders, and reports references that do not resolve.
 
 Use the optional `readertest` mode to exercise caret sentence selection,
-reading-position recovery, and idle reader controls in headless Firefox.
+reading from the top of the paper, and idle reader controls in headless Firefox.
 
 tests/papers.local is not tracked: keep the paths of your own papers there.
 """

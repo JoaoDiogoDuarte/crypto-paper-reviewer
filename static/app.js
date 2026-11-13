@@ -2036,10 +2036,10 @@ const TTS = (() => {
   let speaking = false, paused = false, current = null, audio = null;
   let anchor = null;
   let generation = 0;
+  let speakTimer = 0, stalls = 0;        // a browser-voice utterance that never finishes is noticed, not waited for
   const clips = new Map();               // url -> Promise<{ src, span }>: fetched audio, ahead of time
   const synth = window.speechSynthesis;
   const voiceSel = $('#voice');
-  const positionKey = () => 'paper-editor:tts:' + location.pathname + ':' + (DOC && DOC.main || '');
 
   function setState(state) { $('#tts-state').textContent = state; }
   function updateControls() {
@@ -2051,15 +2051,6 @@ const TTS = (() => {
     $('#ttsbar').classList.toggle('active', speaking);
     $('#pause').querySelector('.label').textContent = paused ? 'Resume' : 'Pause';
   }
-  function savePosition(item) {
-    try { localStorage.setItem(positionKey(), JSON.stringify({ file: item.seg.file, src: item.seg.src, text: item.text })); }
-    catch (e) { /* storage unavailable */ }
-  }
-  function savedPosition() {
-    try { return JSON.parse(localStorage.getItem(positionKey()) || 'null'); }
-    catch (e) { return null; }
-  }
-
   function voices() { return synth ? synth.getVoices() : []; }
   // Option values are "engine|voice"; engine "browser" is speechSynthesis,
   // the others are produced by the server (/api/tts).
@@ -2094,21 +2085,6 @@ const TTS = (() => {
     if (savedRate && [...$('#rate').options].some((o) => o.value === savedRate)) $('#rate').value = savedRate;
   } catch (e) { /* none */ }
   const rate = () => parseFloat($('#rate').value) || 1;
-
-  function startSeg() {
-    const sel = getSelection();
-    if (sel.rangeCount) {
-      const n = sel.getRangeAt(0).startContainer;
-      const seg = segOf(n.nodeType === 1 ? n : n.parentElement);
-      if (seg) return ORDER.indexOf(seg);
-    }
-    // otherwise the first block on screen
-    for (let i = 0; i < ORDER.length; i++) {
-      const e = ORDER[i].el;
-      if (e && e.getBoundingClientRect().bottom > 60) return i;
-    }
-    return 0;
-  }
 
   // The phrases of one block, as the page shows it now.
   function phrases(seg) {
@@ -2192,7 +2168,7 @@ const TTS = (() => {
 
   function currentCaret() {
     const sel = getSelection();
-    if (!sel.rangeCount || !sel.isCollapsed) return null;
+    if (!sel.rangeCount) return null;    // the start of a selection counts as a place too
     const range = sel.getRangeAt(0);
     const node = range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement;
     if (!node || !$('#doc').contains(node)) return null;
@@ -2201,15 +2177,18 @@ const TTS = (() => {
     return { seg, range: range.cloneRange() };
   }
 
-  // Where Read starts: the caret, the last place clicked, the remembered
-  // position, the first block on screen.
-  function prepare() {
+  // Where Read starts: the caret (or the start of the selection), the last
+  // place clicked, and otherwise the top of the paper.
+  function place() {
     for (const c of [currentCaret(), anchor]) {
-      if (c && c.seg.el && !c.seg.removed && ORDER.includes(c.seg) && seek(c.seg, c.range)) return;
+      if (c && c.seg.el && !c.seg.removed && ORDER.includes(c.seg)) return c;
     }
-    const saved = savedPosition();
-    if (saved && locate(saved)) return;
-    startAt(startSeg());
+    return null;
+  }
+  function prepare() {
+    const c = place();
+    if (c && seek(c.seg, c.range)) return;
+    startAt(0);
   }
 
   // After edits: the phrases again, from the block being read, and `cur` the
@@ -2236,19 +2215,63 @@ const TTS = (() => {
     }, 150);
   }
 
-  function play() {
-    if (speaking && paused) { pause(); return; }
-    if (speaking) return;
-    stop();
-    if (!voiceSel.value) { banner('No text-to-speech voice is available. See the README of the editor for how to install one.'); return; }
-    prepare();
+  function voiceOk() {
+    if (voiceSel.value) return true;
+    banner('No text-to-speech voice is available. See the README of the editor for how to install one.');
+    return false;
+  }
+  function begin() {
     speaking = true; paused = false;
     updateControls();
     next();
   }
+  function play() {
+    if (speaking && paused) { pause(); return; }
+    if (speaking) return;
+    if (!voiceOk()) return;
+    stop();
+    prepare();                  // the caret or the last click, else the top of the paper
+    begin();
+  }
+  // Read on purpose, from somewhere specific: the cursor (or the last
+  // click), the start of the section it is in, or the very beginning.
+  function playFrom(c) {         // c: {seg, range}
+    if (!voiceOk()) return;
+    stop();
+    if (!seek(c.seg, c.range)) { banner('Reading could not start there.'); return; }
+    begin();
+  }
+  function playHere() {
+    const c = place();
+    if (!c) { banner('Click in the text where reading should start.'); return; }
+    playFrom(c);
+  }
+  function playSection() {
+    const c = place();
+    let i = c ? ORDER.indexOf(c.seg) : -1;
+    for (; i >= 0; i--) {
+      const h = ORDER[i].kind === 'heading' && L.headingParts(ORDER[i].src);
+      if (h && /^(part|chapter|section)$/.test(h.level)) {
+        if (!voiceOk()) return;
+        stop();
+        startAt(i);
+        begin();
+        return;
+      }
+    }
+    playTop();                   // before the first section: the paper's start
+  }
+  function playTop() {
+    if (!voiceOk()) return;
+    stop();
+    startAt(0);
+    begin();
+  }
 
   function halt() {
     generation++;
+    clearTimeout(speakTimer);
+    speakTimer = 0;
     if (synth) synth.cancel();
     if (audio) { audio.done = true; audio.pause(); audio = null; }
   }
@@ -2293,7 +2316,6 @@ const TTS = (() => {
 
   function say(run) {
     const item = cur;
-    savePosition(item);
     setState(paused ? 'Paused' : 'Reading');
     updateControls();
     highlight(item.seg);
@@ -2327,7 +2349,12 @@ const TTS = (() => {
           };
           requestAnimationFrame(tick);
         }
-        if (!paused) a.play().catch(() => {});
+        if (!paused) a.play().catch(() => {
+          if (run !== generation || a.done) return;
+          a.done = true;
+          banner('The browser blocked the playback; press Read (Alt+R) to go on.');
+          stop();
+        });
       }, (e) => {
         if (run !== generation) return;
         banner('Speech failed for this voice: ' + e.message);
@@ -2343,19 +2370,68 @@ const TTS = (() => {
     const v = voices().find((x) => x.name === name);
     if (v) { u.voice = v; u.lang = v.lang; }
     u.rate = rate();
-    u.onend = () => next(run);
-    u.onerror = (e) => { if (run === generation && e.error !== 'interrupted' && e.error !== 'canceled') next(run); };
+    // Chrome's speech engine sometimes loses the end of an utterance: the
+    // sound stops, neither onend nor onerror comes, and the reader would sit
+    // on the phrase forever with the page still saying Reading.  A watchdog
+    // notices: an utterance that started is treated as finished once it goes
+    // quiet; one that never started is skipped, and if two in a row never
+    // start the engine is wedged, so reading stops with the reason instead of
+    // failing silently.
+    let started = false;
+    const budget = 4000 + (item.text.split(/\s+/).length * 420) / rate();
+    const arm = (ms) => {
+      clearTimeout(speakTimer);
+      speakTimer = setTimeout(() => {
+        if (run !== generation || paused || u.done) return;
+        u.done = true;                 // its own events, if any come late, are ignored
+        synth.cancel();
+        if (started) { stalls = 0; next(run); return; }
+        if (++stalls >= 3) {
+          banner('Reading stopped: the browser speech engine stalled. Press Read (Alt+R) to go on from here.');
+          stop();
+          return;
+        }
+        next(run);
+      }, ms);
+    };
+    u.onstart = () => { if (run === generation) { started = true; stalls = 0; arm(budget); } };
+    u.onboundary = () => { if (run === generation) arm(4000); };   // quiet for this long mid-phrase: it is over
+    u.onend = () => {
+      if (u.done || run !== generation) return;    // a late event of a cancelled attempt
+      stalls = 0;
+      clearTimeout(speakTimer);
+      speakTimer = 0;
+      next(run);
+    };
+    u.onerror = (e) => {
+      if (run === generation && !u.done && e.error !== 'interrupted' && e.error !== 'canceled') {
+        clearTimeout(speakTimer);
+        speakTimer = 0;
+        next(run);
+      }
+    };
     synth.speak(u);
+    if (synth.paused) synth.resume();   // a wedged engine refuses to start speaking otherwise
+    arm(budget + 4000);                 // for the utterance that never begins at all
   }
 
   function clip(engine, voice, text) {
     const url = `/api/tts?engine=${encodeURIComponent(engine)}&voice=${encodeURIComponent(voice)}&text=${encodeURIComponent(text)}`;
     if (!clips.has(url)) {
       const p = (async () => {
-        const r = await fetch(url);
-        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'HTTP ' + r.status);
-        const blob = await r.blob();
-        return { src: URL.createObjectURL(blob), span: await speechSpan(blob).catch(() => null) };
+        const giveUp = new AbortController();      // a stalled synthesis is noticed, not waited for
+        const timer = setTimeout(() => giveUp.abort(), 60000);
+        try {
+          const r = await fetch(url, { signal: giveUp.signal });
+          if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'HTTP ' + r.status);
+          const blob = await r.blob();
+          return { src: URL.createObjectURL(blob), span: await speechSpan(blob).catch(() => null) };
+        } catch (e) {
+          if (e.name === 'AbortError') throw new Error('the server took too long');
+          throw e;
+        } finally {
+          clearTimeout(timer);
+        }
       })();
       p.catch(() => clips.delete(url));
       clips.set(url, p);
@@ -2392,6 +2468,7 @@ const TTS = (() => {
     speaking = false;
     paused = false;
     cur = null; curRange = null; stale = false;
+    stalls = 0;
     highlight(null);
     markPhrase(null);
     setState('Stopped');
@@ -2408,7 +2485,7 @@ const TTS = (() => {
     updateControls();
     if (paused) {
       if (audio) audio.pause();
-      else { generation++; if (synth) synth.cancel(); }
+      else { generation++; clearTimeout(speakTimer); speakTimer = 0; if (synth) synth.cancel(); }
       return;
     }
     if (stale) refresh();
@@ -2449,13 +2526,16 @@ const TTS = (() => {
   }
 
   return { play, stop, pause, prev: () => jump(-1), next: () => jump(1), setAnchor, reset, detach, reattach,
-    edited, fillVoices, loadServerVoices, build, testPrepare, testSavePosition: savePosition };
+    edited, fillVoices, loadServerVoices, build, testPrepare, playHere, playSection, playTop };
 })();
 $('#play').onclick = () => TTS.play();
 $('#tts-prev').onclick = () => TTS.prev();
 $('#tts-next').onclick = () => TTS.next();
 $('#stop').onclick = () => TTS.stop();
 $('#pause').onclick = () => TTS.pause();
+$('#readhere').onclick = () => TTS.playHere();
+$('#readsection').onclick = () => TTS.playSection();
+$('#readtop').onclick = () => TTS.playTop();
 $('#doc').addEventListener('input', () => TTS.edited());
 
 function rangeContainsCaret(phrase, caret) {
@@ -2808,15 +2888,13 @@ function readerTest() {
     updateSpeechAnchor();
     const selected = TTS.testPrepare();
     if (selected.text !== target.text) fail('caret selected the wrong sentence');
-    TTS.testSavePosition(target);
     TTS.reset();
-    const resumed = TTS.testPrepare();
-    if (resumed.text !== target.text) fail('saved position did not resume');
+    getSelection().removeAllRanges();
+    const begun = TTS.testPrepare();
+    if (begun.text !== phrases[0].text) fail('with no place chosen, reading does not start at the top');
   }
   if (!$('#pause').disabled || !$('#stop').disabled) fail('idle controls are enabled');
-  const key = 'paper-editor:tts:' + location.pathname + ':' + (DOC && DOC.main || '');
-  try { localStorage.removeItem(key); } catch (e) { /* storage unavailable */ }
-  const msg = `READTEST ${failures.length ? 'FAILED' : 'OK'}: ${failures.length ? failures.join('; ') : 'caret, resume, controls'}`;
+  const msg = `READTEST ${failures.length ? 'FAILED' : 'OK'}: ${failures.length ? failures.join('; ') : 'caret, top of the paper, controls'}`;
   document.title = msg;
   console.log(msg);
   fetch('/api/log', { method: 'POST', headers: { 'X-Token': TOKEN }, body: msg });
@@ -5318,6 +5396,9 @@ const ACTION_DEFS = [
   ['readstop', 'Stop reading', 'global', ['M-s'], () => TTS.stop()],
   ['readprev', 'Previous sentence', 'global', ['C-M-ArrowLeft'], () => TTS.prev()],
   ['readnext', 'Next sentence', 'global', ['C-M-ArrowRight'], () => TTS.next()],
+  ['readhere', 'Read from here (the cursor, or the last click)', 'global', [], () => TTS.playHere()],
+  ['readsection', 'Read from the start of the section', 'global', [], () => TTS.playSection()],
+  ['readtop', 'Read from the beginning of the paper', 'global', [], () => TTS.playTop()],
   ['bold', 'Bold (\\textbf)', 'text', ['C-b'], () => wrap('\\textbf{', 'strong')],
   ['emph', 'Emphasis (\\emph)', 'text', ['C-i'], () => wrap('\\emph{', 'em')],
   ['italic', 'Italic (\\textit)', 'text', ['C-I'], () => wrap('\\textit{', 'em')],
