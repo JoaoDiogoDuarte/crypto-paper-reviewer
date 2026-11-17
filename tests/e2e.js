@@ -180,7 +180,12 @@ class Page {
   async waitFor(expr, timeout = 8000, what) {
     const t0 = Date.now();
     while (Date.now() - t0 < timeout) {
-      if (await this.eval(expr)) return;
+      try {
+        if (await this.eval(expr)) return;
+      } catch (e) {
+        // asked while the page is reloading: ask again once it is back
+        if (!/navigated or closed|context was destroyed|Cannot find context|not found/i.test(String(e.message))) throw e;
+      }
       await sleep(50);
     }
     throw new Error('timed out waiting for ' + (what || expr));
@@ -324,7 +329,9 @@ class Env {
   spawnServer() {
     this.srv = spawn(PY, [path.join(ROOT, 'server.py'), path.join(this.paper, 'main.tex'), '--port', String(this.port),
       '--no-open', '--state', this.state], { stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, HOME: this.dir, XDG_CONFIG_HOME: path.join(this.dir, 'config') } });
+      env: { ...process.env, HOME: this.dir, XDG_CONFIG_HOME: path.join(this.dir, 'config'), PE_NO_RELOAD: '1',
+        PE_CRYPTOBIB_URL: path.join(this.dir, 'cryptobib-src'),
+        PE_CODE_PROBE: path.join(this.dir, 'code-probe') } });
     this.srv.stdout.on('data', (d) => { this.log += d; });
     this.srv.stderr.on('data', (d) => { this.log += d; });
   }
@@ -716,6 +723,29 @@ const TESTS = {
     onlyChange(env, 'main.tex', 'lazy dog.', 'lazy dog costs 5\\$ or 50\\% \\& a\\_b.');
   },
 
+  async 'paste: zero-width spaces from web pages are dropped'(env, page) {
+    await page.select('lazy dog', 'end');
+    await page.paste(' under $\\pi_1$​, on﻿ it');
+    await page.save();
+    onlyChange(env, 'main.tex', 'lazy dog.', 'lazy dog under $\\pi_1$, on it.');
+  },
+
+  async 'text characters: \\textless shows as <, a saved \\textbackslash made maths is a backslash'(env, page) {
+    env.write('main.tex', FILES['main.tex'].replace('lazy dog.', 'lazy dog \\textless{} \\textbackslash{}G1 end.'));
+    await page.eval('load(true)');
+    await page.waitFor(`ORDER.some((s) => s.src && s.src.includes('textless'))`, 8000, 'the reloaded text');
+    has(await page.eval(`ORDER.find((s) => s.src.includes('textless')).edit.textContent`), 'lazy dog < \\G1 end', 'shown as the characters');
+    await page.eval(`(() => {
+      const ed = ORDER.find((s) => s.src.includes('textless')).edit;
+      const c = [...ed.querySelectorAll('.chip.char')].find((x) => x.textContent === '\\\\');
+      const r = document.createRange(); r.setStartBefore(c); r.setEnd(c.nextSibling, 2);
+      ed.focus(); getSelection().removeAllRanges(); getSelection().addRange(r);
+    })()`);
+    await page.key('$'); await sleep(100);
+    await page.save();
+    has(env.read('main.tex'), 'lazy dog \\textless{} $\\G1$ end.', 'maths with a backslash');
+  },
+
   async 'paste over a selection replaces it'(env, page) {
     await page.select('brown');
     await page.paste('$\\beta$');
@@ -914,14 +944,562 @@ const TESTS = {
     eq(env.read('main.tex'), MAIN, 'moving it back gives the original file');
   },
 
-  async 'moving a section never carries the end of the document or crosses an input'(env, page) {
+  async 'moving a section never carries the end of the document; a section file moves as its input'(env, page) {
     const click = (title, button) => page.click(headBtn(title, button));
-    await click('Related work', 'Move this section down');      // next is \input{sections/body}
-    has(await page.banner(), 'another file', 'banner');
-    await click('Conclusion', 'Move this section up');          // holds \end{document}; previous is an input
-    await click('Body', 'Move this section up');                // first in its file
+    await click('Conclusion', 'Move this section up');          // holds \end{document}
+    has(await page.banner(), 'end of the document', 'banner');
+    await click('Related work', 'Move this section down');      // next is \input{sections/body}, a whole section
     await page.save();
-    untouched(env, 'main.tex', 'sections/body.tex');
+    const main = env.read('main.tex');
+    if (!(main.indexOf('\\input{sections/body}') < main.indexOf('\\section{Related work}'))) throw new Error('the section file did not move:\n' + main);
+    has(main, '\\end{document}', 'end of the document kept');
+    untouched(env, 'sections/body.tex');
+  },
+
+  async 'undo and redo keep the text on screen where it was'(env, page) {
+    // a paper long enough to scroll, with numbered paragraphs
+    const paras = Array.from({ length: 60 }, (_, i) => `Paragraph number ${i} has enough words to wrap over a couple of lines in the editor, so that its height matters when the page is drawn again after a change.`);
+    env.write('main.tex', '\\documentclass{article}\n\\begin{document}\n\\section{Long}\n' + paras.join('\n\n') + '\n\\end{document}\n');
+    await page.eval('load(true)');
+    await page.waitFor(`/Paragraph number 59/.test($('#doc').textContent)`, 8000, 'the long paper');
+    // the server also notices the file changed and the page reloads it once
+    // more: let that settle before placing the view
+    await sleep(2500);
+    const top = (n) => page.eval(`(() => { const s = ORDER.find((x) => x.kind === 'para' && x.src.startsWith('Paragraph number ${n} ')); return Math.round(s.el.getBoundingClientRect().top); })()`);
+    const caret = (n, where) => page.eval(`(() => { const s = ORDER.find((x) => x.kind === 'para' && x.src.startsWith('Paragraph number ${n} ')); s.edit.focus({ preventScroll: true });
+      const w = document.createTreeWalker(s.edit, NodeFilter.SHOW_TEXT); const t = w.nextNode(); const i = t.data.indexOf(${JSON.stringify(where)}) + ${where.length};
+      const r = document.createRange(); r.setStart(t, i); r.collapse(true); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); })()`);
+    // as a wheel would: the view held after the reload lets go
+    await page.eval(`(() => { if (anchorHold) anchorHold(); const s = ORDER.find((x) => x.kind === 'para' && x.src.startsWith('Paragraph number 30 ')); window.scrollBy(0, s.el.getBoundingClientRect().top - 420); })()`);
+    await sleep(300);
+    const check = async (what) => {
+      if (process.env.UNDO_DEBUG) console.log(what, JSON.stringify(await page.eval(`[scrollY, ...[27,28,29,30,31,32].map((n) => { const s = ORDER.find((x) => x.kind === 'para' && x.src.startsWith('Paragraph number ' + n + ' ')); return n + ':' + Math.round(s.el.getBoundingClientRect().top) + '/' + Math.round(s.el.getBoundingClientRect().height) + '/' + s.el.parentNode.dataset.page; })]`)));
+      const y = await top(31);
+      if (Math.abs(y - base) > 3) throw new Error(`${what}: paragraph 31 moved from ${base} to ${y}`);
+    };
+    // typing, a split and a join, each undone and redone, in paragraph 30 (on screen)
+    await caret(30, 'enough words');
+    const before = await top(30);
+    await page.type(' extra');
+    await sleep(300);
+    const typed = await top(30);
+    if (Math.abs(typed - before) > 3) throw new Error(`typing moved the paragraph from ${before} to ${typed}`);
+    await sleep(300);
+    const base = await top(31);
+    if (process.env.UNDO_DEBUG) { const c = check; await c('before').catch(() => {}); }
+    await page.key('z', { ctrl: true }); await sleep(500); await check('undo typing');
+    await page.key('z', { ctrl: true, shift: true }); await sleep(500); await check('redo typing');
+    await caret(29, 'drawn again');
+    await page.key('Enter'); await sleep(500);
+    const split = await top(31);
+    await page.key('z', { ctrl: true }); await sleep(500);
+    const y1 = await top(31);
+    if (Math.abs(y1 - base) > 3 && Math.abs(y1 - split) > 3) throw new Error(`undo split: paragraph 31 jumped to ${y1} (was ${base}, ${split} after the split)`);
+    await page.key('z', { ctrl: true, shift: true }); await sleep(500);
+    const y2 = await top(31);
+    if (Math.abs(y2 - split) > 3 && Math.abs(y2 - base) > 3) throw new Error(`redo split: paragraph 31 jumped to ${y2}`);
+  },
+
+  async 'files: To file moves a section into sections/, Undo takes it back, save writes it'(env, page) {
+    await page.click(headBtn('Related work', 'Move this section into a file'));
+    await page.waitFor(`!!FILES['sections/related-work.tex']`, 4000, 'the new file');
+    has(await page.pageText(), 'Other papers exist.', 'the text still shows');
+    await page.key('z', { ctrl: true });
+    await page.waitFor(`editedFiles().length === 0`, 4000, 'undo to leave nothing to save');
+    await page.click(headBtn('Related work', 'Move this section into a file'));
+    await page.save();
+    const main = env.read('main.tex');
+    has(main, '\\input{sections/related-work}', 'the input');
+    hasNot(main, 'Other papers exist.', 'the text left main.tex');
+    eq(env.read('sections/related-work.tex'), '\\section{Related work}\nOther papers exist.\n', 'the section file');
+    untouched(env, 'sections/body.tex');
+  },
+
+  async 'files: one file per section, named after labels and titles'(env, page) {
+    await page.eval(`(window.confirm = () => true, splitAllSections())`);
+    await page.save();
+    const main = env.read('main.tex');
+    has(main, '\\input{sections/intro}', 'named after its label');
+    has(main, '\\input{sections/conclusion}', 'named after its title');
+    has(main, '\\bibliography{refs}\n\\end{document}', 'the bibliography stays in main.tex');
+    has(env.read('sections/intro.tex'), 'quick brown fox', 'the intro file');
+    hasNot(env.read('sections/conclusion.tex'), 'bibliography', 'the conclusion file');
+    untouched(env, 'sections/body.tex');
+  },
+
+  async 'house rules: the banner shows where, and closes'(env, page) {
+    await page.eval(`(() => { const s = ORDER.find((x) => x.kind === 'para' && x.src.includes('Other papers')); s.edit.append(' See (', chip('ref', '\\\\cref{sec:intro}', 'Section 1'), ').'); s.touched = true; markEdited(); })()`);
+    await page.eval(`window.confirm = () => true`);
+    await page.save();
+    await page.waitFor(`/bracketed/.test($('#banner').textContent)`, 4000, 'the warning');
+    await page.eval(`[...$('#banner').querySelectorAll('.banner-act')].find((b) => /Show/.test(b.textContent)).click()`);
+    await page.waitFor(`!!document.querySelector('#doc .seg.house-flag')`, 2000, 'the block flagged');
+    await page.eval(`$('#banner .banner-close').click()`);
+    await page.waitFor(`$('#banner').hidden`, 2000, 'the banner closed');
+  },
+
+  async 'source view: a new file, read by the document, saved with its input'(env, page) {
+    await page.eval(`(() => { window.prompt = () => 'sections/extra.tex'; window.confirm = () => true; })()`);
+    await page.select('Other papers exist.', 'end');
+    await page.eval('toggleSource(true)');
+    await page.waitFor(`SRC.on && SRC.name`, 4000, 'the source view');
+    await page.eval('srcNewFile()');
+    await page.waitFor(`SRC.name === 'sections/extra.tex'`, 6000, 'the new file open');
+    eq(env.read('sections/extra.tex'), '% extra.tex\n', 'made on disk at once');
+    if (process.env.SRC_DEBUG) console.log(await page.eval(`JSON.stringify({ main: FILES['main.tex'].text.includes('extra'), at: SRC.paperAt && SRC.paperAt.src.slice(0, 30), doc: !!DOC.files['sections/extra.tex'], files: SRC.files.filter((f) => f.name.includes('extra')) })`));
+    // typed in the source view, then saved with the paper
+    await page.eval(`(() => { const ta = $('#srcta'); ta.value = 'Extra words.\\n'; ta.dispatchEvent(new Event('input')); })()`);
+    await sleep(600);
+    await page.save();
+    eq(env.read('sections/extra.tex'), 'Extra words.\n', 'its text');
+    has(env.read('main.tex'), 'Other papers exist.\n\n\\input{sections/extra}', 'read after the block the cursor was in');
+  },
+
+  async 'source view: open in your editor; preview only follows the file on disk'(env, page) {
+    const out = path.join(env.dir, 'editor-called');
+    fs.writeFileSync(path.join(env.state, 'config.json'), JSON.stringify({ build: 'true',
+      external_editor: ['sh', '-c', 'printf "%s:%s" "$1" "$2" > "$3"', 'sh', '{file}', '{line}', out] }));
+    await env.stopServer(); await env.startServer();
+    await page.select('lazy dog', 'end');
+    await page.eval('toggleSource(true)');
+    await page.waitFor(`SRC.on && SRC.name === 'main.tex'`, 4000, 'the source view');
+    await page.eval('setSourcePreview(true)');
+    eq(await page.eval(`$('#srcta').readOnly`), true, 'read only in preview');
+    await page.click('#srcext');
+    await page.waitFor(`true`, 100);
+    for (let k = 0; k < 40 && !fs.existsSync(out); k++) await sleep(100);
+    const called = fs.readFileSync(out, 'utf8');
+    has(called, path.join(env.paper, 'main.tex') + ':', 'the editor got the file');
+    const want = FILES['main.tex'].split('\n').findIndex((l) => l.includes('lazy dog')) + 1;
+    eq(called.split(':').pop(), String(want), 'at the cursor\'s line');
+    // the user's editor saves: the preview shows it
+    env.write('main.tex', env.read('main.tex').replace('lazy dog.', 'lazy dog, edited outside.'));
+    await page.waitFor(`$('#srcta').value.includes('edited outside')`, 15000, 'the preview following the disk');
+    await page.eval('setSourcePreview(false)');
+    eq(await page.eval(`$('#srcta').readOnly`), false, 'editable again');
+  },
+
+  async 'source view: opens at the place the paper shows, and goes back to the place it shows'(env, page) {
+    const paras = Array.from({ length: 90 }, (_, i) => `Paragraph number ${i} has some words in it, enough to fill a line or two of the page here.`);
+    env.write('main.tex', '\\documentclass{article}\n\\begin{document}\n' + paras.join('\n\n') + '\n\\end{document}\n');
+    await page.eval('toggleSource(false)');
+    await page.eval('load(true)');
+    await page.waitFor(`ORDER.some((s) => s.src.includes('number 89'))`, 8000, 'the long text');
+    const lineOf = (n) => 3 + 2 * n;      // paragraph n is on this line of main.tex
+    // the paper with paragraph 40 at the top, the caret elsewhere (off screen)
+    // (a wheel, as the reader's own scroll, ends the hold on the place after the reload)
+    await page.eval(`(() => { dispatchEvent(new WheelEvent('wheel')); getSelection().removeAllRanges(); const s = ORDER.find((x) => x.src.includes('number 40 ')); window.scrollBy(0, s.el.getBoundingClientRect().top - chromeBottom() - 30); })()`);
+    const y0 = await page.eval(`Math.round(ORDER.find((x) => x.src.includes('number 40 ')).el.getBoundingClientRect().top)`);
+    await page.eval('toggleSource(true)');
+    await page.waitFor(`SRC.on && SRC.name === 'main.tex'`, 4000, 'the source view');
+    const r = await page.eval(`(() => { const ta = $('#srcta'); return { top: srcTopLine(), y: Math.round(ta.getBoundingClientRect().top + srcLineTop(${lineOf(40)}) - ta.scrollTop) }; })()`);
+    if (Math.abs(r.top - lineOf(40)) > 2) throw new Error(`source opened at line ${r.top}, the paper showed line ${lineOf(40)}`);
+    const taTop = await page.eval(`Math.round($('#srcta').getBoundingClientRect().top)`);
+    if (Math.abs(r.y - Math.max(y0, taTop)) > 40) throw new Error(`line ${lineOf(40)} at ${r.y}px, its block was at ${y0}px (text box from ${taTop}px)`);
+    // scrolled to paragraph 70 in the source: back in the paper, paragraph 70 is there
+    await page.eval(`(() => { const ta = $('#srcta'); ta.blur(); ta.scrollTop = srcLineTop(${lineOf(70)}) - 50; ta.dispatchEvent(new Event('scroll')); })()`);
+    const y1 = await page.eval(`Math.round($('#srcta').getBoundingClientRect().top + srcLineTop(${lineOf(70)}) - $('#srcta').scrollTop)`);
+    await page.eval('toggleSource(false)');
+    await sleep(100);
+    const y2 = await page.eval(`Math.round(ORDER.find((x) => x.src.includes('number 70 ')).el.getBoundingClientRect().top)`);
+    if (Math.abs(y2 - y1) > 40) throw new Error(`paragraph 70 at ${y2}px in the paper, its line was at ${y1}px`);
+  },
+
+  async 'source view: rename a document file and a bibliography; their readers follow'(env, page) {
+    env.write('main.tex', env.read('main.tex'));
+    await page.eval('toggleSource(true)');
+    await page.waitFor(`SRC.on && SRC.name`, 4000, 'the source view');
+    await page.eval(`openSourceFile('sections/body.tex')`);
+    await page.eval(`(() => { window.prompt = () => 'sections/the-body.tex'; window.confirm = () => true; })()`);
+    await page.eval('srcRename()');
+    await page.waitFor(`SRC.name === 'sections/the-body.tex'`, 6000, 'the renamed file open');
+    has(env.read('main.tex'), '\\input{sections/the-body}', 'the input follows');
+    eq(fs.existsSync(path.join(env.paper, 'sections/body.tex')), false, 'the old name is gone');
+    has(env.read('sections/the-body.tex'), '\\section{Body}', 'the text moved');
+    await page.eval(`openSourceFile('refs.bib')`);
+    await page.eval(`window.prompt = () => 'library.bib'`);
+    await page.eval('srcRename()');
+    await page.waitFor(`SRC.name === 'library.bib'`, 6000, 'the renamed bibliography');
+    has(env.read('main.tex'), '\\bibliography{library}', '\\bibliography follows');
+  },
+
+  async 'source view: delete an unused file, and a file the document reads'(env, page) {
+    await page.eval(`window.confirm = () => true`);
+    await page.eval('toggleSource(true)');
+    await page.waitFor(`SRC.on && SRC.name`, 4000, 'the source view');
+    await page.eval(`openSourceFile('other.tex')`);
+    await page.eval('srcDelete()');
+    await page.waitFor(`SRC.name === DOC.main`, 6000, 'back on the main file');
+    eq(fs.existsSync(path.join(env.paper, 'other.tex')), false, 'other.tex moved away');
+    const trash = path.join(env.state, 'trash');
+    if (!fs.readdirSync(trash).some((f) => f.endsWith('other.tex'))) throw new Error('other.tex is not in the trash');
+    await page.eval(`openSourceFile('sections/body.tex')`);
+    await page.eval('srcDelete()');
+    await page.waitFor(`SRC.name === DOC.main && !FILES['sections/body.tex']`, 8000, 'body.tex deleted');
+    hasNot(env.read('main.tex'), '\\input{sections/body}', 'its input taken out');
+    eq(fs.existsSync(path.join(env.paper, 'sections/body.tex')), false, 'body.tex moved away');
+    // the main file is never deleted or renamed here
+    eq(await page.eval(`$('#srcdelete').disabled && $('#srcrename').disabled`), true, 'main file buttons off');
+  },
+
+  async 'drafts: unsaved edits survive a reload and come back on Restore'(env, page) {
+    await page.select('brown');
+    await page.type('red');
+    await sleep(3500);                                  // a draft is kept every 3 s
+    await page.send('Page.reload');                     // (the leave warning is accepted)
+    await page.waitFor(`typeof ORDER !== 'undefined' && ORDER.length > 0 && /Unsaved edits from/.test($('#banner').textContent)`, 15000, 'the offer');
+    // textContent: just after a reload, blocks not laid out yet have no innerText
+    has(await page.eval(`$('#doc').textContent`), 'quick brown fox', 'the page shows the file as on disk');
+    await page.eval(`[...$('#banner').querySelectorAll('.banner-act')].find((b) => b.textContent === 'Restore').click()`);
+    await page.waitFor(`/quick red fox/.test($('#doc').textContent)`, 4000, 'the edit back');
+    await page.save();
+    onlyChange(env, 'main.tex', 'quick brown fox', 'quick red fox');
+    eq(await page.eval(`Object.keys(localStorage).filter((k) => k.startsWith('draft:')).length`), 0, 'no draft left after saving');
+  },
+
+  async 'drafts: a file changed on disk since is not overwritten by a restored draft'(env, page) {
+    await page.select('brown');
+    await page.type('red');
+    await sleep(3500);
+    env.write('main.tex', MAIN.replace('lazy dog', 'sleepy dog'));
+    await page.send('Page.reload');
+    await page.waitFor(`typeof ORDER !== 'undefined' && ORDER.length > 0 && /changed on disk since/.test($('#banner').textContent)`, 15000, 'the offer, with the warning');
+    await page.eval(`[...$('#banner').querySelectorAll('.banner-act')].find((b) => b.textContent === 'Restore').click()`);
+    await page.waitFor(`/quick red fox/.test($('#doc').textContent)`, 4000, 'the edit back');
+    await page.key('s', { ctrl: true });
+    await page.waitFor(`!$('#external').hidden`, 6000, 'the conflict choice');
+    has(env.read('main.tex'), 'sleepy dog', 'the other version is still on disk');
+    hasNot(env.read('main.tex'), 'quick red fox', 'not overwritten');
+  },
+
+  async 'drafts: Discard forgets them'(env, page) {
+    await page.select('brown');
+    await page.type('red');
+    await sleep(3500);
+    await page.send('Page.reload');
+    await page.waitFor(`typeof ORDER !== 'undefined' && ORDER.length > 0 && /Unsaved edits from/.test($('#banner').textContent)`, 15000, 'the offer');
+    await page.eval(`[...$('#banner').querySelectorAll('.banner-act')].find((b) => b.textContent === 'Discard').click()`);
+    eq(await page.eval(`Object.keys(localStorage).filter((k) => k.startsWith('draft:')).length`), 0, 'forgotten');
+    await page.send('Page.reload');
+    await page.waitFor(`typeof ORDER !== 'undefined' && ORDER.length > 0`, 15000, 'reload');
+    await sleep(500);
+    hasNot(await page.eval(`$('#banner').hidden ? '' : $('#banner').textContent`), 'Unsaved edits', 'no offer again');
+  },
+
+  async 'a11y: every panel has a × that closes it'(env, page) {
+    await page.eval('openFind(false)');
+    await page.click('#find-close');
+    eq(await page.eval(`$('#findbar').hidden`), true, 'find closed by ×');
+    await page.eval(`$('#help').click()`);
+    await page.waitFor(`!$('#helpbox').hidden`);
+    await page.click('#helpclose');
+    eq(await page.eval(`$('#helpbox').hidden`), true, 'help closed by ×');
+    for (const [open, box, x] of [['openFiles()', '#filesbox', '#files-close'], [`$('#historybtn').click()`, '#historybox', '#history-close'], [`$('#keysbtn').click()`, '#keysbox', '#keys-close']]) {
+      await page.eval(open);
+      await page.waitFor(`!$('${box}').hidden`, 4000, box);
+      eq(await page.eval(`!!$('${x}').querySelector('use') && $('${x}').getAttribute('aria-label').startsWith('Close')`), true, `${x} is a labelled ×`);
+      await page.click(x);
+      await page.waitFor(`$('${box}').hidden`, 2000, `${box} closed`);
+    }
+    await page.select('lazy dog', 'end');
+    await page.eval('citePalette()');
+    await page.waitFor(`!$('#palette').hidden`, 4000, 'the palette');
+    await page.click(`js:document.querySelector('#palette .xclose')`);
+    eq(await page.eval(`$('#palette').hidden`), true, 'palette closed by ×');
+    await page.eval(`banner('A message')`);
+    await page.click(`js:document.querySelector('#banner .xclose')`);
+    eq(await page.eval(`$('#banner').hidden`), true, 'banner closed by ×');
+  },
+
+  async 'a11y: focus goes into a dialog, stays in it with Tab, and comes back'(env, page) {
+    await page.select('lazy dog', 'end');
+    await page.eval('openFiles()');
+    await page.waitFor(`$('#filesbox').contains(document.activeElement)`, 2000, 'focus in Files');
+    for (let i = 0; i < 25; i++) await page.key('Tab');
+    eq(await page.eval(`$('#filesbox').contains(document.activeElement)`), true, 'Tab stays inside');
+    for (let i = 0; i < 5; i++) await page.key('Tab', { shift: true });
+    eq(await page.eval(`$('#filesbox').contains(document.activeElement)`), true, 'Shift+Tab stays inside');
+    await page.key('Escape');
+    await page.waitFor(`$('#filesbox').hidden`, 2000, 'closed');
+    await sleep(100);
+    eq(await page.eval(`!!segOf(document.activeElement)`), true, 'focus back in the text');
+  },
+
+  async 'a11y: skip link, and the keyboard steps from block to block and heading to heading'(env, page) {
+    eq(await page.eval(`$('#skiplink').getAttribute('href')`), '#doc', 'skip link');
+    eq(await page.eval(`$('#doc').getAttribute('aria-label')`), 'The paper', 'the paper is labelled');
+    await page.select('quick brown fox', 'start');
+    await page.key('ArrowDown', { alt: true });
+    has(await page.eval(`caretSeg().src`), 'A second paragraph', 'next block');
+    await page.key('PageDown', { ctrl: true, alt: true });
+    has(await page.eval(`caretSeg().src`), '\\section{Related work}', 'next heading');
+    await page.key('ArrowUp', { alt: true });
+    has(await page.eval(`caretSeg().src`), 'A second paragraph', 'previous block');
+    await sleep(100);
+    has(await page.eval(`$('#sr-live').textContent`), 'Paragraph: A second paragraph', 'announced');
+    await page.key('PageUp', { ctrl: true, alt: true });
+    has(await page.eval(`caretSeg().src`), '\\section{Introduction}', 'previous heading');
+  },
+
+  async 'trace: Report a problem keeps what was pressed and done, and flags a jump'(env, page) {
+    await page.select('brown');
+    await page.type('red');
+    await page.key('z', { ctrl: true });
+    await page.click('#diffbtn'); await sleep(300); await page.click('#diffbtn');
+    // a scroll nobody asked for: the page grows above the view and the browser moves it
+    await page.eval(`(() => { document.body.style.minHeight = '5000px'; window.scrollTo(0, 400); })()`);
+    await sleep(700);
+    await page.eval(`(() => { document.documentElement.scrollTop = 1400; })()`);   // not through scrollBy/scrollTo
+    await sleep(700);
+    await page.eval(`window.prompt = () => 'the view jumped after undo'`);
+    await page.eval('REC.report()');
+    await page.waitFor(`/Problem report kept in/.test($('#banner').textContent)`, 8000, 'the report');
+    const dir = path.join(env.state, 'debug');
+    const file = fs.readdirSync(dir).find((f) => f.startsWith('report-'));
+    const lines = fs.readFileSync(path.join(dir, file), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    eq(lines[0].note, 'the view jumped after undo', 'the note first');
+    const kinds = new Set(lines.map((l) => l.k));
+    for (const k of ['key', 'press', 'typed', 'do', 'jump']) if (!kinds.has(k)) throw new Error(`no ${k} in the report: ${[...kinds].join(', ')}`);
+    if (!lines.some((l) => l.k === 'key' && l.key === 'C-z')) throw new Error('Ctrl+Z not recorded');
+    if (!lines.some((l) => l.k === 'press' && /diffbtn/.test(l.on))) throw new Error('the Diff click not recorded');
+    if (!lines.some((l) => l.k === 'do' && l.fn === 'restore')) throw new Error('the undo not recorded');
+    if (lines.some((l) => JSON.stringify(l).includes('"red"'))) throw new Error('typed text was kept');
+  },
+
+  async 'new code: the page reloads itself where it was, with its unsaved edits'(env, page) {
+    await page.select('brown');
+    await page.type('red');
+    await page.eval(`(() => { openFind(false); $('#find-q').value = 'paper'; $('#find-q').dispatchEvent(new Event('input')); })()`);
+    await page.eval(`(() => { const s = ORDER.find((x) => x.src.includes('Related work')); window.scrollBy(0, s.el.getBoundingClientRect().top - 300); if (anchorHold) anchorHold(); })()`);
+    await sleep(300);
+    const before = await page.eval(`Math.round(ORDER.find((x) => x.src.includes('Related work')).el.getBoundingClientRect().top)`);
+    await page.eval(`window.__marker = 1`);
+    fs.writeFileSync(path.join(env.dir, 'code-probe'), String(Date.now()));   // "new code"
+    await sleep(3200);    // the next status poll, then a quiet moment
+    await page.waitFor(`typeof ORDER !== 'undefined' && ORDER.length > 0 && !window.__marker && /new version/.test([...document.querySelectorAll('.toast')].map((t) => t.textContent).join())`, 15000, 'the reload and its toast');
+    has(await page.pageText(), 'quick red fox', 'the unsaved edit is back');
+    eq(await page.eval(`editedFiles().length`), 1, 'still unsaved');
+    eq(await page.eval(`!$('#findbar').hidden && $('#find-q').value`), 'paper', 'the find bar with its query');
+    const after = await page.eval(`Math.round(ORDER.find((x) => x.src.includes('Related work')).el.getBoundingClientRect().top)`);
+    if (Math.abs(after - before) > 4) throw new Error(`the view moved: ${before} -> ${after}`);
+    hasNot(await page.eval(`$('#banner').hidden ? '' : $('#banner').textContent`), 'Unsaved edits from', 'no offer: they came back by themselves');
+    await page.save();
+    onlyChange(env, 'main.tex', 'quick brown fox', 'quick red fox');
+  },
+
+  async 'Open: recent papers, the system dialog\'s folder, and opening another document'(env, page) {
+    await page.key('o', { ctrl: true });
+    await page.waitFor(`!$('#openbox').hidden && document.querySelector('#open-recent .open-paper')`, 4000, 'the Open window with the recent list');
+    has(await page.eval(`$('#open-recent').textContent`), 'open now', 'the paper open now is in the list');
+    const scrim = await page.eval(`(() => { const c = getComputedStyle(document.body, '::before'); return c.content !== 'none' && c.position === 'fixed' && c.backgroundColor; })()`);
+    if (!scrim || /rgba\(0, 0, 0, 0\)/.test(scrim)) throw new Error('no dimmed backdrop behind the dialog: ' + scrim);
+    eq(await page.eval(`!!document.querySelector('#open-dirs, #open-browse-head')`), false, 'no folder browser');
+    // the system dialog chose the paper's folder, which has two documents: a button each
+    await page.eval(`offerMains(${JSON.stringify(env.paper)}, ['main.tex', 'other.tex'])`);
+    eq(await page.eval(`[...document.querySelectorAll('#open-mains button')].map((b) => b.textContent).sort().join()`), 'Open main.tex,Open other.tex', 'a button per document');
+    await page.click(`js:[...document.querySelectorAll('#open-mains button')].find((b) => b.textContent === 'Open other.tex')`);
+    await page.waitFor(`DOC && DOC.main === 'other.tex' && $('#openbox').hidden`, 8000, 'the other document open');
+    has(await page.pageText(), 'The other document.', 'its text');
+    await page.key('o', { ctrl: true });
+    await page.waitFor(`document.querySelectorAll('#open-recent .open-paper').length === 2`, 4000, 'two recent papers now');
+    await page.key('2');
+    await page.waitFor(`DOC && DOC.main === 'main.tex'`, 8000, 'back to main.tex with its number');
+  },
+
+  async 'New paper: a venue, anonymous, metadata, sections and cryptobib as a submodule'(env, page) {
+    // a local stand-in for cryptobib (PE_CRYPTOBIB_URL): a repository with the two files
+    const cb = path.join(env.dir, 'cryptobib-src');
+    fs.mkdirSync(cb);
+    fs.writeFileSync(path.join(cb, 'abbrev3.bib'), '@string{ec = "EUROCRYPT"}\n');
+    fs.writeFileSync(path.join(cb, 'crypto.bib'), '@misc{EC:Test, author = {A}, title = {T}, year = {2020}}\n');
+    const git = (args, cwd) => require('child_process').execFileSync('git', args, { cwd, env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
+    git(['init', '-q'], cb); git(['add', '.'], cb); git(['commit', '-qm', 'bib'], cb);
+    const parent = path.join(env.dir, 'papers');
+    fs.mkdirSync(parent);
+    await page.key('o', { ctrl: true });
+    await page.waitFor(`!$('#openbox').hidden`, 4000, 'Open');
+    await page.click('#open-new');
+    await page.waitFor(`!$('#newbox').hidden && $('#new-venue').options.length > 3`, 4000, 'the New paper dialog');
+    await page.eval(`(() => {
+      $('#new-parent').value = ${JSON.stringify(parent)}; $('#new-name').value = 'fresh';
+      $('#new-venue').value = 'llncs'; $('#new-anon').checked = true;
+      document.querySelector('input[name=new-cb][value=submodule]').checked = true;
+      $('#new-ptitle').value = 'A Fresh Paper'; $('#new-keywords').value = 'one, two'; $('#new-abstract').value = 'We begin.';
+      const r = document.querySelector('#new-authors .new-author');
+      const v = { name: 'Ada Lovelace', email: 'ada@x.org', affiliation: 'University of Porto', country: 'Portugal' };
+      for (const i of r.querySelectorAll('input')) i.value = v[i.dataset.k];
+    })()`);
+    await page.click('#new-create');
+    await page.waitFor(`DOC && DOC.path && DOC.path.includes('fresh') && $('#newbox').hidden`, 30000, 'the new paper open');
+    const dir = path.join(parent, 'fresh');
+    const main = fs.readFileSync(path.join(dir, 'main.tex'), 'utf8');
+    has(main, '\\anontrue', 'anonymous');
+    has(main, '\\documentclass[runningheads]{llncs}', 'the venue\'s class');
+    has(main, '\\title{A Fresh Paper}', 'the title');
+    has(main, 'Ada Lovelace', 'the author, in the named version');
+    has(main, '\\input{sections/01-introduction}', 'the sections');
+    has(main, '\\bibliography{cryptobib/abbrev3,cryptobib/crypto,references}', 'cryptobib and references.bib');
+    for (const f of ['sections/01-introduction.tex', 'sections/02-conclusion.tex', 'references.bib', 'cryptobib/crypto.bib', '.gitmodules', '.gitignore'])
+      eq(fs.existsSync(path.join(dir, f)), true, f);
+    has(await page.pageText(), 'Introduction', 'the paper on the page');
+    // a folder that is not empty is refused, with a message
+    await page.key('o', { ctrl: true });
+    await page.click('#open-new');
+    await page.waitFor(`!$('#newbox').hidden`, 4000, 'the dialog again');
+    await page.eval(`(() => { $('#new-parent').value = ${JSON.stringify(parent)}; $('#new-name').value = 'fresh'; document.querySelector('input[name=new-cb][value=none]').checked = true; })()`);
+    await page.click('#new-create');
+    await page.waitFor(`/not empty/.test($('#new-status').textContent)`, 6000, 'the refusal');
+  },
+
+  async 'selection: pressing inside it starts a new one; it survives a redraw'(env, page) {
+    await page.select('quick brown fox');
+    eq(await page.eval(`getSelection().toString()`), 'quick brown fox', 'selected');
+    await page.eval('load(true)');
+    await sleep(300);
+    eq(await page.eval(`getSelection().toString()`), 'quick brown fox', 'the same text after a redraw');
+    const at = await page.eval(`(() => { const r = getSelection().getRangeAt(0).getClientRects()[0]; return { x: r.left + 12, y: r.top + r.height / 2 }; })()`);
+    await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: at.x, y: at.y, button: 'left', clickCount: 1 });
+    eq(await page.eval(`getSelection().isCollapsed`), true, 'a press inside the selection puts the caret there');
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: at.x, y: at.y, button: 'left', clickCount: 1 });
+    eq(await page.eval(`(() => { const e = new DragEvent('dragstart', { bubbles: true, cancelable: true }); ORDER.find((s) => s.kind === 'para').edit.firstChild.parentElement.dispatchEvent(e); return e.defaultPrevented; })()`), true, 'no dragging of text');
+  },
+
+  async 'game editor: colours, \\BeginBox bands, comments typeset, two-way macros as printed'(env, page) {
+    env.write('main.tex', String.raw`\documentclass{article}
+\usepackage{xcolor,tikz,algpseudocodex}
+\definecolor{gone}{RGB}{0,158,115}
+\newcommand{\gc}[2]{\textcolor{g#1}{#2}}
+\tikzset{gbox/.style={draw=g#1,line width=.6pt}}
+\newcommand{\G}[1]{\mathsf{G}_{#1}}
+\newif\ifmobile
+\newcommand{\layoutchoice}[2]{\ifmobile#1\else#2\fi}
+\newenvironment{gameenv}[1]{\textbf{#1}\begin{algorithmic}[1]}{\end{algorithmic}}
+\begin{document}
+Text.
+
+\begin{figure}[t]
+\begin{gameenv}{Game $\G0$/\gc{one}{$\G1$}}
+\State $x\gets 0$ \Comment{$\G0$--$\G1$}
+\BeginBox[gbox=one]
+\State $y\gets 1$\layoutchoice{\Statex\hfill phone}{ \Comment{$\G1$}}
+\EndBox
+\end{gameenv}
+\caption{Games.}\label{fig:g}
+\end{figure}
+\end{document}
+`);
+    await page.eval('load(true)');
+    await page.waitFor(`ORDER.some((s) => s.kind === 'figure' && /BeginBox/.test(s.src))`, 8000, 'the figure');
+    await page.eval(`(() => { openFigure(ORDER.find((s) => s.kind === 'figure')); showFigTab('games'); })()`);
+    await page.waitFor(`document.querySelector('#fv-body .gline')`, 4000, 'the game');
+    const r = await page.eval(`(() => ({
+      title: [...document.querySelectorAll('#fv-body .tcolor')].map((e) => getComputedStyle(e).color),
+      banded: document.querySelectorAll('#fv-body .gline.in-gbox:not(.gbox-begin):not(.gbox-end)').length,
+      band: getComputedStyle(document.querySelector('#fv-body .gline.in-gbox')).getPropertyValue('--gbox').trim(),
+      label: (document.querySelector('#fv-body .gbox-label') || {}).textContent,
+      comments: [...document.querySelectorAll('#fv-body .gcomment')].map((e) => e.textContent),
+      raw: [...document.querySelectorAll('#fv-body .gline')].map((e) => e.textContent).join(' | '),
+    }))()`);
+    eq(r.title[0], 'rgb(0, 158, 115)', 'G1 in its colour in the title');
+    eq(r.banded, 1, 'one line in the box');
+    eq(r.band, '#009e73', 'the box in the colour of gbox=one');
+    eq(r.label, 'one', 'the box labelled');
+    if (r.comments.some((c) => c.includes('--'))) throw new Error('a dash left as --: ' + r.comments);
+    eq(r.comments.length, 2, 'both comments, the one inside \\layoutchoice too');
+    hasNot(r.raw, 'layoutchoice', 'no raw \\layoutchoice');
+    hasNot(r.raw, 'BeginBox', 'no raw \\BeginBox');
+  },
+
+  async 'game editor: a statement followed by \\layoutchoice can be edited'(env, page) {
+    env.write('main.tex', String.raw`\documentclass{article}
+\usepackage{algpseudocodex}
+\newif\ifmobile
+\newcommand{\layoutchoice}[2]{\ifmobile#1\else#2\fi}
+\newcommand{\sw}[3]{#1_{#2#3}}
+\begin{document}
+Text.
+
+\begin{figure}[t]
+\begin{algorithmic}[1]
+\State $L\gets\sw{\theta}{a}{t}$\layoutchoice{\Statex\hfill phone}{ \Comment{$G_1$}}
+\State $x\gets 0$
+\end{algorithmic}
+\caption{Games.}\label{fig:g}
+\end{figure}
+\end{document}
+`);
+    await page.eval('load(true)');
+    await page.waitFor(`ORDER.some((s) => s.kind === 'figure' && /layoutchoice/.test(s.src))`, 8000, 'the figure');
+    await page.eval(`(() => { openFigure(ORDER.find((s) => s.kind === 'figure')); showFigTab('games'); })()`);
+    await page.waitFor(`document.querySelector('#fv-body .gline')`, 4000, 'the game');
+    const line = `[...document.querySelectorAll('#fv-body .gline')].find((r) => /theta|θ/.test(r.innerHTML) && r.querySelector('.gtext[contenteditable=true]'))`;
+    eq(await page.eval(`!!(${line})`), true, 'the statement is editable');
+    await page.eval(`(() => { const t = (${line}).querySelector('.gtext[contenteditable=true]'); t.append(document.createTextNode(' now')); t.dispatchEvent(new Event('input')); })()`);
+    await page.click('#fv-apply');
+    await page.waitFor(`$('#figview').hidden`);
+    await page.save();
+    has(env.read('main.tex'), '\\State $L\\gets\\sw{\\theta}{a}{t}$ now\\layoutchoice{\\Statex\\hfill phone}{ \\Comment{$G_1$}}', 'statement edited, macro kept');
+  },
+
+  async 'game editor: a % continued \\layoutchoice, boxes and line keys'(env, page) {
+    env.write('main.tex', String.raw`\documentclass{article}
+\usepackage{xcolor,tikz,algpseudocodex}
+\newif\ifmobile
+\newcommand{\layoutchoice}[2]{\ifmobile#1\else#2\fi}
+\begin{document}
+Text.
+
+\begin{figure}[t]
+\begin{algorithmic}[1]
+\BeginBox[gbox=one]
+\State $L\gets L\cup\{t\}$%
+  \layoutchoice{\Statex\hfill$\triangleright$ $G_1$}{\Comment{$G_1$, $G_3$}}
+\EndBox
+\BeginBox[gbox=two]
+\State $a\gets 1$ \Comment{$G_2$}
+\EndBox
+\State $b\gets 2$
+\State $c\gets 3$
+\end{algorithmic}
+\caption{Games.}\label{fig:g}
+\end{figure}
+\end{document}
+`);
+    await page.eval('load(true)');
+    await page.waitFor(`ORDER.some((s) => s.kind === 'figure' && /layoutchoice/.test(s.src))`, 8000, 'the figure');
+    await page.eval(`(() => { openFigure(ORDER.find((s) => s.kind === 'figure')); showFigTab('games'); })()`);
+    await page.waitFor(`document.querySelector('#fv-body .gline')`, 4000, 'the game');
+    const raw = await page.eval(`[...document.querySelectorAll('#fv-body .gline')].map((e) => e.textContent).join(' | ')`);
+    hasNot(raw, 'layoutchoice', 'the continued \\layoutchoice shown as printed');
+    eq(await page.eval(`[...document.querySelectorAll('#fv-body .gcomment')].length`), 2, 'its comment shown');
+    const lineOf = (re) => `[...document.querySelectorAll('#fv-body .gline')].find((r) => r.querySelector('.gtext[contenteditable=true]') && ${re}.test(r.querySelector('.gtext').textContent))`;
+    const src = () => page.eval('figureWithEdits()');
+    // put b in a new box of style two, then take it out again
+    await page.eval(`(() => { const s = (${lineOf('/^b/')}).querySelector('select.g-box'); s.value = 'in:gbox=two'; s.onchange(); })()`);
+    has(await src(), '\\BeginBox[gbox=two]\n\\State $b\\gets 2$\n\\EndBox', 'b boxed');
+    await page.eval(`(() => { const s = (${lineOf('/^b/')}).querySelector('select.g-box'); s.value = 'out'; s.onchange(); })()`);
+    hasNot(await src(), '\\BeginBox[gbox=two]\n\\State $b', 'b out of its box');
+    // Down on a moves it out of its box, which then goes (empty) on Remove
+    await page.eval(`[...(${lineOf('/^a/')}).querySelectorAll('.gtools button')].find((b) => b.textContent === 'Down').click()`);
+    has(await src(), '\\EndBox\n\\State $a\\gets 1$ \\Comment{$G_2$}', 'a moved out of the box');
+    // the edge of a box: restyle, then remove it with Delete
+    await page.eval(`(() => { const r = document.querySelectorAll('#fv-body .gline.gbox-begin')[0]; const s = r.querySelector('select'); s.value = 'gbox=two'; s.onchange(); })()`);
+    has(await src(), '\\BeginBox[gbox=two]\n\\State $L', 'box restyled');
+    await page.eval(`document.querySelectorAll('#fv-body .gline.gbox-begin')[0].focus()`);
+    await page.key('Delete');
+    hasNot(await src(), '\\BeginBox[gbox=two]\n\\State $L', 'box removed');
+    has(await src(), '\\State $L\\gets L\\cup\\{t\\}$%\n  \\layoutchoice', 'its line kept, with the macro');
+    // Enter makes a new line, Backspace on it deletes it; Ctrl+Shift+K deletes c
+    await page.eval(`(() => { const t = (${lineOf('/^c/')}).querySelector('.gtext'); t.focus(); })()`);
+    await page.key('Enter');
+    has(await src(), '\\State $c\\gets 3$\n\\State \n', 'a new statement');
+    await page.key('Backspace');
+    hasNot(await src(), '\\State \n', 'the empty statement deleted');
+    await page.key('k', { ctrl: true, shift: true });
+    hasNot(await src(), '$c\\gets 3$', 'c deleted in one step');
+    // the comment of a is edited in place
+    await page.eval(`(() => { const t = (${lineOf('/^a/')}).querySelector('.gcomment-edit'); t.append(document.createTextNode(' x')); t.dispatchEvent(new Event('input')); })()`);
+    has(await src(), '\\Comment{$G_2$ x}', 'comment edited');
   },
 
   async 'drawer: editing a formula'(env, page) {
@@ -931,6 +1509,18 @@ const TESTS = {
     await page.eval(`$('#drawer-apply').click()`);
     await page.save();
     onlyChange(env, 'main.tex', '$x^2 + y^2$', '$x^3$');
+  },
+
+  async 'heading tools stay off a long heading title'(env, page) {
+    // a title that runs to the end of the line: its buttons must not cover it
+    await page.eval(`(() => { const s = ORDER.find((s) => s.kind === 'heading' && s.src.includes('Related work'));
+      s.el.querySelector('.htitle').textContent = 'Related work on oracle games and their many long winding variants'; })()`);
+    const r = JSON.parse(await page.eval(`(() => { const s = ORDER.find((s) => s.kind === 'heading' && s.src.includes('Related work'));
+      const t = s.el.querySelector('.tools'); t.style.opacity = 1;
+      const a = s.el.querySelector('.htitle').getBoundingClientRect(), b = t.getBoundingClientRect();
+      return JSON.stringify({ toolsBottom: b.bottom, titleTop: a.top, w: b.width }); })()`));
+    if (!(r.w > 0)) throw new Error('tools not laid out: ' + JSON.stringify(r));
+    if (r.toolsBottom > r.titleTop + 1) throw new Error('heading tools overlap the title: ' + JSON.stringify(r));
   },
 
   async 'heading edits save'(env, page) {
@@ -1617,6 +2207,29 @@ Object.assign(TESTS, {
     has(env.read('main.tex'), 'A third paragraph', 'unsaved edit saved after leaving diff');
   },
 
+  async 'Diff: reload reads a commit made outside the editor'(env, page) {
+    const git = (...a) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: env.paper, stdio: 'ignore' });
+    git('init', '-q'); git('add', '-A'); git('commit', '-qm', 'first');
+    await page.select('brown');
+    await page.type('red');
+    await page.save();
+    await page.click('#diffbtn');
+    await page.eval(`$('#diffbase').value = 'head'; $('#diffbase').dispatchEvent(new Event('change'))`);
+    await waitDiffMarks(page, 1, 'one change since the first commit');
+    eq(await page.eval(`$('#diffcommits').children.length`), 0, 'no earlier commit yet');
+    git('commit', '-qam', 'second');
+    await page.click('#diffreload');
+    await waitDiffMarks(page, 0, 'no change since the new commit');
+    eq(await page.eval(`$('#diffcommits').children.length`), 1, 'the first commit is now an earlier one');
+    eq(await page.eval(`$('#diffbase').value`), 'head', 'still compared with the last commit');
+    await page.eval(`$('#diffbase').value = $('#diffcommits').children[0].value; $('#diffbase').dispatchEvent(new Event('change'))`);
+    await waitDiffMarks(page, 1, 'one change since the first commit');
+    await page.click('#diffreload');
+    await sleep(300);
+    eq(await page.eval(`$('#diffbase').value`), await page.eval(`$('#diffcommits').children[0].value`), 'reload keeps the chosen commit');
+    await waitDiffMarks(page, 1, 'one change since the first commit, after reload');
+  },
+
   async 'Diff: saving while it is shown writes the document, not the diff'(env, page) {
     await page.select('brown');
     await page.type('red');
@@ -1631,6 +2244,22 @@ Object.assign(TESTS, {
     await page.type('dish');
     await page.save();
     onlyChange(env, 'main.tex', 'quick brown fox', 'quick reddish fox');
+  },
+
+  async 'Diff: Revert puts one change back and leaves the others'(env, page) {
+    await page.select('brown');
+    await page.type('red');
+    await page.select('encryption');
+    await page.type('signature');
+    await page.click('#diffbtn');
+    await page.waitFor(`!$('#diffnav').hidden && /2 changes/.test($('#diffcount').textContent)`, 8000, 'two changes');
+    // revert the first change (the fox)
+    await page.eval(`[...document.querySelectorAll('#doc .diff-revert')].find((b) => /red/.test(b.parentNode.textContent)).click()`);
+    await page.waitFor(`/1 change/.test($('#diffcount').textContent)`, 8000, 'one change left');
+    await page.click('#diffbtn');
+    await page.waitFor(`$('#diffnav').hidden`);
+    await page.save();
+    onlyChange(env, 'main.tex', 'encryption schemes', 'signature schemes');
   },
 
   async 'Diff: waiting through a build, then leaving, keeps the document'(env, page) {
@@ -1880,17 +2509,9 @@ Object.assign(TESTS, {
     untouched(env, 'main.tex');
   },
 
-  async 'a selection across two paragraphs: typing, Backspace, paste, cut delete nothing'(env, page) {
-    await selectSpan(page, 'lazy', 'A second');
-    await page.type('x');
-    await selectSpan(page, 'lazy', 'A second');
-    await page.key('Backspace');
-    await selectSpan(page, 'lazy', 'A second');
-    await page.key('Delete');
+  async 'a selection across two paragraphs: paste, Ctrl+B, $ change nothing'(env, page) {
     await selectSpan(page, 'lazy', 'A second');
     await page.paste('pasted');
-    await selectSpan(page, 'lazy', 'A second');
-    await page.copy('cut');
     await selectSpan(page, 'lazy', 'A second');
     await page.key('$', { shift: true });
     await selectSpan(page, 'lazy', 'A second');
@@ -1898,6 +2519,33 @@ Object.assign(TESTS, {
     await page.save();
     untouched(env, 'main.tex', 'sections/body.tex');
     has(await page.pageText(), 'A second paragraph', 'page text');
+  },
+
+  async 'a selection across two paragraphs: typing replaces it and joins them'(env, page) {
+    await selectSpan(page, 'lazy', 'A second');
+    await page.type('x');
+    await page.save();
+    onlyChange(env, 'main.tex', 'lazy dog.\nWe study $x^2 + y^2$ here.\n\nA second paragraph', 'x paragraph');
+  },
+
+  async 'a selection across two paragraphs: Backspace deletes it, undo brings it back'(env, page) {
+    await selectSpan(page, 'lazy', 'A second');
+    await page.key('Backspace');
+    eq(await unsaved(page), 1, 'edited after Backspace');
+    await page.key('z', { ctrl: true });
+    eq(await unsaved(page), 0, 'edited after undo');
+    await page.save();
+    untouched(env, 'main.tex');
+  },
+
+  async 'a selection across two paragraphs: cut copies both and joins them'(env, page) {
+    await selectSpan(page, 'lazy', 'A second');
+    const got = await page.copy('cut');
+    has(got['text/plain'], 'lazy dog.', 'plain text of the first');
+    has(got['text/plain'], 'A second', 'plain text of the second');
+    has(got['application/x-paper-editor-latex'], '$x^2 + y^2$', 'LaTeX of the first');
+    await page.save();
+    onlyChange(env, 'main.tex', 'the lazy dog.\nWe study $x^2 + y^2$ here.\n\nA second paragraph', 'the paragraph');
   },
 
   async 'a selection from a heading into its text: nothing is merged'(env, page) {
@@ -2609,6 +3257,16 @@ async function tortureRun(env, page, seed, ops) {
 }
 
 Object.assign(TESTS, {
+  async 'word diff: a rewritten sentence is one change, not alternating words'(env, page) {
+    const runs = (a, b) => page.eval(`JSON.stringify(wordDiffRuns(${JSON.stringify(a)}, ${JSON.stringify(b)}).map((r) => r.eq ? '=' + r.b.map((u) => u.tok.s || '').join('') : '-' + r.a.map((u) => u.tok.s || '').join('') + '+' + r.b.map((u) => u.tok.s || '').join('')))`).then(JSON.parse);
+    eq(JSON.stringify(await runs('The quick brown fox jumps.', 'The quick red fox jumps.')), JSON.stringify(['=The quick ', '-brown+red', '= fox jumps.']), 'one word');
+    const r = await runs('Theorem 10 is the separation at one length and two steps relate it to the definition.',
+      'The reduction accesses the finder only through the adversary, which submits only tagged copies of the circuits.');
+    eq(r.filter((x) => x[0] === '-').length, 1, `a rewritten sentence is a single change: ${JSON.stringify(r)}`);
+    eq(await page.eval(`diffSimilarity('the quick brown fox jumps over the dog', 'the quick red fox jumps over the dog') > 0.8`), true, 'a small edit is alike');
+    eq(await page.eval(`diffSimilarity('Theorem 10 is the separation at one length', 'The reduction accesses the finder only through it') < 0.5`), true, 'a rewrite is not alike');
+  },
+
   async 'peek: hovering the change bar of an edited block shows the change, and Revert takes it back'(env, page) {
     await page.select('brown'); await page.type('red'); await sleep(600);
     const at = await page.eval(`(() => { const s = ORDER.find((x) => x.el && x.el.classList.contains('edited')); const b = s.el.getBoundingClientRect(); return { x: b.left - 7, y: b.top + 8 }; })()`);
@@ -2732,6 +3390,31 @@ Object.assign(TESTS, {
     eq(parseFloat(await page.eval(p)) > parseFloat(t0), true, 'paper text larger');
     await page.click('#textsize');
     eq(await page.eval(p), t0, 'reset');
+  },
+
+  async 'text size, width, columns and diff base are kept per paper'(env, page) {
+    await page.click('#textbigger'); await page.click('#textbigger');
+    await page.eval(`(() => { const w = $('#docwidth'); w.value = 70; w.dispatchEvent(new Event('input')); })()`);
+    await page.click('#cols');
+    await page.eval(`(() => { const s = $('#diffbase'); s.value = 'head'; s.dispatchEvent(new Event('change')); })()`);
+    const kept = JSON.parse(await page.eval(`localStorage.getItem('view:' + DOC.path)`));
+    eq(JSON.stringify(kept), JSON.stringify({ docsize: 18, docwidth: 70, cols: '2', diff: 'head' }), 'kept under the paper');
+    await page.eval(`window.beforeReload = 1`);
+    await page.send('Page.reload', {});
+    await page.waitFor(`!window.beforeReload && typeof DOC !== 'undefined' && DOC && ORDER.length > 0`);
+    eq(await page.eval(`$('#textsize').textContent`), '113%', 'text size back');
+    eq(await page.eval(`$('#docwidth').value`), '70', 'width back');
+    eq(await page.eval(`document.body.classList.contains('two')`), true, 'two columns back');
+    eq(await page.eval(`$('#diffbase').value`), 'head', 'diff base back');
+    // a paper never opened before starts from the last choices (made in
+    // another paper, here)
+    await page.eval(`(() => { localStorage.setItem('docsize', '16'); localStorage.setItem('docwidth', '50'); localStorage.setItem('cols', '1'); localStorage.removeItem('view:' + DOC.path); })()`);
+    await page.eval(`window.beforeReload = 1`);
+    await page.send('Page.reload', {});
+    await page.waitFor(`!window.beforeReload && typeof DOC !== 'undefined' && DOC && ORDER.length > 0`);
+    eq(await page.eval(`$('#textsize').textContent`), '100%', 'start text size');
+    eq(await page.eval(`$('#docwidth').value`), '50', 'start width');
+    eq(await page.eval(`document.body.classList.contains('two')`), false, 'start columns');
   },
 });
 

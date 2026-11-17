@@ -13,6 +13,7 @@ Python 3, Node 22 for the tests, and Chrome or Chromium for the browser tests.
     node tests/ui_torture.js [--real]        # bug bounty: every feature on real papers, checked on screen
     python3 -m unittest tests.test_convert_roundtrip   # S -> A -> S and S -> A -> B -> S give S byte for byte
     node tests/tabular_test.js               # table cells: \verb, nested tabulars, comments stay whole
+    python3 -m unittest tests.test_new_paper # New paper: every venue, anonymous and named, builds
 
 `tests/e2e.js` (`CHROME=…` to choose the browser) runs a real server on a
 throwaway paper and acts as a user: key presses, typing, pasting, the dialogs.

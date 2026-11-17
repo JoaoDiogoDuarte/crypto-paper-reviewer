@@ -17,6 +17,27 @@ text editor for writing the preamble, macros or new figures from scratch.
    for sections, equations and citations are read from it, so they match the
    PDF. Then **start the editor** on the paper folder
    (`./run ~/papers/my-paper`); it renders the figures and opens the page.
+   With no folder given it starts on the list of recent papers (the last
+   one is loaded behind it, so `Esc` goes on with it). **Open…** (`Ctrl+O`)
+   shows the same list (a click or the paper's number, `1`–`9`, opens one).
+   **Open a folder…** chooses a paper's folder with the desktop's own
+   dialog (zenity or kdialog on Linux); a folder with several documents
+   shows an **Open …** button for each.
+   **New paper…** makes a folder with `main.tex` for a venue (the classes of
+   *Convert*), `sections/01-introduction.tex` and `02-conclusion.tex`, and
+   `references.bib`. **Anonymous** sets `\anontrue` in `main.tex`: one
+   `\ifanon` switch near the top gives the anonymous or the named version,
+   with the class options the venue needs. cryptobib can be added as a Git
+   submodule (in a new repository with a `.gitignore` for the build files,
+   or in the repository the folder is in), as a plain clone, or not at all;
+   the bibliography then reads `cryptobib/abbrev3`, `cryptobib/crypto` and
+   `references`. Title, authors, keywords and abstract are optional, and
+   can be filled in later in **Paper…**.
+   When the editor's own code changes (an update, a `git pull`), the page
+   reloads itself at a pause and comes back where it was: the view, the
+   cursor, unsaved edits, the source view, the find bar, the diff. A change
+   to `server.py` restarts the server in place (same port and paper; never
+   during a build; code that does not compile is not started).
 3. **Read through the rendered paper.** Turn on two columns or read it
    aloud (listening catches errors your eyes skip). Overfull and underfull
    boxes are marked on the blocks that cause them.
@@ -51,14 +72,25 @@ under ⋯. In narrow windows both show icons only; hovering a button names it.
 - **The paper, not the source.** Everything the main file `\input`s or
   `\include`s, in order, with section, theorem, equation and citation
   numbers taken from LaTeX's own `.aux`, so they match the PDF. Page breaks
-  follow the PDF. Figures, tables and games are shown as images cut from a
+  follow the PDF: from SyncTeX when the build writes it, otherwise (a
+  `Makefile` build without `-synctex`) by finding each block's text in the
+  PDF's text. Figures, tables and games are shown as images cut from a
   build of their own; natbib, biblatex and hand-written `thebibliography`
   reference lists are rendered. `quote` and `quotation` environments are
   shown as indented block quotes, and are edited in place like paragraphs.
+- **Structure.** **Show structure** in the ☰ menu (`Ctrl+Alt+I`) marks where
+  every environment starts and ends (`▸ abstract` … `abstract ◂`, itemize,
+  theorems, proofs) and shows each `\label` as a small tag.
+- **Word count.** Beside the file name: the words of the text, headings and
+  captions (an inline formula counts as one word, citations as none); with a
+  selection, how many of them are selected.
 - **Layout.** Light, dark or follow-the-system theme; one or two columns;
   a colour-blind friendly mode for change and mark colours. **A−** / **A+**
   change the size of the paper's text without changing the toolbar (click
-  the percentage to reset).
+  the percentage to reset), and **Width** sets how wide the paper is in one
+  column. The text size, width, columns and what the diff compares with are
+  kept for each paper, and a paper opened for the first time starts with the
+  last ones chosen.
 - **Follow references.** `Ctrl`+click (`Cmd`+click) a reference or a
   citation to go to Lemma 4, the equation, the figure or the reference
   entry. The ← and → buttons at the left of the header bar (or `Alt+←`,
@@ -86,11 +118,43 @@ under ⋯. In narrow windows both show icons only; hovering a button names it.
 
 ### Edit
 
+- **Toolbar.** Bold, emphasis, typewriter; inline and displayed maths; cite,
+  reference, footnote, any LaTeX; headings; bulleted and numbered lists (of
+  the selected sentences, or a new one, edited in place); find; source view,
+  structure, diff; undo and redo. What does not fit goes under ⋯.
 - **Text.** Type directly. `Enter` starts a new paragraph, `Backspace` at
   the start of one joins it to the previous one. Bold, emphasis and italic
   from the toolbar or keys. Paste plain text; formulas in it (`$…$`,
   `\[…\]`) become formulas, and Unicode maths symbols are written as LaTeX
-  for pdfLaTeX papers.
+  for pdfLaTeX papers. Zero-width spaces and byte-order marks that come
+  with text copied from web pages are dropped (pdfLaTeX stops at them).
+- **Selecting across paragraphs.** Drag, `Shift`+click or `Shift`+arrows go on
+  from one paragraph into the next. Such a selection can be copied (text and
+  LaTeX), cut, deleted or typed over: the blocks between go and the first
+  and last are joined, in one undo step. Formatting (`Ctrl+B`, `$`, a
+  bracket) works inside one paragraph.
+- **Source view.** **Source** in the toolbar (`Ctrl+Alt+E`) shows the `.tex`
+  and `.bib` files of the folder with line numbers and colours, at the line
+  of the block the cursor was in; a list on the left switches files (the
+  document's own, other `.tex` files, the bibliographies). A file of the
+  document edited there is the same text as the paper view; other files are
+  saved with `Ctrl+S` like the rest. `Esc` or **Back to the paper** returns
+  to the block of the current line. **Wrap** (on by default) wraps long
+  lines; the line numbers follow. **Open in your editor** (`Ctrl+Alt+Z`,
+  also in the paper, at the block of the cursor) opens the file at the
+  cursor's line in your own editor (`external_editor` below; Emacs by
+  default). **Preview only** makes the view read only: you edit in your
+  editor, and the view follows the files on disk, scrolled to a change
+  made off screen. The view opens at the place the paper shows (the
+  cursor's block, or the block at the top) and goes back to the place it
+  shows, each line where its block was on the screen. Very large files (cryptobib's
+  `crypto.bib`) show their first 2 MB, read only.
+  A bar beside the line numbers marks the lines changed since the last save
+  (green added, orange changed, a red notch where lines were taken out);
+  **Go to…** lists the file's headings (or a `.bib`'s entries) to jump to;
+  `Ctrl+G` (or a click on the line and column) goes to a line; `Ctrl+/`
+  comments the region out with `%` or back in; a bracket or `$` typed over a
+  selection wraps it.
 - **Chips.** Maths, references, citations and any LaTeX the editor does not
   render are grey *chips*: click one to edit its source with a live preview
   (`Ctrl+Enter` applies). `Ctrl+\` inserts any LaTeX.
@@ -110,7 +174,11 @@ under ⋯. In narrow windows both show icons only; hovering a button names it.
   (the text extracted from the rendered figure),
   **Games** (line by line: insert `if`, `while`, `for`, `return` and
   comments, move statements with `Alt+Up/Down`, colour lines with xcolor
-  boxes, add games, and arrange them in a grid: choose 1–4 columns, then
+  boxes, put lines in algpseudocodex boxes (`\BeginBox[gbox=one]`) or take
+  them out, click the edge of a box to restyle, grow, shrink or remove it,
+  edit a line's comment in place, `Enter` for a new statement, `Backspace`
+  on an empty line or `Ctrl+Shift+K` to delete a line (a whole block from
+  its first or last line), add games, and arrange them in a grid: choose 1–4 columns, then
   drag a game, or use its arrows, into any cell; a cell can hold several
   games one under the other. The grid is written as top-aligned minipages,
   and a `multicols` wrapper such as `\begin{games}{2}` is set to one
@@ -126,6 +194,29 @@ under ⋯. In narrow windows both show icons only; hovering a button names it.
   undo takes it back. Maths and chips are not searched.
 - **Undo and redo** across everything above, and spelling suggestions from
   the browser (right-click).
+- **Files, one section per file.** **To file** in a heading's tools
+  (`Ctrl+Alt+Y`) moves a section into `sections/<label or title>.tex`
+  (beside the main file), read with `\input` where it was. **☰ → Files…**
+  (`Ctrl+Alt+N`) does it for every section at once (**One file per
+  section**), makes a new section file or an empty file, adds images, and
+  lists the document's files with **Go**, **Source**, **Rename…** (every
+  `\input` of it is updated), **Inline** (its text goes back where it is
+  read) and, for files the document does not read, **Include** and
+  **Trash** (to `.paper-editor/trash`). The first block of each file shows
+  its name in its tools, with the same menu. When the sections live in
+  `sections/`, a section split off or added inside one gets a file of its
+  own, and **Up**/**Down** move whole section files. New files are written
+  when you save (a new `new-section.tex` is named after its title then);
+  Undo takes them out, and a new file nothing reads is never written.
+- **Images.** Drop or paste an image into the text, or use **Figure from an
+  image…** in a block's **+** menu: it is copied to `figures/` and placed in
+  a figure after that block (the editor offers to load `graphicx` if the
+  paper does not).
+- **Listings from files.** `\lstinputlisting` and the paper's macros around
+  it (such as `\ecsnippet{File.ec}{name}`, which reads the range between
+  `(*> name *)` and `(*< name *)`) show the code itself, highlighted with the
+  paper's `\lstdefinelanguage`; **LaTeX** in the block's tools shows the
+  command. Files may be anywhere in the project's Git work tree.
 
 ### Save and review
 
@@ -137,8 +228,29 @@ under ⋯. In narrow windows both show icons only; hovering a button names it.
   applying them. A failed save keeps your edits on the page.
 - **Change bars.** Edited blocks get a bar in the margin; hover it to see
   the change and **Revert** that block alone.
-- **Diff** shows every change since the last save or the last Git commit
-  (read-only while it is on), with previous/next buttons.
+- **Diff** shows every change since the last save, since the editor opened,
+  since the last Git commit, or since **any earlier commit** of the paper's
+  folder (read-only while it is on), with previous/next buttons and a map of
+  the changes beside the scroll bar. **Revert** on a change (or
+  `Ctrl+Alt+Backspace` on the current one) puts that block back as it was
+  in the version compared with; Undo brings the change back. After a commit
+  made outside the editor, the reload button beside **Next** reads the
+  commits again and recomputes the diff.
+- **Unsaved edits survive a crash.** Every few seconds the edited files are
+  kept in the browser; if the page closes or crashes before you save, the
+  paper offers them back when it opens (**Restore** / **Discard**). A file
+  that changed on disk since is restored against the version it started
+  from, so saving it asks first instead of overwriting the other version.
+- **Report a problem** (☰ menu, `Ctrl+Alt+Q`): type a line about what went
+  wrong; the last 10 minutes of what you pressed and clicked, what the
+  editor did (draws, saves, builds, messages, errors) and every scroll with
+  its cause (one nobody asked for is marked as a jump) are written to
+  `.paper-editor/debug/report-<time>.jsonl` with the end of the LaTeX log.
+  The running record is `.paper-editor/debug/trace.jsonl`. Typed text is not
+  kept, only how much was typed, and nothing leaves your machine.
+- **House-rule warnings** (a bracketed `\cref`, say) come with **Show**,
+  which steps through every block where the rule holds, and **Don't warn
+  again**. Every message under the bars closes with its × or `Esc`.
 - **History** lists every save, each keeping the text it replaced, and can
   restore one. You can delete one snapshot or clear them all (Git commits are
   never touched).
@@ -149,6 +261,20 @@ under ⋯. In narrow windows both show icons only; hovering a button names it.
   beside it, then theirs is loaded) or **Later**. A save never overwrites a
   file that changed since it was read. **Reload from disk** in the ☰ menu rereads
   everything and asks before dropping your edits.
+
+### Accessibility
+
+- Every bar, panel and dialog closes with its × (top right) or `Esc`; focus
+  moves into a dialog when it opens, `Tab` stays inside it, and focus comes
+  back where it was when it closes.
+- A **Skip to the paper** link comes first; the paper is a labelled region.
+- `Alt+↓`/`Alt+↑` move the cursor to the next or previous block,
+  `Ctrl+Alt+PageDown`/`PageUp` to the next or previous heading; screen
+  readers hear which block it is.
+- With *reduce motion* set in the system, nothing glides or animates; in
+  forced colours (high contrast), chips, change bars, diff marks and the
+  reading highlight are drawn with system colours; on touch screens the
+  block tools always show and buttons are larger.
 
 ### Convert
 
@@ -173,7 +299,8 @@ under ⋯. In narrow windows both show icons only; hovering a button names it.
 | `Ctrl+\` | insert any LaTeX |
 | `Ctrl+F`, `Ctrl+H` | find, find and replace |
 | `Ctrl+A`, `Ctrl+E` | start, end of line (`Shift` selects) |
-| `Ctrl+D`, `Alt+W`, `Ctrl+P` | delete line, cut, duplicate |
+| `Ctrl+D`, `Alt+W`, `Ctrl+W`, `Ctrl+P` | delete line, cut / copy the region or the line, duplicate (Emacs style; browsers may keep `Ctrl+W` for themselves) |
+| `Ctrl+Q`, `Ctrl+Backspace` | delete the character before, delete back to the previous space |
 | `Ctrl++` | expand the selection: word, line, paragraph |
 | `Alt+R`, `Alt+P`, `Alt+S` | read aloud, pause, stop |
 | `Ctrl+Alt+Left`, `Ctrl+Alt+Right` | previous, next sentence |
@@ -186,13 +313,22 @@ under ⋯. In narrow windows both show icons only; hovering a button names it.
 | `Ctrl+Alt+F` | open the figure or table at the cursor in the viewer |
 | `Ctrl`+click a reference or citation, `Alt+←`, `Alt+→` | go to what it names, back, forward |
 
+In the source view the same Emacs-style keys edit the text as in a code
+editor: `Ctrl+A` / `Ctrl+E` (start or end of the code on the line, then of
+the line; `Shift` selects), `Ctrl+D` delete line, `Ctrl+P` duplicate,
+`Ctrl+W` / `Alt+W` copy / cut the region or the line, `Ctrl+Q`,
+`Ctrl+Backspace`, `Tab` / `Shift+Tab` indent / unindent, `Enter` keeps the
+indentation; `Ctrl+Z` is the text's own undo. All of them are under **Keys…**.
+
 Everything in the bars and the ☰ menu has a key too (all `Ctrl+Alt+…`, and all
 listed and changeable under **Keys…**):
 
 | Key | Action |
 | --- | --- |
 | `Ctrl+Alt+M` | the ☰ menu |
-| `Ctrl+Alt+O` / `Ctrl+Alt+T` / `Ctrl+Alt+L` | open a paper, save history, reload from disk |
+| `Ctrl+O` (or `Ctrl+Alt+O`) / `Ctrl+Alt+T` / `Ctrl+Alt+L` | open a paper, save history, reload from disk |
+| `Ctrl+Alt+E` / `Ctrl+Alt+I` | source view, show structure |
+| `Ctrl+Alt+Z` | open the file at the cursor's line in your own editor |
 | `Ctrl+Alt+B` / `Ctrl+Alt+Shift+B` | build the PDF now, clean build |
 | `Ctrl+Alt+D` | open the rendered PDF |
 | `Ctrl+Alt+P` / `Ctrl+Alt+,` / `Ctrl+Alt+H` | paper metadata and conversion, keys, help |
@@ -222,7 +358,8 @@ from `.paper-editor.json` next to the main file, then
       "key_style": "cryptobib",
       "bib_add_to": null,
       "build": null,
-      "code_envs": ["ecblock"]
+      "code_envs": ["ecblock"],
+      "external_editor": null
     }
 
 | Key | Meaning |
@@ -234,6 +371,7 @@ from `.paper-editor.json` next to the main file, then
 | `bib_add_to` | the `.bib` file that receives them (default: the smallest one the paper uses) |
 | `build` | the build command, run in the main file's directory (default: `make` if there is a `Makefile`, otherwise `latexmk -pdf -synctex=1`) |
 | `code_envs` | more environments to show as editable code boxes |
+| `external_editor` | the command of **Open in your editor**, a list in which `{file}`, `{line}` and `{col}` are replaced, e.g. `["code", "-g", "{file}:{line}:{col}"]` (default: `emacsclient -n -a emacs +{line}:{col} {file}`, else VS Code, else the system's opener) |
 
 Metadata you correct in **Paper…** is kept in `.paper-editor/metadata.json`,
 with earlier versions. It never rewrites your `\author` lines.
@@ -253,6 +391,14 @@ The browser's own voices always work. The others are optional:
 | Google | `GOOGLE_TTS_API_KEY` in the environment | yes, to Google |
 
 `./run` uses `.venv` automatically when it exists.
+
+Maths is read as words: `\Pr[x \sample S]` as "the probability that x is
+sampled from S", `|X|` as "the size of X", Greek letters by name, and the
+paper's own macros as what they print (`\qe` = `q_{\mathrm{eval}}` is
+"q eval"). Media keys and the system's media controls pause, resume and
+skip; when something else pauses the sound (a headset taken off), the
+buttons follow. A sentence a voice cannot read is skipped with a note;
+three in a row stop reading with the reason.
 
 ## Converting between venues
 

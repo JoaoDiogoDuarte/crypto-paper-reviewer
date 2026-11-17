@@ -90,7 +90,9 @@ class BackendTest(unittest.TestCase):
         import http.client
         for host, expected in [('evil.example', 403), (f'evil.example:{self.http.server_port}', 403),
                                ('127.0.0.1.evil.example', 403), (f'127.0.0.1:{self.http.server_port}', 200),
-                               (f'localhost:{self.http.server_port}', 200), ('[::1]', 200)]:
+                               (f'localhost:{self.http.server_port}', 200), ('[::1]', 200),
+                               (f'paper-reviewer.localhost:{self.http.server_port}', 200),
+                               ('evil.paper-reviewer.localhost', 403), ('paper-reviewer.localhost.evil.example', 403)]:
             conn = http.client.HTTPConnection('127.0.0.1', self.http.server_port)
             try:
                 conn.request('GET', '/api/doc', headers={'Host': host})
@@ -611,6 +613,42 @@ class BackendTest(unittest.TestCase):
         self.assertIn('title = "A \\& B",', bib)
         self.assertIn('journal = {J \\& K},', bib)
 
+    def test_desktop_entry_matches_the_wayland_window_and_is_refreshed(self):
+        data = os.path.join(self.tmp, 'data')
+        with mock.patch.dict(os.environ, {'XDG_DATA_HOME': data}):
+            entry = os.path.join(data, 'applications', 'crypto-paper-reviewer.desktop')
+            os.makedirs(os.path.dirname(entry))
+            with open(entry, 'w') as f:
+                f.write('[Desktop Entry]\nStartupWMClass=crypto-paper-reviewer\n')   # an older version's
+            server.refresh_desktop_entry()
+            text = open(entry).read()
+            self.assertIn('StartupWMClass=chrome-paper-reviewer.localhost__-Default', text)
+            alias = open(os.path.join(data, 'applications', 'crypto-paper-reviewer-x11.desktop')).read()
+            self.assertIn('StartupWMClass=crypto-paper-reviewer', alias)
+            self.assertIn('NoDisplay=true', alias)
+
+    def test_app_window_takes_the_zoom_the_editor_had_once(self):
+        src = os.path.join(self.tmp, 'their', 'Preferences')
+        os.makedirs(os.path.dirname(src))
+        with open(src, 'w') as f:
+            json.dump({'partition': {'per_host_zoom_levels': {'x': {'127.0.0.1': {'zoom_level': 1.22, 'last_modified': '1'}}}}}, f)
+        prof = os.path.join(self.tmp, 'prof')
+        self.assertEqual(server.carry_zoom(prof, [src]), 1.22)
+        prefs = json.load(open(os.path.join(prof, 'Default', 'Preferences')))
+        self.assertEqual(prefs['partition']['per_host_zoom_levels']['x'][server.APP_HOST]['zoom_level'], 1.22)
+        self.assertIsNone(server.carry_zoom(prof, [src]))            # once: a zoom chosen since is kept
+        os.symlink('host-1', os.path.join(prof, 'SingletonLock'))
+        self.assertIsNone(server.carry_zoom(os.path.join(prof), [src]))   # never while it runs
+
+    @mock.patch('server.shutil.which', return_value='/usr/bin/google-chrome')
+    @mock.patch('server.subprocess.Popen')
+    def test_app_window_uses_its_own_host_and_profile(self, popen, which):
+        with mock.patch.dict(os.environ, {'XDG_CONFIG_HOME': os.path.join(self.tmp, 'cfg'), 'XDG_DATA_HOME': os.path.join(self.tmp, 'data')}):
+            server.open_browser('http://127.0.0.1:9123/', 'chrome-app')
+        args = popen.call_args[0][0]
+        self.assertIn('--app=http://paper-reviewer.localhost:9123/', args)
+        self.assertTrue(any(a.startswith('--user-data-dir=') and a.endswith('chrome-profile') for a in args), args)
+
     def test_multiline_aux_labels_are_not_truncated(self):
         data = ('\\newlabel{thm:one}{{1}{2}{A long title\ncontinued}{theorem.1}{}}\n'
                 '\\bibcite{a}{{12}{2026}}\n'
@@ -621,12 +659,35 @@ class BackendTest(unittest.TestCase):
         self.assertIn('continued}{theorem.1}', definitions[0])
         self.assertIn('\\bibcite{a}{{12}{2026}}', definitions[1])
 
+    @unittest.skipUnless(shutil.which('latexmk') and shutil.which('pdftoppm'), 'needs latexmk and pdftoppm')
+    def test_figures_with_a_locked_pagestyle_and_a_parent_relative_input(self):
+        """iacrcc makes \\pagestyle an error; ../ paths resolve from the paper's folder."""
+        paper = os.path.join(self.tmp, 'paper')
+        os.makedirs(paper)
+        with open(os.path.join(self.tmp, 'snippet.tex'), 'w') as f:
+            f.write('Shared snippet.\n')
+        with open(os.path.join(paper, 'locked.cls'), 'w') as f:
+            f.write('\\LoadClass{article}\n\\def\\pagestyle#1{\\ClassError{locked}{no pagestyle}{}}\n')
+        main = os.path.join(paper, 'main.tex')
+        with open(main, 'w') as f:
+            f.write('\\documentclass{locked}\n\\begin{document}\nText.\n'
+                    '\\begin{figure}\\input{../snippet}\\caption{C}\\label{f}\\end{figure}\n\\end{document}\n')
+        server.open_paper(main, state=os.path.join(paper, '.state'))
+        logs = []
+        server.build_figures(logs.append)
+        self.assertIn('figures: rendered 1/1', logs, logs)
+        self.assertEqual(sorted(os.listdir(paper)), ['.state', 'locked.cls', 'main.tex'])
+
     @mock.patch('server.shutil.which', return_value='/usr/bin/google-chrome')
     @mock.patch('server.subprocess.Popen')
     def test_chrome_app_launch(self, popen, which):
-        server.open_browser('http://127.0.0.1:8765/', 'chrome-app')
+        cfg = os.path.join(self.tmp, 'cfg')
+        with mock.patch.dict(os.environ, {'XDG_CONFIG_HOME': cfg, 'XDG_DATA_HOME': os.path.join(self.tmp, 'data')}):
+            server.open_browser('http://127.0.0.1:8765/', 'chrome-app')
         popen.assert_called_once_with(
-            ['/usr/bin/google-chrome', '--app=http://127.0.0.1:8765/', '--class=crypto-paper-reviewer'],
+            ['/usr/bin/google-chrome', '--app=http://paper-reviewer.localhost:8765/', '--class=crypto-paper-reviewer',
+             '--user-data-dir=' + os.path.join(cfg, 'paper-editor', 'chrome-profile'), '--no-first-run',
+             '--no-default-browser-check'],
             stdout=server.subprocess.DEVNULL, stderr=server.subprocess.DEVNULL)
 
 

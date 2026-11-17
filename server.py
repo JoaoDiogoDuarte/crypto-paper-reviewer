@@ -24,6 +24,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import urllib.parse
 import urllib.request
 import webbrowser
@@ -60,6 +61,10 @@ DEFAULT_CONFIG = {
     'build': None,
     # environments shown as editable code boxes, besides lstlisting/minted/verbatim
     'code_envs': ['ecblock'],
+    # the editor that "Open in your editor" runs: a list of arguments where
+    # {file}, {line} and {col} are replaced, e.g. ["code", "-g", "{file}:{line}:{col}"]
+    # (default: emacsclient, else VS Code, else the system's opener)
+    'external_editor': None,
 }
 
 
@@ -506,27 +511,453 @@ def load_theorems():
     return th
 
 
+XCOLOR_BASE = {'red': (255, 0, 0), 'green': (0, 255, 0), 'blue': (0, 0, 255), 'black': (0, 0, 0), 'white': (255, 255, 255),
+               'gray': (128, 128, 128), 'darkgray': (64, 64, 64), 'lightgray': (191, 191, 191), 'cyan': (0, 255, 255),
+               'magenta': (255, 0, 255), 'yellow': (255, 255, 0), 'orange': (255, 128, 0), 'violet': (128, 0, 128),
+               'purple': (191, 0, 64), 'brown': (191, 128, 64), 'teal': (0, 128, 128), 'olive': (128, 128, 0),
+               'lime': (191, 255, 0), 'pink': (255, 191, 191)}
+
+
+def color_value(expr, known):
+    """An xcolor expression (name, name!pct, name!pct!other …) as RGB, or None."""
+    parts = [p.strip() for p in expr.split('!')]
+    if not parts or parts[0] not in known:
+        return None
+    rgb = known[parts[0]]
+    i = 1
+    while i < len(parts):
+        try:
+            pct = float(parts[i]) / 100
+        except ValueError:
+            return None
+        other = known.get(parts[i + 1], None) if i + 1 < len(parts) else (255, 255, 255)
+        if other is None:
+            return None
+        rgb = tuple(round(a * pct + b * (1 - pct)) for a, b in zip(rgb, other))
+        i += 2
+    return rgb
+
+
+def paper_colors():
+    """The colours the preamble defines (\\definecolor, \\colorlet), as #rrggbb,
+    and the TikZ styles that draw in a colour picked by their argument
+    (\\tikzset{gbox/.style={draw=g#1}}: gbox=one draws in gone)."""
+    pre = strip_comments(preamble_text())
+    known = dict(XCOLOR_BASE)
+    out = {}
+    for m in re.finditer(r'\\(definecolor|colorlet)\s*(?:\[[^\]]*\])?\s*\{([^}]*)\}\s*(?:\[[^\]]*\])?\s*\{([^}]*)\}(?:\s*\{([^}]*)\})?', pre):
+        kind, name, a, b = m.group(1), m.group(2).strip(), m.group(3).strip(), (m.group(4) or '').strip()
+        rgb = None
+        try:
+            if kind == 'colorlet':
+                rgb = color_value(a, known)
+            elif a.lower() == 'html':
+                rgb = tuple(int(b[k:k + 2], 16) for k in (0, 2, 4))
+            elif a == 'RGB':
+                rgb = tuple(int(float(x)) for x in b.split(','))
+            elif a == 'rgb':
+                rgb = tuple(round(float(x) * 255) for x in b.split(','))
+            elif a == 'gray':
+                rgb = (round(float(b) * 255),) * 3
+            elif a == 'cmyk':
+                c, m_, y, k = (float(x) for x in b.split(','))
+                rgb = tuple(round(255 * (1 - v) * (1 - k)) for v in (c, m_, y))
+        except (ValueError, IndexError):
+            rgb = None
+        if rgb and len(rgb) == 3:
+            known[name] = rgb
+            out[name] = '#%02x%02x%02x' % rgb
+    styles = {}
+    for m in re.finditer(r'([A-Za-z][\w ]*)/\.style\s*=\s*\{([^{}]*)\}', pre):
+        d = re.search(r'(?:draw|color|fill)\s*=\s*([^,]+)', m.group(2))
+        if d:
+            styles[m.group(1).strip()] = d.group(1).strip()
+    return {'colors': out, 'styles': styles}
+
+
+def uses_graphicx():
+    """Whether \\includegraphics is available: graphicx (or graphics) in the
+    preamble, or a class that loads it."""
+    if docclass().split('/')[0] in ('iacrcc', 'iacrtrans', 'acmart', 'lipics-v2021', 'lipics-v2019', 'beamer'):
+        return True
+    return bool(re.search(r'\\(?:usepackage|RequirePackage)\s*(?:\[[^\]]*\])?\s*\{[^}]*\bgraphicx?\b',
+                          strip_comments(preamble_text())))
+
+
+def cref_config():
+    """How cleveref names references in this paper: its package options, the
+    \\crefname / \\Crefname of the preamble (and of local .sty files, such as
+    iacrcc's after-hyperref.sty), and the figure name of the captions."""
+    texts = [strip_comments(preamble_text())]
+    try:
+        for f in sorted(os.listdir(PAPER)):
+            if f.endswith('.sty'):
+                texts.append(strip_comments(read(f)))
+    except OSError:
+        pass
+    text = '\n'.join(texts)
+    opts = []
+    for m in re.finditer(r'\\(?:usepackage|RequirePackage)\s*(?:\[([^\]]*)\])?\s*\{([^}]*)\}', text):
+        if 'cleveref' in [p.strip() for p in m.group(2).split(',')] and m.group(1):
+            opts += [o.strip() for o in m.group(1).split(',') if o.strip()]
+    names, caps = {}, {}
+    for m in re.finditer(r'\\(c|C)refname\s*\{([^}]*)\}\s*\{((?:[^{}]|\{[^{}]*\})*)\}\s*\{((?:[^{}]|\{[^{}]*\})*)\}', text):
+        (names if m.group(1) == 'c' else caps)[m.group(2).strip()] = [m.group(3).replace('~', ' '), m.group(4).replace('~', ' ')]
+    fig = 'Fig.' if docclass().split('/')[0] in ('llncs', 'lncs', 'svjour', 'svjour3', 'IEEEtran') else 'Figure'
+    m = re.search(r'\\(?:renewcommand\s*\{?\\figurename\}?|def\\figurename)\s*\{([^}]*)\}', text)
+    if m:
+        fig = m.group(1).replace('~', ' ').strip()
+    return {'options': opts, 'names': names, 'Names': caps, 'figurename': fig}
+
+
+# ------------------------------------------------------------------ listings
+#
+# \lstinputlisting[opts]{file} and the paper's own macros around it (the
+# threshold paper's \ecsnippet{TSGame.ec}{name} reads ../TSGame.ec between the
+# markers (*> name *) and (*< name *)) are shown as the code they typeset.
+
+def lst_options(s):
+    """listings key=value options as (key, value) pairs, in order (a key may
+    repeat: morekeywords=..., morekeywords=[2]{...}); braces are removed."""
+    out, i, n = [], 0, len(s)
+    while i < n:
+        while i < n and s[i] in ' \t\r\n,':
+            i += 1
+        k = i
+        while i < n and s[i] not in '=,':
+            i += 1
+        key = s[k:i].strip()
+        val = ''
+        if i < n and s[i] == '=':
+            i += 1
+            v = i
+            depth = 0
+            while i < n and not (s[i] == ',' and depth == 0):
+                if s[i] == '\\':
+                    i += 2
+                    continue
+                depth += {'{': 1, '}': -1}.get(s[i], 0)
+                i += 1
+            val = s[v:i].strip()
+            # a value ending in a control space keeps it: rangebeginprefix=(*>\ ,
+            if val.endswith('\\') and s[v:i].rstrip() != s[v:i]:
+                val += ' '
+            if val.startswith('{') and val.endswith('}'):
+                try:
+                    inner, end = group(val, 0)
+                    if end == len(val):
+                        val = inner
+                except (IndexError, AssertionError):
+                    pass
+        if key:
+            out.append((key, val))
+    return out
+
+
+def lst_word_list(v):
+    """morekeywords={a,b} or morekeywords=[2]{a,b}: (class, words)."""
+    cls = 1
+    m = re.match(r'\s*\[(\d+)\]\s*', v)
+    if m:
+        cls, v = int(m.group(1)), v[m.end():]
+        if v.startswith('{') and v.endswith('}'):
+            v = v[1:-1]
+    return cls, [w.strip() for w in v.split(',') if w.strip()]
+
+
+def lst_definitions(pre):
+    """\\lstdefinelanguage and \\lstdefinestyle bodies: (languages, styles), and
+    the options of the global \\lstset calls."""
+    langs, styles, sets = {}, {}, []
+    for m in re.finditer(r'\\lstdefine(language|style)\s*(?:\[[^\]]*\])?\s*\{([^}]*)\}\s*(?:\[[^\]]*\]\s*\{[^}]*\}\s*)?(?=\{)', pre):
+        try:
+            body, _ = group(pre, m.end())
+        except (IndexError, AssertionError):
+            continue
+        (langs if m.group(1) == 'language' else styles)[m.group(2).strip().lower()] = lst_options(body)
+    for m in re.finditer(r'\\lstset\s*(?=\{)', pre):
+        try:
+            sets.append(lst_options(group(pre, m.end())[0]))
+        except (IndexError, AssertionError):
+            continue
+    return langs, styles, sets
+
+
+def lst_effective(opts, langs, styles, depth=0):
+    """Options with style= and language= expanded (theirs first, then these)."""
+    out = []
+    for k, v in opts:
+        if k == 'style' and depth < 8 and v.strip().lower() in styles:
+            out += lst_effective(styles[v.strip().lower()], langs, styles, depth + 1)
+        elif k == 'language' and depth < 8:
+            name = re.sub(r'^\[[^\]]*\]', '', v).strip().lower()
+            out.append((k, name))
+            if name in langs:
+                out += lst_effective(langs[name], langs, styles, depth + 1)
+        else:
+            out.append((k, v))
+    return out
+
+
+def lst_language(eff):
+    """Keywords by class, comment and string delimiters, for highlighting."""
+    kws, comments, line_comments, strings = {}, [], [], []
+    for k, v in eff:
+        if k in ('morekeywords', 'keywords', 'morendkeywords', 'ndkeywords', 'emph', 'moreemph'):
+            cls, words = lst_word_list(v)
+            if k in ('morendkeywords', 'ndkeywords'):
+                cls = 2
+            if k in ('keywords', 'ndkeywords') and cls in kws:
+                kws[cls] = []
+            kws.setdefault(cls, [])
+            kws[cls] += [w for w in words if w not in kws[cls]]
+        elif k in ('morecomment', 'comment'):
+            m = re.match(r'\s*\[([a-z]+)\]\s*\{([^{}]*)\}(?:\s*\{([^{}]*)\})?', v)
+            if m and m.group(1) == 'l':
+                line_comments.append(m.group(2))
+            elif m and m.group(3) is not None:
+                comments.append([m.group(2), m.group(3), m.group(1) == 'n'])
+        elif k in ('morestring', 'string'):
+            m = re.match(r'\s*\[[a-z]+\]\s*\{?([^{}])\}?', v)
+            if m:
+                strings.append(m.group(1))
+    # a word listed in a higher class is shown in that class
+    for c in sorted(kws):
+        for d in kws:
+            if d > c:
+                kws[c] = [w for w in kws[c] if w not in kws[d]]
+    uniq = lambda xs: [x for i, x in enumerate(xs) if x not in xs[:i]]
+    return {'keywords': {str(c): w for c, w in kws.items()}, 'comments': uniq(comments),
+            'line_comments': uniq(line_comments), 'strings': uniq(strings)}
+
+
+def lst_value(eff, key, default=None):
+    for k, v in reversed(eff):
+        if k == key:
+            return v
+    return default
+
+
+def listing_macros(pre=None):
+    """The paper's macros whose body reads a file with \\lstinputlisting:
+    name -> (number of arguments, body)."""
+    pre = strip_comments(preamble_text()) if pre is None else pre
+    out = {}
+    for m in re.finditer(r'\\(?:re|provide)?newcommand\*?\s*(?:\{\\([A-Za-z@]+)\}|\\([A-Za-z@]+))'
+                         r'\s*(?:\[(\d)\])?\s*(?=\{)', pre):
+        try:
+            body, _ = group(pre, m.end())
+        except (IndexError, AssertionError):
+            continue
+        if '\\lstinputlisting' in body:
+            out[m.group(1) or m.group(2)] = (int(m.group(3) or 0), body)
+    return out
+
+
+def listing_root():
+    """Listings may read files of the project (its git work tree), or of the
+    folder above the paper (a paper in note/ beside its .ec files)."""
+    return os.path.realpath(ROOT if ROOT and ROOT != PAPER else os.path.dirname(PAPER))
+
+
+def tex_unescape_title(t):
+    t = re.sub(r'\\detokenize\s*\{([^{}]*)\}', r'{\1}', t)
+    return bib_plain(t)
+
+
+def read_listing(opts_text, path_arg, pre=None):
+    """The code an \\lstinputlisting typesets: {title, file, code} or {error}."""
+    pre = strip_comments(preamble_text()) if pre is None else pre
+    langs, styles, sets = lst_definitions(pre)
+    base = []
+    for s in sets:
+        base += s
+    eff = lst_effective(base + lst_options(opts_text or ''), langs, styles)
+    name = path_arg.strip()
+    path = os.path.realpath(os.path.join(PAPER, name))
+    root = listing_root()
+    if not (path == root or path.startswith(root + os.sep)):
+        return {'error': f'{name} is outside the project'}
+    if not os.path.isfile(path):
+        for d in (lst_value(eff, 'inputpath'),):
+            if d and os.path.isfile(os.path.realpath(os.path.join(PAPER, d, name))):
+                path = os.path.realpath(os.path.join(PAPER, d, name))
+                break
+        else:
+            return {'error': f'{name} not found'}
+    if os.path.getsize(path) > 4_000_000:
+        return {'error': f'{name} is too large to show'}
+    lines = read_path(path).split('\n')
+    sel = None
+    rng = lst_value(eff, 'linerange')
+    if rng:
+        sp = lambda k, d='': (lst_value(eff, k, d) or '').replace('\\ ', ' ').replace('\\', '')
+        bp, bs, ep, es = sp('rangebeginprefix', sp('rangeprefix')), sp('rangebeginsuffix', sp('rangesuffix')), \
+            sp('rangeendprefix', sp('rangeprefix')), sp('rangeendsuffix', sp('rangesuffix'))
+        include = (lst_value(eff, 'includerangemarker', 'true') or 'true').strip() != 'false'
+        sel = []
+        for part in rng.split(','):
+            a, _, b = part.strip().partition('-')
+            a, b = a.strip(), (b.strip() or a.strip())
+            if re.fullmatch(r'\d*', a) and re.fullmatch(r'\d*', b):
+                lo = int(a) if a else 1
+                hi = int(b) if b else len(lines)
+                sel += lines[lo - 1:hi]
+                continue
+            start = next((i for i, ln in enumerate(lines) if (bp + a + bs).strip() in ln), None)
+            if start is None:
+                return {'error': f'no marker {bp + a + bs!r} in {name}', 'file': name}
+            end = next((i for i in range(start + 1, len(lines)) if (ep + b + es).strip() in lines[i]), len(lines) - 1)
+            sel += lines[start:end + 1] if include else lines[start + 1:end]
+    else:
+        first = int(lst_value(eff, 'firstline', '1') or 1)
+        last = lst_value(eff, 'lastline')
+        sel = lines[first - 1:int(last) if last else None]
+    # common indentation off, as gobble would
+    code = '\n'.join(sel).rstrip('\n')
+    title = lst_value(eff, 'title') or lst_value(eff, 'caption')
+    return {'title': tex_unescape_title(title) if title else '', 'file': os.path.relpath(path, PAPER),
+            'code': code, 'language': lst_language(eff)}
+
+
+def expand_listing(src, pre=None):
+    """Every listing a piece of source typesets, in order: a direct
+    \\lstinputlisting or one of the paper's macros around it."""
+    pre = strip_comments(preamble_text()) if pre is None else pre
+    macros = listing_macros(pre)
+    out = []
+    names = '|'.join(re.escape(n) for n in sorted(macros, key=len, reverse=True))
+    pat = re.compile(r'\\(lstinputlisting' + ('|' + names if names else '') + r')(?![A-Za-z@])')
+    for m in pat.finditer(src):
+        i = m.end()
+        try:
+            if m.group(1) == 'lstinputlisting':
+                body = src[m.start():]
+                opts = ''
+                j = len('\\lstinputlisting')
+                while j < len(body) and body[j] in ' \t\n':
+                    j += 1
+                if j < len(body) and body[j] == '[':
+                    k = body.index(']', j)
+                    opts, j = body[j + 1:k], k + 1
+                while body[j] in ' \t\n':
+                    j += 1
+                arg, _ = group(body, j)
+                out.append(read_listing(opts, arg, pre))
+                continue
+            n, body = macros[m.group(1)]
+            args = []
+            for _ in range(n):
+                while src[i] in ' \t\n':
+                    i += 1
+                a, i = group(src, i)
+                args.append(a)
+            for k, a in enumerate(args, 1):
+                body = body.replace('#%d' % k, a)
+            for r in expand_listing(body, pre):
+                out.append(r)
+        except (IndexError, AssertionError, ValueError):
+            out.append({'error': 'could not read ' + src[m.start():m.start() + 60]})
+    return out
+
+
+def all_listings():
+    """The listings of every listing command of the paper, by source text."""
+    pre = strip_comments(preamble_text())
+    macros = listing_macros(pre)
+    names = ['lstinputlisting'] + list(macros)
+    pat = re.compile(r'\\(?:' + '|'.join(re.escape(n) for n in names) + r')(?![A-Za-z@])')
+    out = {}
+    for name in paper_files():
+        text = read(name)
+        body = text.find('\\begin{document}') if name == MAIN else -1
+        for m in pat.finditer(text):
+            line = text[text.rfind('\n', 0, m.start()) + 1:m.start()]
+            if m.start() < body or re.search(r'(?<!\\)%', line):
+                continue      # the preamble that defines it, or a comment
+            # the command with its arguments, as written
+            j, nargs = m.end(), macros.get(text[m.start() + 1:m.end()], (1, ''))[0]
+            try:
+                if text[m.start() + 1:m.end()] == 'lstinputlisting':
+                    while text[j] in ' \t\n':
+                        j += 1
+                    if text[j] == '[':
+                        j = text.index(']', j) + 1
+                    while text[j] in ' \t\n':
+                        j += 1
+                    _, j = group(text, j)
+                else:
+                    for _ in range(nargs):
+                        while text[j] in ' \t\n':
+                            j += 1
+                        _, j = group(text, j)
+            except (IndexError, AssertionError, ValueError):
+                continue
+            src = text[m.start():j]
+            if src not in out:
+                out[src] = expand_listing(src, pre)
+    return out
+
+
+BIB_ACCENTS = {"'": '\u0301', '`': '\u0300', '^': '\u0302', '"': '\u0308', '~': '\u0303', '=': '\u0304',
+               '.': '\u0307', 'H': '\u030b', 'c': '\u0327', 'v': '\u030c', 'u': '\u0306', 'k': '\u0328',
+               'r': '\u030a'}
+BIB_LETTERS = {'ss': 'ß', 'o': 'ø', 'O': 'Ø', 'ae': 'æ', 'AE': 'Æ', 'oe': 'œ', 'OE': 'Œ', 'aa': 'å', 'AA': 'Å',
+               'l': 'ł', 'L': 'Ł', 'i': 'ı', 'j': 'ȷ', 'dh': 'ð', 'th': 'þ', 'textendash': '–', 'textemdash': '—',
+               'etalchar': '', 'and': 'and', 'ldots': '…', 'dots': '…'}
+
+
+def bib_plain(t):
+    """A .bbl entry as plain readable text: accents as letters, dashes and
+    ties as printed, links as their text, no LaTeX left, one line."""
+    t = re.sub(r'(?<!\\)%[^\n]*\n\s*', '', t)
+    t = re.sub(r'\\newblock\b', ' ', t)
+    t = re.sub(r'\\BIBentry(?:ALT|STD)interwordspacing|\\BIBdecl[A-Za-z]*', '', t)
+    t = re.sub(r'\\(?:showDOI|showISBNx|showISSN|showURL|urldef)\s*\{([^{}]*)\}', r'{\1}', t)
+    t = re.sub(r'\\bib(?:field|info)\s*\{[^{}]*\}', '', t)
+    # \href{url}{text} -> text; \url{u}, \path{u}, \nolinkurl{u} -> u; \doi{x} -> doi:x
+    t = re.sub(r'\\href\s*\{[^{}]*\}\s*\{((?:[^{}]|\{[^{}]*\})*)\}', r'{\1}', t)
+    t = re.sub(r'\\(?:url|path|nolinkurl|texttt)\s*\{([^{}]*)\}', r'{\1}', t)
+    t = re.sub(r'\\doi\s*\{([^{}]*)\}', r'{doi:\1}', t)
+    t = re.sub(r'\\etalchar\s*\{([^{}]*)\}', r'{\1}', t)
+
+    def accent(m):
+        base = m.group(2) or m.group(3)
+        base = {'\\i': 'i', '\\j': 'j'}.get(base, base)
+        return unicodedata.normalize('NFC', base + BIB_ACCENTS[m.group(1)])
+    # \'e, \'{e}, {\'e}, \'\i, \c{c}, \v s
+    t = re.sub(r'\\([\'`^"~=.])\s*(?:\{\s*(\\?[A-Za-z])\s*\}|(\\[ij](?![A-Za-z])|[A-Za-z]))', accent, t)
+    t = re.sub(r'\\([Hcvukr])(?:\s*\{\s*(\\?[A-Za-z])\s*\}|\s+(\\[ij](?![A-Za-z])|[A-Za-z]))', accent, t)
+    t = re.sub(r'\\([A-Za-z]+)(?![A-Za-z])\s*(?:\{\})?', lambda m: BIB_LETTERS.get(m.group(1), m.group(0)), t)
+    t = t.replace('---', '\u2014').replace('--', '\u2013').replace('``', '\u201c').replace("''", '\u201d')
+    t = re.sub(r'(?<!\\)~', '\u00a0', t)
+    t = re.sub(r'\\([&%$#_{}])', r'\1', t)
+    # any other command: keep what it is applied to
+    t = re.sub(r'\\[A-Za-z]+\*?\s*', '', t)
+    t = re.sub(r'\\\\|\\[ ,;:!/]', ' ', t)
+    t = t.replace('{', '').replace('}', '')
+    return re.sub(r'[ \t\r\n]+', ' ', t).strip()
+
+
 def load_bib():
-    """Short entries for the reference list, from main.bbl."""
+    """Short entries for the reference list, from main.bbl, as plain text."""
     path = os.path.join(PAPER, stem() + '.bbl')
     if not os.path.exists(path):
         return {}
     bbl = open(path, encoding='utf-8', errors='replace').read()
     out = {}
-    # \bibitem{key}, or natbib's \bibitem[Author et~al.(2023)]%\n{key}
-    for m in re.finditer(r'\\bibitem\s*(?:\[(?:[^\[\]{}]|\{[^{}]*\})*\])?\s*%?\s*\{([^}]*)\}(.*?)(?=\\bibitem|\\end\{thebibliography\})', bbl, re.S):
-        t = re.sub(r'\\BIBentry(ALT|STD)interwordspacing|\\BIBdecl[A-Za-z]*', '', m.group(2))
-        # ACM-Reference-Format: \bibfield{author}{...}, \bibinfo{person}{...}: keep the values
-        t = re.sub(r'\\bib(?:field|info)\s*\{[^{}]*\}', '', t)
-        t = re.sub(r'\\(?:showDOI|showISBNx|showISSN|showURL|urldef|href)\s*\{[^{}]*\}', '', t)
-        out[m.group(1)] = t.replace('\\newblock', ' ').strip()
+    # \bibitem{key}, natbib's \bibitem[Author et~al.(2023)]%\n{key}, or an
+    # alpha label with nested braces: \bibitem[BCK{\etalchar{+}}22]{key}
+    label = r'\[(?:[^\[\]{}]|\{(?:[^{}]|\{[^{}]*\})*\})*\]'
+    for m in re.finditer(r'\\bibitem\s*(?:' + label + r')?\s*%?\s*\{([^}]*)\}(.*?)(?=\\bibitem|\\end\{thebibliography\})', bbl, re.S):
+        out[m.group(1)] = bib_plain(m.group(2))
     # biblatex
     for m in re.finditer(r'\\entry\{([^}]*)\}(.*?)\\endentry', bbl, re.S):
         title = re.search(r'\\field\{title\}\{(.*?)\}\s*$', m.group(2), re.M)
         names = re.findall(r'family=\{([^}]*)\}', m.group(2))
         year = re.search(r'\\field\{year\}\{(\d+)\}', m.group(2))
-        out[m.group(1)] = (', '.join(names) + '. ' if names else '') + (title.group(1) if title else '') + \
-            ('. ' + year.group(1) if year else '')
+        out[m.group(1)] = bib_plain((', '.join(names) + '. ' if names else '') + (title.group(1) if title else '') +
+                                    ('. ' + year.group(1) if year else ''))
     return out
 
 
@@ -628,7 +1059,9 @@ def build_figures(log):
             return
         tex = os.path.join(tmp, 'figs.tex')
         env = tex_env(PAPER, os.path.dirname(PAPER), source_root())
-        cmd = ['latexmk', '-pdf', '-interaction=nonstopmode', '-halt-on-error', 'figs.tex']
+        # run where the main build runs, so paths relative to it (an
+        # \lstinputlisting{../x.ec}, which TEXINPUTS cannot find) still resolve
+        cmd = ['latexmk', '-pdf', '-interaction=nonstopmode', '-halt-on-error', '-outdir=' + tmp, tex]
 
         def figs_document(tight):
             # Preserve the two-column width before switching to a predictable
@@ -642,7 +1075,9 @@ def build_figures(log):
             if tight:
                 doc += [r'\makeatother', r'\usepackage[active,tightpage]{preview}',
                         r'\setlength\PreviewBorder{2pt}', r'\makeatletter']
-            doc.extend([r'\makeatother', r'\pagestyle{empty}', r'\begin{document}',
+            # \ps@empty is what \pagestyle{empty} runs; iacrcc redefines
+            # \pagestyle to an error, so call it directly
+            doc.extend([r'\ps@empty', r'\makeatother', r'\begin{document}',
                         r'\makeatletter\@ifpackageloaded{lineno}{\nolinenumbers}{}\makeatother',
                         r'\setlength{\pefloatcolumnwidth}{\columnwidth}', r'\onecolumn'])
             for src in todo:
@@ -662,7 +1097,7 @@ def build_figures(log):
             for stale in ('figs.pdf', 'figs.aux', 'figs.fdb_latexmk'):
                 if os.path.exists(os.path.join(tmp, stale)):
                     os.remove(os.path.join(tmp, stale))
-            r = subprocess.run(cmd, cwd=tmp, env=env, capture_output=True, text=True, errors='replace', timeout=600)
+            r = subprocess.run(cmd, cwd=PAPER, env=env, capture_output=True, text=True, errors='replace', timeout=600)
             debug_capture('figures', cmd, r, [tex, os.path.join(tmp, 'figs.log'),
                                               os.path.join(tmp, 'figs.aux')], log)
             if r.returncode == 0 and os.path.exists(os.path.join(tmp, 'figs.pdf')):
@@ -829,9 +1264,10 @@ def doc_payload():
             figs[src] = '/fig/' + k + '.png'
     for name, f in files.items():
         SESSION_START.setdefault(name, f['text'])
-    return {'pages': synctex_pages(), 'docclass': docclass(),
+    pages = synctex_pages()
+    return {'pages': pages, 'pdftext': [] if pages else pdf_page_texts(), 'docclass': docclass(),
             'main': MAIN, 'path': os.path.join(PAPER, MAIN), 'root': source_root(), 'mains': find_mains(PAPER), 'resolve': input_map(), 'files': files, 'aux': BUILDER.aux, 'auxver': BUILDER.auxver,
-            'macros': load_macros(), 'theorems': load_theorems(), 'config': CONFIG,
+            'macros': load_macros(), 'theorems': load_theorems(), 'cref': cref_config(), 'listings': all_listings(), 'listing_macros': sorted(listing_macros()), 'disk_files': source_files(), 'colors': paper_colors(), 'graphicx': uses_graphicx(), 'config': CONFIG,
             'bib': load_bib(), 'figs': figs, 'build': BUILDER.state,
             'tts': {}}
 
@@ -909,9 +1345,81 @@ def box_warnings():
     return _boxes['list']
 
 
+CODE_FILES = ('server.py', 'convert.py')
+
+
+def code_version():
+    """The editor's own code as it is on disk now: a page that sees this
+    change reloads itself (where it was), so a new version needs no restart
+    by hand."""
+    stamps = []
+    for name in CODE_FILES:
+        try:
+            stamps.append(os.path.getmtime(os.path.join(HERE, name)))
+        except OSError:
+            pass
+    for f in sorted(os.listdir(STATIC)):
+        if f.endswith(('.js', '.css', '.html', '.svg')):
+            try:
+                stamps.append(os.path.getmtime(os.path.join(STATIC, f)))
+            except OSError:
+                pass
+    probe = os.environ.get('PE_CODE_PROBE')      # tests: a file of their own stands for the code
+    if probe and os.path.exists(probe):
+        stamps.append(os.path.getmtime(probe))
+    return sha(repr(stamps))[:12]
+
+
 def state_payload():
     return {'hashes': {n: sha(read(n)) for n in paper_files()}, 'auxver': BUILDER.auxver, 'figver': BUILDER.figver,
-            'build': BUILDER.state, 'boxes': box_warnings()}
+            'build': BUILDER.state, 'boxes': box_warnings(), 'code': code_version()}
+
+
+def watch_own_code(port):
+    """When server.py (or convert.py) changes and still compiles, start the
+    new version in this process's place: same paper, same port, no new
+    window; the page reconnects by itself.  Never during a build."""
+    def stamps():
+        out = {}
+        for name in CODE_FILES:
+            try:
+                out[name] = os.path.getmtime(os.path.join(HERE, name))
+            except OSError:
+                pass
+        return out
+    seen = stamps()
+    while True:
+        time.sleep(1)
+        now = stamps()
+        if now == seen:
+            continue
+        time.sleep(0.5)        # an editor may write in several steps
+        now = stamps()
+        bad = None
+        for name in CODE_FILES:
+            r = subprocess.run([sys.executable, '-m', 'py_compile', os.path.join(HERE, name)], capture_output=True, text=True)
+            if r.returncode != 0:
+                bad = (r.stderr or r.stdout).strip().splitlines()[-1:] or ['does not compile']
+        if bad:
+            print(f'new code does not compile, still running the old one: {bad[0]}', flush=True)
+            seen = now
+            continue
+        while BUILDER and (BUILDER.state.get('state') == 'running' or BUILDER.wanted.is_set()):
+            time.sleep(0.5)
+        print('the editor\'s code changed: restarting it on the same port', flush=True)
+        argv = [a for a in sys.argv[1:]]
+        # the same port, and the paper open now (it may have been opened since)
+        for flag in ('--port',):
+            while flag in argv:
+                i = argv.index(flag)
+                del argv[i:i + 2]
+        argv = [a for a in argv if not a.startswith('--port=')]
+        os.environ['PE_REEXEC'] = '1'
+        os.environ['PE_PAPER'] = os.path.join(PAPER, MAIN)
+        os.environ['PE_CWD'] = PAPER
+        os.environ['PE_STATE'] = STATE
+        sys.stdout.flush()
+        os.execv(sys.executable, [sys.executable, os.path.abspath(sys.argv[0])] + argv + ['--port', str(port)])
 
 
 # ------------------------------------------------------------------ bibliography
@@ -934,6 +1442,23 @@ def bib_files():
         for m in re.finditer(r'\\addbibresource(?:\[[^\]]*\])?\s*\{([^}]*)\}', t):
             out.append(m.group(1).strip())
     return [b for b in dict.fromkeys(out) if os.path.isfile(os.path.join(PAPER, b))]
+
+
+def source_files():
+    """The .tex and .bib files of the project folder, for the source view:
+    hidden folders, the editor's state and build caches are left out."""
+    out = []
+    skip = {'node_modules', '__pycache__', 'auto', '_minted'}
+    state = os.path.realpath(STATE) if STATE else None
+    for root, dirs, files in os.walk(PAPER):
+        dirs[:] = sorted(d for d in dirs if not d.startswith('.') and d not in skip
+                         and os.path.realpath(os.path.join(root, d)) != state)
+        for f in sorted(files):
+            if f.endswith(('.tex', '.bib')) and not f.startswith('.'):
+                out.append(os.path.relpath(os.path.join(root, f), PAPER))
+                if len(out) >= 400:
+                    return out
+    return out
 
 
 def bib_target():
@@ -1390,23 +1915,130 @@ def local_speak(engine, voice, text):
 
 
 def baseline(name, ref):
-    """The text of a file at the last git commit, or when the editor opened.
-    None when there is no such version (a new file, or not in git)."""
+    """The text of a file at the last git commit (ref 'head'), at any commit
+    (its hash), or when the editor opened ('session').  None when there is no
+    such version (a new file, or not in git)."""
     if ref == 'session':
         return SESSION_START.get(name)
+    rev = 'HEAD' if ref in ('head', '', None) else ref
+    if not re.fullmatch(r'[0-9a-f]{7,40}|HEAD', rev):
+        return None
     try:
         prefix = subprocess.run(['git', 'rev-parse', '--show-prefix'], cwd=PAPER, capture_output=True,
                                 text=True, timeout=10)
         if prefix.returncode != 0:
             return SESSION_START.get(name)
-        r = subprocess.run(['git', 'show', 'HEAD:' + prefix.stdout.strip() + name], cwd=PAPER,
+        r = subprocess.run(['git', 'show', rev + ':' + prefix.stdout.strip() + name], cwd=PAPER,
                            capture_output=True, text=True, errors='replace', timeout=20)
         return r.stdout if r.returncode == 0 else None
     except (OSError, subprocess.TimeoutExpired):
         return None
 
 
+def baselines(names, ref):
+    """The texts of several files at one version, as baseline() gives them,
+    read with one git process for all of them."""
+    if ref == 'session':
+        return {n: SESSION_START.get(n) for n in names}
+    rev = 'HEAD' if ref in ('head', '', None) else ref
+    if not re.fullmatch(r'[0-9a-f]{7,40}|HEAD', rev):
+        return {n: None for n in names}
+    try:
+        prefix = subprocess.run(['git', 'rev-parse', '--show-prefix'], cwd=PAPER, capture_output=True,
+                                text=True, timeout=10)
+        if prefix.returncode != 0:
+            return {n: SESSION_START.get(n) for n in names}
+        pre = prefix.stdout.strip()
+        query = ''.join(f'{rev}:{pre}{n}\n' for n in names).encode()
+        r = subprocess.run(['git', 'cat-file', '--batch'], cwd=PAPER, input=query, capture_output=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return {n: None for n in names}
+    out, i, texts = r.stdout, 0, {}
+    for n in names:
+        # each answer is "<oid> <type> <size>\n<content>\n", or "<query> missing\n"
+        j = out.find(b'\n', i)
+        if j < 0:
+            texts[n] = None
+            continue
+        head = out[i:j].split()
+        if len(head) == 3 and head[1] == b'blob' and head[2].isdigit():
+            size = int(head[2])
+            texts[n] = out[j + 1:j + 1 + size].decode('utf-8', errors='replace')
+            i = j + 1 + size + 1
+        else:
+            texts[n] = None
+            i = j + 1
+    return texts
+
+
+def git_commits(limit=200):
+    """The commits that touched the paper's folder, newest first: hash,
+    short hash, time, subject, author."""
+    try:
+        r = subprocess.run(['git', 'log', '-n', str(limit), '--format=%H%x1f%h%x1f%ct%x1f%s%x1f%an', '--', '.'],
+                           cwd=PAPER, capture_output=True, text=True, errors='replace', timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if r.returncode != 0:
+        return []
+    out = []
+    for line in r.stdout.splitlines():
+        parts = line.split('\x1f')
+        if len(parts) == 5:
+            out.append({'hash': parts[0], 'short': parts[1], 't': int(parts[2]), 'subject': parts[3], 'author': parts[4]})
+    return out
+
+
 _pages = {'stamp': None, 'map': {}}
+
+
+_pdftext = {'stamp': None, 'pages': []}
+
+
+def pdf_page_texts():
+    """The text of every page of the built PDF (pdftotext), letters only and
+    lower case, for placing blocks on pages when there is no SyncTeX (a
+    Makefile build without -synctex)."""
+    pdf = os.path.join(PAPER, stem() + '.pdf')
+    if not os.path.isfile(pdf):
+        return []
+    stamp = os.path.getmtime(pdf)
+    if _pdftext['stamp'] == stamp:
+        return _pdftext['pages']
+    # kept on disk too: reading the PDF's text is most of the time of the
+    # first page load of a paper built without SyncTeX
+    disk = os.path.join(CACHE, 'pdftext.json') if CACHE else None
+    try:
+        with open(disk, encoding='utf-8') as f:
+            c = json.load(f)
+        if c.get('stamp') == stamp and isinstance(c.get('pages'), list):
+            _pdftext.update(stamp=stamp, pages=c['pages'])
+            return c['pages']
+    except (OSError, ValueError, TypeError):
+        pass
+    try:
+        r = subprocess.run(['pdftotext', '-enc', 'UTF-8', pdf, '-'], capture_output=True, timeout=60)
+        text = r.stdout.decode('utf-8', 'replace')
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    import unicodedata
+    pages = []
+    for page in text.split('\f'):
+        page = unicodedata.normalize('NFKC', page)
+        page = re.sub(r'-\n', '', page)          # words hyphenated at the end of a line
+        pages.append(re.sub(r'[^a-z]', '', page.lower()))
+    while pages and not pages[-1]:
+        pages.pop()
+    _pdftext.update(stamp=stamp, pages=pages)
+    if disk:
+        try:
+            os.makedirs(CACHE, exist_ok=True)
+            with open(disk + '.tmp', 'w', encoding='utf-8') as f:
+                json.dump({'stamp': stamp, 'pages': pages}, f)
+            os.replace(disk + '.tmp', disk)
+        except OSError:
+            pass
+    return pages
 
 
 def synctex_pages():
@@ -1634,12 +2266,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return False
         host = (self.headers.get('Host') or '').strip().lower()
         host = host[1:host.find(']')] if host.startswith('[') else host.rsplit(':', 1)[0]
-        if host not in ('127.0.0.1', 'localhost', '::1'):
+        # APP_HOST: browsers resolve *.localhost to this machine themselves, so
+        # no outside domain can be made to send it
+        if host not in ('127.0.0.1', 'localhost', '::1', APP_HOST):
             self.send_error(403, 'Forbidden host')
             return False
         return True
 
-    def send(self, code, body, ctype='application/json'):
+    def send(self, code, body, ctype='application/json', cache='no-store'):
         if isinstance(body, (dict, list)):
             body = json.dumps(body)
         if isinstance(body, str):
@@ -1647,7 +2281,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header('Content-Type', ctype)
         self.send_header('Content-Length', str(len(body)))
-        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Cache-Control', cache)
         self.end_headers()
         self.wfile.write(body)
 
@@ -1677,7 +2311,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             html = open(os.path.join(STATIC, 'index.html'), encoding='utf-8').read()
             return self.send(200, html.replace('__TOKEN__', TOKEN), 'text/html; charset=utf-8')
         if p == '/api/doc':
-            return self.send(200, doc_payload())
+            d = doc_payload()
+            if START['pick']:
+                # once: the first page asks for the start list, a reload does not
+                START['pick'] = False
+                d = {**d, 'startPick': True}
+            return self.send(200, d)
         if p == '/api/state':
             c = urllib.parse.parse_qs(url.query).get('c', [''])[0][:40]
             if c:
@@ -1710,12 +2349,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if p == '/api/history/text':
             text = history_get(urllib.parse.parse_qs(url.query).get('id', [''])[0])
             return self.send(404, {'error': 'no such version'}) if text is None else self.send(200, {'text': text})
+        if p in ('/api/recent', '/api/browse'):
+            if self.headers.get('X-Token') != TOKEN:
+                return self.send(403, {'error': 'bad token'})
+            if p == '/api/recent':
+                out = []
+                for e in recent_papers():
+                    folder, main = os.path.split(e['path'])
+                    out.append({'path': folder, 'main': main, 'title': e.get('title') or '', 't': e.get('t'),
+                                'current': os.path.normpath(e['path']) == os.path.normpath(os.path.join(PAPER, MAIN))})
+                return self.send(200, out)
+            return self.send(200, browse_dir(urllib.parse.parse_qs(url.query).get('path', [''])[0]))
+        if p == '/api/commits':
+            return self.send(200, git_commits())
         if p == '/api/baseline':
             q = urllib.parse.parse_qs(url.query)
             name, ref = q.get('name', [''])[0], q.get('ref', ['head'])[0]
             if name not in paper_files():
                 return self.send(400, {'error': 'unknown file'})
             return self.send(200, {'text': baseline(name, ref)})
+        if p == '/api/baselines':
+            # every file of the paper at one version, for the diff view
+            ref = urllib.parse.parse_qs(url.query).get('ref', ['head'])[0]
+            return self.send(200, baselines(paper_files(), ref))
         if p.startswith('/figtext/') and re.fullmatch(r'/figtext/[0-9a-f]{16}', p):
             f = os.path.join(CACHE, p[9:] + '.txt')
             return self.send(200, {'text': open(f).read() if os.path.exists(f) else ''})
@@ -1733,12 +2389,37 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send(200, json.load(open(f)))
         if p == '/api/voices':
             return self.send(200, server_voices())
+        if p == '/api/venues':
+            return self.send(200, {'venues': [{'id': k, 'label': v[0], 'anonClass': v[1] != v[2]} for k, v in convert.TARGETS.items()],
+                                   'home': os.path.expanduser('~'),
+                                   'parent': os.path.dirname(os.path.dirname(os.path.join(PAPER, MAIN))) if PAPER else os.path.expanduser('~')})
+        if p == '/api/srcfiles':
+            docs = set(paper_files())
+            return self.send(200, [{'name': n, 'doc': n in docs} for n in source_files()])
+        if p == '/api/srcfile':
+            name = urllib.parse.parse_qs(url.query).get('name', [''])[0]
+            if name not in source_files():
+                return self.send(400, {'error': 'not a .tex or .bib file of this folder'})
+            if os.path.getsize(os.path.join(PAPER, name)) > 4_000_000:
+                # a huge file (cryptobib's crypto.bib) is shown in part, for reading
+                with open(os.path.join(PAPER, name), encoding='utf-8', errors='replace', newline='') as f:
+                    head = f.read(2_000_000)
+                return self.send(200, {'text': head[:head.rfind('\n') + 1], 'hash': None, 'truncated': True})
+            text = read(name)
+            return self.send(200, {'text': text, 'hash': sha(text)})
         if p.startswith('/static/'):
-            name = os.path.basename(p)
-            f = os.path.join(STATIC, name)
-            if os.path.exists(f):
-                ctype = {'.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml'}.get(os.path.splitext(f)[1], 'text/plain')
-                return self.send(200, open(f, 'rb').read(), ctype + '; charset=utf-8')
+            # static/ and its vendor/ folder (KaTeX, served here so that the
+            # editor needs no network); nothing outside static/
+            rel = os.path.normpath(urllib.parse.unquote(p[len('/static/'):]))
+            f = os.path.realpath(os.path.join(STATIC, rel))
+            if f.startswith(os.path.realpath(STATIC) + os.sep) and os.path.isfile(f):
+                ext = os.path.splitext(f)[1]
+                ctype = {'.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml',
+                         '.woff2': 'font/woff2', '.json': 'application/json', '.png': 'image/png'}.get(ext, 'text/plain; charset=utf-8')
+                # vendored files never change for a given version: cached a day
+                cache = 'max-age=86400' if rel.startswith('vendor' + os.sep) else 'no-store'
+                with open(f, 'rb') as src:
+                    return self.send(200, src.read(), ctype, cache)
         self.send(404, {'error': 'not found'})
 
     def do_POST(self):
@@ -1843,6 +2524,90 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 BUILDER.aux = load_aux()
                 BUILDER.auxver += 1
                 return self.send(200, {'main': MAIN})
+        if urllib.parse.urlparse(self.path).path == '/api/external-edit':
+            req = self.json_body()
+            if not isinstance(req, dict):
+                return self.send(400, {'error': 'expected a JSON object'})
+            name = req.get('name')
+            if not isinstance(name, str) or (name not in paper_files() and name not in source_files()):
+                return self.send(400, {'error': 'not a file of this paper'})
+            try:
+                line, col = int(req.get('line') or 1), int(req.get('col') or 1)
+            except (TypeError, ValueError):
+                return self.send(400, {'error': 'bad line or column'})
+            err = open_in_editor(name, line, col)
+            return self.send(500 if err else 200, {'error': err} if err else {'cmd': external_editor_cmd(name, line, col)[0]})
+        if urllib.parse.urlparse(self.path).path == '/api/trace':
+            req = self.json_body()
+            n = trace_append((req or {}).get('entries') if isinstance(req, dict) else None, (req or {}).get('client') if isinstance(req, dict) else None)
+            return self.send(200, {'kept': n})
+        if urllib.parse.urlparse(self.path).path == '/api/trace/report':
+            req = self.json_body()
+            name = trace_report(req.get('note') if isinstance(req, dict) else '')
+            BUILDER.log(f'problem report: {name}')
+            return self.send(200, {'file': name})
+        if urllib.parse.urlparse(self.path).path == '/api/file/rename':
+            req = self.json_body()
+            if not isinstance(req, dict):
+                return self.send(400, {'error': 'expected a JSON object'})
+            with PROJECT_LOCK:
+                src = project_path(req.get('from'), ('.tex', '.bib'))
+                dst = project_path(req.get('to'), ('.tex', '.bib'))
+                if not src or not dst or os.path.splitext(src)[1] != os.path.splitext(dst)[1]:
+                    return self.send(400, {'error': 'names must be .tex (or .bib) files inside the paper\'s folder, keeping their kind'})
+                if src == MAIN:
+                    return self.send(400, {'error': 'the main file cannot be renamed here'})
+                if not os.path.isfile(os.path.join(PAPER, src)):
+                    return self.send(400, {'error': f'{src} is not a file of this folder'})
+                if os.path.exists(os.path.join(PAPER, dst)):
+                    return self.send(409, {'error': f'{dst} already exists'})
+                try:
+                    changed = rename_file(src, dst, req.get('batch'))
+                except OSError as e:
+                    return self.send(500, {'error': f'could not rename: {e.strerror or e}'})
+            BUILDER.log(f'renamed {src} to {dst}' + (f' (updated {", ".join(changed)})' if changed else ''))
+            BUILDER.request()
+            return self.send(200, {'name': dst, 'changed': changed})
+        if urllib.parse.urlparse(self.path).path == '/api/file/trash':
+            req = self.json_body()
+            with PROJECT_LOCK:
+                name = project_path(req.get('name') if isinstance(req, dict) else None, ('.tex', '.bib'))
+                if not name or not os.path.isfile(os.path.join(PAPER, name)):
+                    return self.send(400, {'error': 'not a .tex or .bib file of this folder'})
+                if name in paper_files() or name == MAIN:
+                    return self.send(400, {'error': f'{name} is still read by the document: take its \\input out first'})
+                if name in bib_files():
+                    return self.send(400, {'error': f'{name} is still named by \\bibliography or \\addbibresource'})
+                try:
+                    dest = trash_file(name, req.get('batch'))
+                except OSError as e:
+                    return self.send(500, {'error': f'could not move it: {e.strerror or e}'})
+            BUILDER.log(f'moved {name} to {dest}')
+            return self.send(200, {'trash': dest})
+        if urllib.parse.urlparse(self.path).path == '/api/upload':
+            req = self.json_body()
+            if not isinstance(req, dict) or not isinstance(req.get('data'), str):
+                return self.send(400, {'error': 'expected a name and base64 data'})
+            try:
+                import base64
+                data = base64.b64decode(req['data'], validate=True)
+            except ValueError:
+                return self.send(400, {'error': 'the data is not base64'})
+            if len(data) > 40_000_000:
+                return self.send(413, {'error': 'images up to 40 MB'})
+            try:
+                with PROJECT_LOCK:
+                    path = save_upload(req.get('name'), data)
+            except (ValueError, OSError) as e:
+                return self.send(400, {'error': str(e)})
+            BUILDER.log(f'added {path}')
+            return self.send(200, {'path': path, 'graphicx': uses_graphicx()})
+        if urllib.parse.urlparse(self.path).path == '/api/listing':
+            req = self.json_body()
+            src = req.get('src') if isinstance(req, dict) else None
+            if not isinstance(src, str) or len(src) > 20000:
+                return self.send(400, {'error': 'expected the source of a listing command'})
+            return self.send(200, {'listings': expand_listing(src)})
         if urllib.parse.urlparse(self.path).path == '/api/bibadd':
             req = self.json_body()
             if not isinstance(req, dict):
@@ -1871,10 +2636,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     backup = f.name
             return self.send(200, {'backup': os.path.relpath(backup, PAPER)})
         if urllib.parse.urlparse(self.path).path == '/api/pick-directory':
-            directory = choose_directory()
+            req = self.json_body()
+            title = req.get('title') if isinstance(req, dict) and isinstance(req.get('title'), str) else ''
+            directory = choose_directory(re.sub(r'[^\w .,:()-]', '', title)[:80] or 'Open paper directory')
             if not directory:
                 return self.send(204, b'', 'text/plain')
             return self.send(200, {'path': directory, 'mains': find_mains(directory)})
+        if urllib.parse.urlparse(self.path).path == '/api/new-project':
+            req = self.json_body()
+            if not isinstance(req, dict):
+                return self.send(400, {'error': 'expected a JSON object'})
+            with PROJECT_LOCK:
+                try:
+                    main, warnings = create_project(req)
+                except ValueError as e:
+                    return self.send(400, {'error': str(e)})
+                open_paper(main)
+                ensure_state()
+                BUILDER.aux = load_aux()
+                BUILDER.auxver += 1
+                BUILDER.log(f'new paper {main}')
+                return self.send(200, {'main': MAIN, 'path': PAPER, 'warnings': warnings})
         if urllib.parse.urlparse(self.path).path == '/api/open-project':
             req = self.json_body()
             if not isinstance(req, dict):
@@ -1899,7 +2681,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not isinstance(name, str) or not isinstance(text, str):
                 return self.send(400, {'error': 'expected a name and a text'})
             norm = os.path.normpath(name)
-            safe = name.endswith('.tex') and not os.path.isabs(name) and norm != '..' and not norm.startswith('..' + os.sep)
+            safe = name.endswith(('.tex', '.bib')) and not os.path.isabs(name) and norm != '..' and not norm.startswith('..' + os.sep)
             if not os.path.isfile(os.path.join(PAPER, name)) and safe:
                 # deleted (or renamed) since the editor read it: only on request
                 # (the Overwrite button) is it written again
@@ -1915,7 +2697,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 BUILDER.log(f'saved {norm} (created again)')
                 BUILDER.request()
                 return self.send(200, {'hash': sha(text)})
-            if name not in paper_files():
+            if name not in paper_files() and name not in source_files():
                 return self.send(400, {'error': 'not a file of this document'})
             current = read(name)
             if sha(current) != base:
@@ -1966,7 +2748,352 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send(200, audio, ctype)
 
 
+# ------------------------------------------------------------------ trace
+#
+# What the page did and what was pressed, kept on this machine only
+# (.paper-editor/debug/trace.jsonl, the last few MB), so that a problem can be
+# looked into afterwards; Report a problem copies its last minutes aside.
+
+TRACE_MAX = 4_000_000
+_trace_lock = threading.Lock()
+
+
+def trace_path():
+    return os.path.join(STATE, 'debug', 'trace.jsonl')
+
+
+def trace_append(entries, client):
+    if not isinstance(entries, list):
+        return 0
+    lines = []
+    for e in entries[:5000]:
+        if isinstance(e, dict):
+            e = dict(e)
+            e['c'] = str(client or '')[:16]
+            lines.append(json.dumps(e, ensure_ascii=False)[:4000] + '\n')
+    if not lines:
+        return 0
+    path = trace_path()
+    with _trace_lock:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'a', encoding='utf-8') as f:
+            f.writelines(lines)
+        if os.path.getsize(path) > TRACE_MAX:
+            # keep the newer half
+            with open(path, encoding='utf-8', errors='replace') as f:
+                f.seek(os.path.getsize(path) - TRACE_MAX // 2)
+                f.readline()
+                rest = f.read()
+            with open(path + '.tmp', 'w', encoding='utf-8') as f:
+                f.write(rest)
+            os.replace(path + '.tmp', path)
+    return len(lines)
+
+
+def trace_report(note, minutes=10):
+    """The last minutes of the trace, with a note, in a file of their own."""
+    since = (time.time() - minutes * 60) * 1000
+    keep = []
+    with _trace_lock:
+        try:
+            with open(trace_path(), encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    try:
+                        if json.loads(line).get('t', 0) >= since:
+                            keep.append(line)
+                    except ValueError:
+                        continue
+        except OSError:
+            pass
+    name = os.path.join(STATE, 'debug', time.strftime('report-%Y%m%d-%H%M%S.jsonl'))
+    os.makedirs(os.path.dirname(name), exist_ok=True)
+    head = {'t': time.time() * 1000, 'k': 'report', 'note': str(note or '')[:4000], 'paper': os.path.join(PAPER, MAIN),
+            'build': dict(BUILDER.state) if BUILDER else None}
+    with open(name, 'w', encoding='utf-8') as f:
+        f.write(json.dumps(head, ensure_ascii=False) + '\n')
+        f.writelines(keep)
+        log = os.path.join(PAPER, stem() + '.log')
+        if os.path.isfile(log):
+            f.write(json.dumps({'k': 'latex-log-tail', 'text': read_path(log)[-6000:]}) + '\n')
+    return name
+
+
+# ------------------------------------------------------------------ files
+
+def project_path(name, exts=('.tex',)):
+    """A path of the paper's folder given relative to it, normalised, or None
+    when it leaves the folder, is hidden or has another extension."""
+    if not isinstance(name, str) or not name or os.path.isabs(name) or '\0' in name:
+        return None
+    norm = os.path.normpath(name)
+    if norm == '..' or norm.startswith('..' + os.sep) or any(p.startswith('.') for p in norm.split(os.sep)):
+        return None
+    if exts and not norm.lower().endswith(tuple(exts)):
+        return None
+    full = os.path.realpath(os.path.join(PAPER, norm))
+    if not full.startswith(os.path.realpath(PAPER) + os.sep):
+        return None
+    return norm
+
+
+def input_arg_for(old_arg, new_name):
+    """The \\input argument naming new_name, written as old_arg was (with or
+    without .tex, relative to the same base)."""
+    keep_ext = old_arg.strip().endswith('.tex')
+    return new_name if keep_ext else new_name[:-4]
+
+
+def rename_file(src, dst, batch):
+    """Rename a .tex file of the document and every \\input/\\include of it.
+    Returns the files whose text changed."""
+    old_text = read(src)
+    texts = {n: read(n) for n in paper_files() if n != src}
+    changed = {}
+    for n, text in texts.items():
+        def fix(m):
+            arg = m.group(1)
+            if resolve_input(arg) == src:
+                return m.group(0).replace('{' + arg + '}', '{' + input_arg_for(arg, dst) + '}')
+            return m.group(0)
+        new = INPUT_RE.sub(fix, text) if src.endswith('.tex') else text
+        if src.endswith('.bib'):
+            # \bibliography{a,refs} (names without .bib) and \addbibresource{refs.bib}
+            def fix_bib(m):
+                names = m.group(2).split(',')
+                out = []
+                for b in names:
+                    s = b.strip()
+                    full = s if s.endswith('.bib') else s + '.bib'
+                    out.append(b.replace(s, dst if s.endswith('.bib') else dst[:-4]) if os.path.normpath(full) == src else b)
+                return m.group(1) + ','.join(out) + '}'
+            new = re.sub(r'(\\bibliography\s*\{)([^}]*)\}', fix_bib, new)
+            new = re.sub(r'(\\addbibresource(?:\[[^\]]*\])?\s*\{)([^}]*)\}', fix_bib, new)
+        if new != text:
+            changed[n] = (text, new)
+    os.makedirs(os.path.dirname(os.path.join(PAPER, dst)) or PAPER, exist_ok=True)
+    history_put(old_text)
+    os.rename(os.path.join(PAPER, src), os.path.join(PAPER, dst))
+    history_record(batch, src, old_text, '')
+    history_record(batch, dst, '', old_text)
+    for n, (before, after) in changed.items():
+        history_record(batch, n, before, after)
+        path = os.path.join(PAPER, n)
+        tmp = path + '.editor-rename.tmp'
+        with open(tmp, 'w', encoding='utf-8', newline='') as f:
+            f.write(after)
+        os.chmod(tmp, stat.S_IMODE(os.stat(path).st_mode))
+        os.replace(tmp, path)
+    return sorted(changed)
+
+
+def trash_file(name, batch):
+    """Move a file the document no longer reads to the editor's trash."""
+    text = read(name)
+    d = os.path.join(STATE, 'trash')
+    os.makedirs(d, exist_ok=True)
+    dest = os.path.join(d, time.strftime('%Y%m%d-%H%M%S-') + name.replace(os.sep, '__'))
+    history_record(batch, name, text, '')
+    shutil.move(os.path.join(PAPER, name), dest)
+    return os.path.relpath(dest, PAPER)
+
+
+IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.pdf', '.eps', '.svg')
+
+
+def save_upload(name, data):
+    """Write an added image under figures/ (beside the main file), never over
+    another file: returns its path relative to the paper's folder."""
+    base = re.sub(r'[^A-Za-z0-9._-]+', '-', os.path.basename(name or '')).strip('-.') or 'image.png'
+    stem_, ext = os.path.splitext(base)
+    if ext.lower() not in IMAGE_EXTS:
+        raise ValueError('only images can be added (%s)' % ', '.join(IMAGE_EXTS))
+    folder = os.path.join(os.path.dirname(MAIN), 'figures')
+    os.makedirs(os.path.join(PAPER, folder), exist_ok=True)
+    n, cand = 1, os.path.join(folder, stem_ + ext.lower())
+    while os.path.exists(os.path.join(PAPER, cand)):
+        n += 1
+        cand = os.path.join(folder, '%s-%d%s' % (stem_, n, ext.lower()))
+    with open(os.path.join(PAPER, cand), 'xb') as f:
+        f.write(data)
+    return os.path.normpath(cand)
+
+
 RECENT_FILE = os.path.join(os.environ.get('XDG_CONFIG_HOME', os.path.expanduser('~/.config')), 'paper-editor', 'recent.json')
+
+
+def paper_title(path):
+    """The \\title of a main file, as plain text (for the list of recent papers)."""
+    text = strip_comments(read_path(path))[:200000]
+    m = re.search(r'\\title\s*(?:\[[^\]]*\])?\s*(?=\{)', text)
+    if not m:
+        return ''
+    try:
+        title, _ = group(text, m.end())
+    except (IndexError, AssertionError):
+        return ''
+    return bib_plain(title.replace('\\\\', ' '))[:200]
+
+
+def recent_papers():
+    try:
+        data = json.load(open(RECENT_FILE))
+    except (OSError, ValueError):
+        return []
+    out = []
+    for e in data.get('recent') or ([{'path': data['last']}] if data.get('last') else []):
+        if isinstance(e, dict) and isinstance(e.get('path'), str) and os.path.isfile(e['path']):
+            out.append(e)
+    return out
+
+
+def remember_paper(path):
+    """The paper just opened goes first in the list of recent papers (ten)."""
+    try:
+        entry = {'path': path, 't': time.time(), 'title': paper_title(path)}
+        rest = [e for e in recent_papers() if os.path.normpath(e['path']) != os.path.normpath(path)]
+        os.makedirs(os.path.dirname(RECENT_FILE), exist_ok=True)
+        tmp = RECENT_FILE + '.tmp'
+        with open(tmp, 'w') as out:
+            json.dump({'last': path, 'recent': [entry] + rest[:9]}, out)
+        os.replace(tmp, RECENT_FILE)
+    except OSError:
+        pass
+
+
+def browse_dir(path):
+    """A folder's subfolders, and its main documents, for the Open window."""
+    path = os.path.abspath(os.path.expanduser(path or '~'))
+    if not os.path.isdir(path):
+        path = os.path.expanduser('~')
+    dirs = []
+    try:
+        with os.scandir(path) as it:
+            for e in it:
+                if e.name.startswith('.') or e.name in ('node_modules', '__pycache__'):
+                    continue
+                try:
+                    if e.is_dir():
+                        dirs.append(e.name)
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    dirs.sort(key=str.lower)
+    has_tex = False
+    try:
+        has_tex = any(f.endswith('.tex') for f in os.listdir(path))
+    except OSError:
+        pass
+    return {'path': path, 'parent': os.path.dirname(path) if os.path.dirname(path) != path else None,
+            'home': os.path.expanduser('~'), 'dirs': dirs[:800], 'mains': find_mains(path) if has_tex else []}
+
+
+def external_editor_cmd(path, line=1, col=1):
+    """The command that opens path at line and column in the user's editor."""
+    cmd = CONFIG.get('external_editor')
+    if isinstance(cmd, str) and cmd.strip():
+        cmd = cmd.split()
+    if not (isinstance(cmd, list) and cmd and all(isinstance(a, str) for a in cmd)):
+        if shutil.which('emacsclient'):
+            # a running Emacs server takes the file; without one, -a starts Emacs itself
+            cmd = ['emacsclient', '-n', '-a', 'emacs', '+{line}:{col}', '{file}']
+        elif shutil.which('code'):
+            cmd = ['code', '-g', '{file}:{line}:{col}']
+        else:
+            cmd = ['xdg-open' if sys.platform.startswith('linux') else 'open', '{file}']
+    has_file = any('{file}' in a for a in cmd)
+    out = [a.replace('{file}', path).replace('{line}', str(line)).replace('{col}', str(col)) for a in cmd]
+    return out if has_file else out + [path]
+
+
+def open_in_editor(name, line=1, col=1):
+    """Run the user's editor on a file of the project (detached: the editor
+    outlives the request and the server).  Returns an error text or None."""
+    full = os.path.join(PAPER, name)
+    if not os.path.isfile(full):
+        return f'no such file: {name}'
+    cmd = external_editor_cmd(os.path.abspath(full), max(1, int(line or 1)), max(1, int(col or 1)))
+    try:
+        subprocess.Popen(cmd, cwd=PAPER, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError as e:
+        return f'could not run {cmd[0]}: {e.strerror or e} (set "external_editor" in .paper-editor/config.json)'
+    BUILDER.log(f'opened {name}:{line} in {cmd[0]}')
+    return None
+
+
+NEW_GITIGNORE = '''*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz
+*.toc
+.paper-editor/cache/
+'''
+
+
+def _git(args, cwd, timeout=600):
+    try:
+        r = subprocess.run(['git'] + args, cwd=cwd, capture_output=True, text=True, errors='replace', timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, str(e)
+    return r.returncode == 0, (r.stderr or r.stdout).strip()
+
+
+def create_project(req):
+    """A new paper folder: main.tex for the venue (\\ifanon switch), sections/,
+    references.bib and, if asked, cryptobib (a clone, or a submodule of a new or
+    the enclosing Git repository).  Returns (main file, warnings)."""
+    parent = os.path.abspath(os.path.expanduser(str(req.get('parent') or '')))
+    name = str(req.get('name') or '').strip()
+    target = req.get('venue') or 'article'
+    cryptobib = req.get('cryptobib') or 'none'
+    if not os.path.isdir(parent):
+        raise ValueError(f'no such folder: {parent}')
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._ -]{0,80}', name) or '..' in name:
+        raise ValueError('the folder name may have letters, digits, spaces, dots, dashes and underscores')
+    if target not in convert.TARGETS:
+        raise ValueError(f'unknown venue {target}')
+    if cryptobib not in ('none', 'clone', 'submodule'):
+        raise ValueError('cryptobib: none, clone or submodule')
+    folder = os.path.join(parent, name)
+    if os.path.exists(folder) and (not os.path.isdir(folder) or os.listdir(folder)):
+        raise ValueError(f'{folder} already exists and is not empty')
+    md = req.get('metadata') if isinstance(req.get('metadata'), dict) else {}
+    warnings = []
+    os.makedirs(os.path.join(folder, 'sections'), exist_ok=True)
+    for n, text in convert.NEW_SECTIONS.items():
+        with open(os.path.join(folder, n), 'w') as f:
+            f.write(text)
+    with open(os.path.join(folder, 'references.bib'), 'w') as f:
+        f.write('% Entries of your own; ' + ('cryptobib/ has the IACR ones (crypto.bib).\n' if cryptobib != 'none' else 'the editor adds the ones it finds on Crossref and arXiv here.\n'))
+    have_bib = False
+    if cryptobib == 'clone':
+        ok, out = _git(['clone', '--depth', '1', convert.CRYPTOBIB_URL, 'cryptobib'], folder)
+        have_bib = ok
+        if not ok:
+            warnings.append('Could not clone cryptobib: ' + out[-300:])
+    elif cryptobib == 'submodule':
+        inside, _ = _git(['rev-parse', '--show-toplevel'], folder, 30)
+        if not inside:
+            ok, out = _git(['init'], folder, 60)
+            if not ok:
+                warnings.append('Could not make a Git repository: ' + out[-300:])
+            else:
+                with open(os.path.join(folder, '.gitignore'), 'w') as f:
+                    f.write(NEW_GITIGNORE)
+        ok, out = _git(['-c', 'protocol.file.allow=always', 'submodule', 'add', convert.CRYPTOBIB_URL, 'cryptobib'], folder)
+        have_bib = ok
+        if not ok:
+            warnings.append('Could not add cryptobib as a submodule: ' + out[-300:])
+    bibs = (['cryptobib/abbrev3', 'cryptobib/crypto'] if have_bib else []) + ['references']
+    main = os.path.join(folder, 'main.tex')
+    with open(main, 'w') as f:
+        f.write(convert.new_main(md, target, bool(req.get('anonymous')), bibs))
+    return main, warnings
 
 
 def last_paper():
@@ -1981,6 +3108,7 @@ def last_paper():
 # goodbye when it closes.  When the server opens its own window (and not
 # --keep-running), it stops once no page is left.
 CLIENTS = {}
+START = {'pick': False}    # started without a paper: the page opens on the recent papers
 LIFE = {'last': time.time(), 'seen': False}
 
 
@@ -2019,19 +3147,25 @@ def open_paper(path, cwd=None, state=None):
         if os.path.exists(cfg):
             CONFIG.update(json.load(open(cfg)))
     _bib.update(entries=None, stamp=None)
-    try:
-        os.makedirs(os.path.dirname(RECENT_FILE), exist_ok=True)
-        with open(RECENT_FILE, 'w') as out:
-            json.dump({'last': path}, out)
-    except OSError:
-        pass
+    remember_paper(path)
 
 
 def load_token():
-    """The key a page sends with every write: kept in the project's cache, so
-    that a page left open across a restart of the editor can still save."""
+    """The key a page sends with every write: kept beside the list of recent
+    papers (one for the user, not one per paper), so that a page left open
+    across a restart of the editor can still save, also after it switched to
+    another paper (a key per paper refused every write and the recent list)."""
     global TOKEN
-    p = os.path.join(CACHE, 'token')
+    p = os.path.join(os.path.dirname(RECENT_FILE), 'token')
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        # the first time: the key the paper's cache had (a page open on it now keeps working)
+        old = os.path.join(CACHE, 'token')
+        if not os.path.exists(p) and os.path.isfile(old):
+            shutil.copyfile(old, p)
+            os.chmod(p, 0o600)
+    except OSError:
+        pass
     try:
         with open(p) as f:
             t = f.read().strip()
@@ -2184,6 +3318,55 @@ def history_list(limit=300):
     return order[::-1][:limit]
 
 
+# The app window's address.  On Wayland, Chrome ignores --class and names an
+# app window after its host and profile (chrome-<host>__-Default): a host of
+# its own and a profile of its own give a name that is the same on every
+# port, which the desktop entry's StartupWMClass matches, so the window shows
+# under the editor's own icon and name in the dock (not as "run").
+APP_HOST = 'paper-reviewer.localhost'
+APP_WAYLAND_ID = 'chrome-' + APP_HOST + '__-Default'
+
+
+def app_profile():
+    base = os.environ.get('XDG_CONFIG_HOME', os.path.expanduser('~/.config'))
+    return os.path.join(base, 'paper-editor', 'chrome-profile')
+
+
+def carry_zoom(profile=None, sources=None):
+    """The app window's profile starts at 100%: give it the zoom the editor
+    had in the user's own Chrome (for 127.0.0.1), once.  Only while that
+    profile is not running (Chrome writes its preferences back on exit)."""
+    profile = profile or app_profile()
+    prefs = os.path.join(profile, 'Default', 'Preferences')
+    if os.path.lexists(os.path.join(profile, 'SingletonLock')):
+        return None
+    try:
+        mine = json.load(open(prefs, encoding='utf-8')) if os.path.isfile(prefs) else {}
+    except (OSError, ValueError):
+        return None
+    zooms = mine.setdefault('partition', {}).setdefault('per_host_zoom_levels', {}).setdefault('x', {})
+    if APP_HOST in zooms:
+        return None
+    base = os.environ.get('XDG_CONFIG_HOME', os.path.expanduser('~/.config'))
+    sources = sources or [os.path.join(base, d, 'Default', 'Preferences') for d in ('google-chrome', 'chromium', 'google-chrome-beta')]
+    for src in sources:
+        try:
+            theirs = json.load(open(src, encoding='utf-8'))
+        except (OSError, ValueError):
+            continue
+        for hosts in ((theirs.get('partition') or {}).get('per_host_zoom_levels') or {}).values():
+            entry = hosts.get('127.0.0.1') or hosts.get('localhost')
+            if isinstance(entry, dict) and isinstance(entry.get('zoom_level'), (int, float)):
+                zooms[APP_HOST] = dict(entry)
+                os.makedirs(os.path.dirname(prefs), exist_ok=True)
+                tmp = prefs + '.editor.tmp'
+                with open(tmp, 'w', encoding='utf-8') as out:
+                    json.dump(mine, out)
+                os.replace(tmp, prefs)
+                return entry['zoom_level']
+    return None
+
+
 def open_browser(url, browser):
     if browser in ('chrome', 'chrome-app'):
         executables = ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser']
@@ -2203,8 +3386,19 @@ def open_browser(url, browser):
             found = executable if os.path.isfile(executable) else shutil.which(executable)
             if found:
                 if browser == 'chrome-app':
-                    # --class: the window groups under the launcher's icon (StartupWMClass)
-                    subprocess.Popen([found, '--app=' + url, '--class=crypto-paper-reviewer'],
+                    # --class names the window on X11; on Wayland the host and
+                    # the profile do (APP_WAYLAND_ID).  A profile of its own also
+                    # keeps the window out of a Chrome already running.
+                    app_url = url.replace('://127.0.0.1:', '://' + APP_HOST + ':', 1)
+                    refresh_desktop_entry()
+                    os.makedirs(app_profile(), exist_ok=True)
+                    try:
+                        carry_zoom()
+                    except Exception:      # a nicety: never stop the window opening
+                        pass
+                    subprocess.Popen([found, '--app=' + app_url, '--class=crypto-paper-reviewer',
+                                      '--user-data-dir=' + app_profile(), '--no-first-run',
+                                      '--no-default-browser-check'],
                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 else:
                     webbrowser.BackgroundBrowser(found).open(url)
@@ -2215,7 +3409,34 @@ def open_browser(url, browser):
 
 
 
-def install_desktop():
+def desktop_entry_text(run):
+    return ('[Desktop Entry]\nType=Application\nName=Crypto Paper Reviewer\n'
+            'Comment=Read, listen to and edit a LaTeX paper\n'
+            f'Exec="{run}" %f\nIcon=crypto-paper-reviewer\nTerminal=false\n'
+            'Categories=Office;\nMimeType=text/x-tex;\n'
+            f'StartupWMClass={APP_WAYLAND_ID}\nStartupNotify=false\n')
+
+
+def x11_alias_text(run):
+    # X11 windows carry --class; a hidden entry gives them the same icon
+    return ('[Desktop Entry]\nType=Application\nName=Crypto Paper Reviewer\n'
+            f'Exec="{run}" %f\nIcon=crypto-paper-reviewer\nTerminal=false\nNoDisplay=true\n'
+            'StartupWMClass=crypto-paper-reviewer\n')
+
+
+def refresh_desktop_entry():
+    """An entry installed by an older version names the window as Wayland
+    never does: bring it up to date (only if it is installed)."""
+    data = os.environ.get('XDG_DATA_HOME', os.path.expanduser('~/.local/share'))
+    entry = os.path.join(data, 'applications', 'crypto-paper-reviewer.desktop')
+    try:
+        if os.path.isfile(entry) and read_path(entry) != desktop_entry_text(os.path.join(HERE, 'run')):
+            install_desktop(quiet=True)
+    except OSError:
+        pass
+
+
+def install_desktop(quiet=False):
     """An entry in the applications menu that runs ./run (the last paper, else a folder chooser)."""
     data = os.environ.get('XDG_DATA_HOME', os.path.expanduser('~/.local/share'))
     icon = os.path.join(data, 'icons', 'hicolor', 'scalable', 'apps', 'crypto-paper-reviewer.svg')
@@ -2225,29 +3446,28 @@ def install_desktop():
     shutil.copyfile(os.path.join(STATIC, 'icon.svg'), icon)
     run = os.path.join(HERE, 'run')
     with open(entry, 'w') as out:
-        out.write('[Desktop Entry]\nType=Application\nName=Crypto Paper Reviewer\n'
-                  'Comment=Read, listen to and edit a LaTeX paper\n'
-                  f'Exec="{run}" %f\nIcon=crypto-paper-reviewer\nTerminal=false\n'
-                  'Categories=Office;\nMimeType=text/x-tex;\n'
-                  'StartupWMClass=crypto-paper-reviewer\nStartupNotify=false\n')
+        out.write(desktop_entry_text(run))
+    with open(os.path.join(os.path.dirname(entry), 'crypto-paper-reviewer-x11.desktop'), 'w') as out:
+        out.write(x11_alias_text(run))
     for cmd in (['update-desktop-database', os.path.dirname(entry)], ['gtk-update-icon-cache', '-q', os.path.join(data, 'icons', 'hicolor')]):
         if shutil.which(cmd[0]):
             subprocess.run(cmd, capture_output=True)
-    print(f'added {entry}')
+    if not quiet:
+        print(f'added {entry}')
     return 0
 
 
-def choose_directory():
+def choose_directory(title='Open paper directory'):
     commands = []
     if sys.platform == 'darwin':
-        commands.append(['osascript', '-e', 'POSIX path of (choose folder with prompt "Open paper directory")'])
+        commands.append(['osascript', '-e', f'POSIX path of (choose folder with prompt "{title}")'])
     elif os.name == 'nt':
         script = ('Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; '
                   'if ($d.ShowDialog() -eq "OK") { $d.SelectedPath }')
         commands.append(['powershell', '-NoProfile', '-Command', script])
     else:
         commands += [
-            ['zenity', '--file-selection', '--directory', '--title=Open paper directory'],
+            ['zenity', '--file-selection', '--directory', f'--title={title}'],
             ['kdialog', '--getexistingdirectory', os.path.expanduser('~')],
         ]
     for command in commands:
@@ -2281,7 +3501,14 @@ def main():
     args = ap.parse_args()
     if args.install_desktop:
         return install_desktop()
+    if os.environ.get('PE_REEXEC') and os.environ.get('PE_PAPER'):
+        # restarted for new code: the paper open at that moment, as it was open
+        args.path, args.main = os.environ.pop('PE_PAPER'), None
+        args.cwd, args.state = os.environ.pop('PE_CWD', None), os.environ.pop('PE_STATE', None)
     if not args.path:
+        # the last paper is loaded behind the list of recent papers, which the
+        # page shows first (as an editor's start page): pick one, or Esc
+        START['pick'] = bool(last_paper())
         args.path = last_paper() or choose_directory()
         if not args.path:
             ap.error('no paper given, none opened before, and no folder chosen')
@@ -2326,8 +3553,21 @@ def main():
     if not args.no_open and not args.keep_running:
         threading.Thread(target=watch_clients, args=(srv,), daemon=True).start()
     print(f'Crypto Paper Reviewer for {os.path.join(PAPER, MAIN)} on {url}  (Ctrl+C to stop)', flush=True)
-    if not args.no_open:
-        threading.Timer(0.5, lambda: open_browser(url, args.browser)).start()
+    # the first page load's slow parts (the PDF's text, the bibliography
+    # index) are read while the window opens, not when it asks
+    def warm():
+        try:
+            doc_payload()
+            bib_entries()
+        except Exception:
+            pass
+    threading.Thread(target=warm, daemon=True).start()
+    # a restart after a change of the editor's code: the window is already open
+    reexec = os.environ.pop('PE_REEXEC', None)
+    if not args.no_open and not reexec:
+        threading.Thread(target=open_browser, args=(url, args.browser), daemon=True).start()
+    if not os.environ.get('PE_NO_RELOAD'):
+        threading.Thread(target=watch_own_code, args=(port,), daemon=True).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

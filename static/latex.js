@@ -429,7 +429,7 @@
       }
       const bodyEnd = end - ('\\end{' + m[1] + '}').length;
       const body = src.slice(bodyStart, bodyEnd);
-      out.push({ kind: 'algo', env: m[1], start: m.index, end, bodyStart, bodyEnd, title, titleRange, lines: body.split('\n').map(parseGameLine) });
+      out.push({ kind: 'algo', env: m[1], start: m.index, end, bodyStart, bodyEnd, title, titleRange, lines: gameSourceLines(body).map(parseGameLine) });
       re.lastIndex = end;
     }
     // cryptocode: \procedure[opts]{title}{body}
@@ -468,6 +468,27 @@
     return out.sort((a, b) => a.bodyStart - b.bodyStart);
   }
 
+  // The lines of an algorithmic body: a line that ends in % goes on in the
+  // next one (\State $x$%  then  \layoutchoice{…}{…}), unless that one is a
+  // statement of its own
+  // a line whose only comment is a % at its end, after a statement
+  function endsInPercent(line) {
+    let k = 0;
+    for (; k < line.length; k++) { if (line[k] === '\\') { k++; continue; } if (line[k] === '%') break; }
+    return k < line.length && !line.slice(k + 1).trim() && !!line.slice(0, k).trim();
+  }
+  function gameSourceLines(body) {
+    const out = [];
+    for (const line of body.split('\n')) {
+      const prev = out[out.length - 1];
+      if (prev !== undefined && endsInPercent(prev) && line.trim() &&
+          !/^\s*\\(State|Statex|If|ElsIf|Else|EndIf|For|ForAll|EndFor|While|EndWhile|Repeat|Until|Loop|EndLoop|Procedure|EndProcedure|Function|EndFunction|Require|Ensure|Return|BeginBox|EndBox)(?![A-Za-z])/.test(line))
+        out[out.length - 1] = prev + '\n' + line;
+      else out.push(line);
+    }
+    return out;
+  }
+
   function parseGameLine(line) {
     const m = /^(\s*)\\(State|Statex|If|ElsIf|Else|EndIf|For|ForAll|EndFor|While|EndWhile|Repeat|Until|Loop|EndLoop|Procedure|EndProcedure|Function|EndFunction|Require|Ensure|Return)(?![A-Za-z])(\s*)/.exec(line);
     if (!m) return { kind: 'raw', prefix: line, content: '', suffix: '', raw: true };
@@ -486,7 +507,15 @@
     } else {
       // the statement, up to a trailing \Comment{...}
       const rest = line.slice(i);
-      const c = rest.search(/\\Comment\s*\{/);
+      // a \Comment at the top level only: one inside an argument
+      // (\layoutchoice{…}{\Comment{…}}) belongs to that argument
+      let c = -1;
+      for (let k = 0, depth = 0; k < rest.length; k++) {
+        const ch = rest[k];
+        if (ch === '\\' && depth === 0 && /^\\Comment\s*\{/.test(rest.slice(k))) { c = k; break; }
+        if (ch === '\\') { k++; continue; }
+        if (ch === '{') depth++; else if (ch === '}') depth--;
+      }
       content = c >= 0 ? rest.slice(0, c) : rest;
       suffix = c >= 0 ? rest.slice(c) : '';
       // keep trailing spaces out of the editable part

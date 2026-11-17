@@ -20,6 +20,9 @@ window.addEventListener('unhandledrejection', (e) => {
 const L = window.LatexDoc;
 const TOKEN = document.querySelector('meta[name=token]').content;
 const $ = (s) => document.querySelector(s);
+// motion only when the system allows it: a glide becomes a jump
+const REDUCED_MOTION = window.matchMedia ? matchMedia('(prefers-reduced-motion: reduce)') : { matches: false };
+const SMOOTH = () => (REDUCED_MOTION.matches ? 'auto' : 'smooth');
 // Every bar lives in one sticky block (#chrome), so nothing can show between
 // them.  Its height, which wraps on narrow screens, is what scrolling must
 // keep text clear of (--chrome-height: scroll-padding, the diff map).
@@ -49,10 +52,59 @@ document.addEventListener('click', (e) => {
 }, true);
 // While a window (paper, history, keys, figure, help, open) is up, the paper
 // behind it does not scroll; closing one says so unless it said more itself.
-const MODALS = { paperbox: 'Paper', historybox: 'History', keysbox: 'Keys', figview: 'Figure', helpbox: 'Help', openbox: 'Open' };
+const MODALS = { paperbox: 'Paper', filesbox: 'Files', historybox: 'History', keysbox: 'Keys', figview: 'Figure', helpbox: 'Help', openbox: 'Open', newbox: 'New paper' };
 function syncModal() {
   const open = Object.keys(MODALS).some((id) => { const e = document.getElementById(id); return e && !e.hidden; });
   document.documentElement.classList.toggle('modal-open', open);
+}
+// Keyboard focus follows the dialogs: into one when it opens (its first
+// field, else its first button), kept inside it with Tab, and back where it
+// was when it closes.
+const FOCUSABLE = 'input:not([type=hidden]):not([disabled]), select:not([disabled]), textarea:not([disabled]), button:not([disabled]), [href], [tabindex]:not([tabindex="-1"]), [contenteditable="true"]';
+const shown = (n) => !!(n.offsetWidth || n.offsetHeight || n.getClientRects().length);
+function topDialog() {
+  const open = [...Object.keys(MODALS), 'external', 'palette'].map((id) => document.getElementById(id)).filter((e) => e && !e.hidden);
+  return open.length ? open[open.length - 1] : null;
+}
+const DIALOG_FOCUS = new Map();   // dialog -> what had the focus before it opened
+function dialogOpened(box) {
+  const before = document.activeElement;
+  if (before && !box.contains(before)) DIALOG_FOCUS.set(box, before);
+  requestAnimationFrame(() => {
+    if (box.hidden || box.contains(document.activeElement)) return;   // it focused something itself
+    const all = [...box.querySelectorAll(FOCUSABLE)].filter(shown);
+    const first = all.find((n) => /^(INPUT|SELECT|TEXTAREA)$/.test(n.tagName)) || all.find((n) => !n.classList.contains('xclose')) || all[0];
+    if (first) first.focus({ preventScroll: true });
+  });
+}
+function dialogClosed(box) {
+  const back = DIALOG_FOCUS.get(box);
+  DIALOG_FOCUS.delete(box);
+  if (back && back.isConnected && shown(back) && (!document.activeElement || document.activeElement === document.body || box.contains(document.activeElement))) back.focus({ preventScroll: true });
+}
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Tab' || e.ctrlKey || e.altKey || e.metaKey) return;
+  const box = topDialog();
+  if (!box) return;
+  const all = [...box.querySelectorAll(FOCUSABLE)].filter(shown);
+  if (!all.length) return;
+  const i = all.indexOf(document.activeElement);
+  if (i < 0 || (e.shiftKey && i === 0) || (!e.shiftKey && i === all.length - 1)) {
+    e.preventDefault();
+    all[e.shiftKey ? (i <= 0 ? all.length - 1 : i - 1) : (i < 0 || i === all.length - 1 ? 0 : i + 1)].focus();
+  }
+}, true);
+for (const id of [...Object.keys(MODALS), 'external']) {
+  const e = document.getElementById(id);
+  if (!e) continue;
+  e.setAttribute('aria-modal', 'true');
+  if (!e.getAttribute('role')) e.setAttribute('role', 'dialog');
+  let open = !e.hidden;
+  new MutationObserver(() => {
+    if (!e.hidden && !open) dialogOpened(e);
+    if (e.hidden && open) dialogClosed(e);
+    open = !e.hidden;
+  }).observe(e, { attributes: true, attributeFilter: ['hidden'] });
 }
 for (const id of Object.keys(MODALS)) {
   const e = document.getElementById(id);
@@ -80,14 +132,21 @@ let DIFF_SHOWN = false;
 // take their height only once loaded). The block at the top of the view is
 // remembered with its offset, put back, and held there while the page
 // settles, unless the reader scrolls meanwhile.
+// The place of the view: the blocks on screen, from the top, with where each
+// is.  Several, so that the view is held by one the change left as it was
+// (holding it by the very block that changed moved the page by a block).
 function viewAnchor() {
-  const top = (document.querySelector('#toolbar') || document.querySelector('#bar'))?.getBoundingClientRect().bottom || 0;
+  const top = typeof chromeBottom === 'function' ? chromeBottom() : 0;
   const segs = (typeof ORDER !== 'undefined' ? ORDER : []).filter((s) => s.el && s.el.isConnected);
+  const list = [];
   for (const [i, s] of segs.entries()) {
     const r = s.el.getBoundingClientRect();
-    if (r.height && r.bottom > top) return { y: window.scrollY, i, file: s.file, src: s.src, top: r.top };
+    if (!r.height || r.bottom <= top) continue;
+    if (r.top > innerHeight) break;
+    list.push({ i, file: s.file, src: s.src, top: r.top });
+    if (list.length >= 12) break;
   }
-  return { y: window.scrollY };
+  return list.length ? { y: window.scrollY, ...list[0], list } : { y: window.scrollY };
 }
 let anchorHold = null;
 // Only one thing places the view at a time: holding the place after a
@@ -99,14 +158,19 @@ function restoreAnchor(a) {
   if (!a) return;
   if (anchorHold) anchorHold();
   revealSeq++;
+  // the first block of the list that is still there, the same and only once
   const find = () => {
     const segs = ORDER.filter((s) => s.el && s.el.isConnected);
-    return segs.find((s) => s.file === a.file && s.src === a.src) ||
-      (segs[a.i] && segs[a.i].file === a.file ? segs[a.i] : null);
+    for (const c of a.list || [a]) {
+      const same = segs.filter((s) => s.file === c.file && s.src === c.src);
+      if (same.length === 1) return [same[0], c.top];
+    }
+    const s = segs[a.i];
+    return s && s.file === a.file ? [s, a.top] : null;
   };
   const put = () => {
-    const s = a.top !== undefined && find();
-    if (s) window.scrollBy(0, s.el.getBoundingClientRect().top - a.top);
+    const hit = a.top !== undefined && find();
+    if (hit) window.scrollBy(0, hit[0].el.getBoundingClientRect().top - hit[1]);
     else window.scrollTo(0, a.y);
   };
   put();
@@ -134,6 +198,9 @@ async function load(keepScroll, discard = []) {
   const caret = captureEditorState();
   const oldMacros = DOC && JSON.stringify(DOC.macros);
   DOC = await (await fetch('/api/doc')).json();
+  // started with no paper named: the start page is the list of recent papers
+  // (the last one is loaded behind it; Esc keeps it)
+  if (DOC.startPick) setTimeout(() => chooseProjectDirectory(), 0);
   if (oldMacros !== JSON.stringify(DOC.macros)) KATEX_CACHE.clear();
   if (DOC) commit();   // typing while the document was being fetched
   for (const [name, f] of Object.entries(DOC.files)) {
@@ -141,27 +208,32 @@ async function load(keepScroll, discard = []) {
     if (cur && cur.text !== cur.disk && !discard.includes(name)) continue;
     FILES[name] = { text: f.text, disk: f.text, base: f.hash };
   }
+  if (!keepScroll) VIEW.apply();   // a newly opened paper, as it was left
   render();
   fillMains();
   restoreEditorState(caret);
   if (keepScroll) restoreAnchor(y);
   setBuild(DOC.build);
   showWhere();
+  refreshSourceView();
   if (new URLSearchParams(location.search).has('selftest')) selfTest();
+  if (!keepScroll) { RESUME.read(); checkDraft(); RESUME.apply(); }   // edits left by a crash; where a reload for new code was
 }
 
 function captureEditorState() {
   const selection = getSelection();
-  if (!selection.rangeCount || !selection.isCollapsed) return null;
+  if (!selection.rangeCount) return null;
   const range = selection.getRangeAt(0);
   const node = range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement;
   const seg = segOf(node);
   if (!seg || !seg.edit || !seg.edit.contains(range.startContainer)) return null;
-  const before = document.createRange();
-  before.selectNodeContents(seg.edit);
-  before.setEnd(range.startContainer, range.startOffset);
+  // a selection inside one block is kept too (both ends, as offsets)
+  if (!selection.isCollapsed && !seg.edit.contains(range.endContainer)) return null;
+  const upTo = (c, o) => { const r = document.createRange(); r.selectNodeContents(seg.edit); r.setEnd(c, o); return r.toString().length; };
   const segs = (FILES[seg.file] && FILES[seg.file].segs) || [];
-  return { file: seg.file, index: segs.indexOf(seg), src: seg.src, offset: before.toString().length };
+  const state = { file: seg.file, index: segs.indexOf(seg), src: seg.src, offset: upTo(range.startContainer, range.startOffset) };
+  if (!selection.isCollapsed) state.end = upTo(range.endContainer, range.endOffset);
+  return state;
 }
 
 // Put the caret back at the same character of the same block after a
@@ -172,19 +244,24 @@ function restoreEditorState(state) {
   let seg = segs[state.index];
   if (!seg || !seg.edit || seg.edit.tagName === 'TEXTAREA') seg = ORDER.find((item) => item.file === state.file && item.src === state.src && item.edit);
   if (!seg || !seg.edit || seg.edit.tagName === 'TEXTAREA') return;
-  const walker = document.createTreeWalker(seg.edit, NodeFilter.SHOW_TEXT);
-  let node, offset = state.offset;
-  while ((node = walker.nextNode())) {
-    if (offset <= node.data.length) {
-      const range = document.createRange();
-      range.setStart(node, offset); range.collapse(true);
-      const selection = getSelection();
-      selection.removeAllRanges(); selection.addRange(range);
-      seg.edit.focus({ preventScroll: true });
-      return;
+  const point = (off) => {
+    const walker = document.createTreeWalker(seg.edit, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = walker.nextNode())) {
+      if (off <= node.data.length) return [node, off];
+      off -= node.data.length;
     }
-    offset -= node.data.length;
-  }
+    return null;
+  };
+  const a = point(state.offset);
+  if (!a) return;
+  const range = document.createRange();
+  range.setStart(a[0], a[1]);
+  const b = state.end !== undefined ? point(state.end) : null;
+  if (b) range.setEnd(b[0], b[1]); else range.collapse(true);
+  const selection = getSelection();
+  selection.removeAllRanges(); selection.addRange(range);
+  seg.edit.focus({ preventScroll: true });
 }
 
 // Segments of a file.  Every file is split at its \input/\include/\subfile
@@ -250,30 +327,99 @@ let HEADS = {};
 
 // ---------------------------------------------------------------- rendering
 
+// Blocks drawn before are kept when nothing they depend on changed: the same
+// source, the same numbering state before them (section and theorem counters,
+// open environments and lists), the same .aux, macros and figures, and not
+// edited on the page since.  An undo or a save then redraws only the blocks
+// it changed (the others keep their pictures, formulas and place).
+// The first block of every file but the main one: its file's name, which
+// opens the file's menu (source, rename, put back) and shows in Structure.
+function fileBadge(node, name) {
+  const tools = node.querySelector(':scope > .tools');
+  let b = tools && tools.querySelector(':scope > .filetool');
+  node.classList.toggle('file-start', !!name);
+  if (name) node.dataset.file = name; else delete node.dataset.file;
+  if (!name) { if (b) b.remove(); return; }
+  if (!tools) return;
+  if (!b) { b = el('button', 'filetool'); tools.prepend(b); }
+  b.textContent = name.replace(/^.*\//, '') + (isNewFile(name) ? ' \u2022' : '');
+  b.title = name + (isNewFile(name) ? ' (new, not saved yet)' : '') + ': its menu';
+  b.onclick = (e) => { e.stopPropagation(); fileMenu(name, b); };
+}
+let RENDER_CACHE = new Map();    // key -> [{ el, seg, after }]
+let RENDER_STAMP = '';
 function render() {
   unicodeEngine.v = undefined;      // the preamble may have changed
+  const wasDiff = DIFF_SHOWN;
   DIFF_SHOWN = false;
   const speech = typeof TTS !== 'undefined' ? TTS.detach() : null;
+  flushEdits();
+  const stamp = JSON.stringify([DOC.aux, DOC.figs, DOC.macros, DOC.theorems, DOC.config, DOC.main, Object.keys(DOC.bib || {}).length]);
+  let old = RENDER_CACHE;
+  // after a build (new numbers, figures, macros) every block is drawn again,
+  // but one that comes out the same keeps its element: its measured height
+  // stays, and nothing above the view moves
+  const stale = !wasDiff && stamp !== RENDER_STAMP ? old : null;
+  if (wasDiff || stamp !== RENDER_STAMP) old = new Map();
+  RENDER_STAMP = stamp;
+  RENDER_CACHE = new Map();
+  const reusable = (o) => o.el && o.seg.src === o.src && !o.seg.touched && !o.seg.removed && o.seg.figSrc === undefined && o.seg.patched === undefined;
   const doc = $('#doc');
-  doc.textContent = '';
+  if (anchorHold) anchorHold();   // a view held for an earlier redraw is not this one's
+  // the page is not emptied: blocks drawn before stay where they are and
+  // only what changed moves (layoutPages).  A block taken out and put back
+  // loses its measured height (content-visibility), so emptying the page
+  // made everything above the view change size and the view jump.
   ORDER = [];
   configure();
   const ctx = { sec: 0, sub: 0, subsub: 0, app: false, counters: {}, heads: {}, env: [] };
   for (const name of Object.keys(FILES)) FILES[name].segs = assignLines(parseFile(name));
   const title = documentTitle(FILES[DOC.main].text);
+  let h1 = doc.querySelector(':scope > h1.doctitle');
   if (title) {
     const h = el('h1', 'doctitle');
     renderMathless(title.replace(/\\\\(\[[^\]]*\])?/g, ' '), h);
-    doc.append(h);
+    if (!h1 || h1.innerHTML !== h.innerHTML) { if (h1) h1.replaceWith(h); else doc.prepend(h); h1 = h; }
     $('#title').textContent = h.textContent;
     showWhere();
-  }
+  } else if (h1) h1.remove();
   const walk = (name) => {
+    let first = name !== DOC.main;
     for (const seg of FILES[name].segs) {
       if (seg.kind === 'input') { if (FILES[seg.input]) walk(seg.input); continue; }
       ORDER.push(seg);
-      const node = renderSeg(seg, ctx);
-      if (node) seg.el = node;
+      if (seg.kind === 'gap' || seg.kind === 'hidden') continue;
+      const key = seg.kind + '\u0000' + seg.src + '\u0000' + JSON.stringify(ctx);
+      const list = old.get(key);
+      const k = list ? list.findIndex(reusable) : -1;
+      let node, after;
+      if (k >= 0) {
+        const hit = list.splice(k, 1)[0];
+        node = hit.el; after = hit.after;
+        for (const p of ['edit', 'parts', 'wide']) if (hit.seg[p] !== undefined) seg[p] = hit.seg[p];
+        node.seg = seg;
+        Object.assign(ctx, JSON.parse(after));
+        seg.fresh = false;
+      } else {
+        node = renderSeg(seg, ctx);
+        after = JSON.stringify(ctx);
+        seg.fresh = true;
+        const same = node && stale && stale.get(key);
+        const j = same ? same.findIndex((o) => reusable(o) && o.el.innerHTML === node.innerHTML) : -1;
+        if (j >= 0) {
+          const hit = same.splice(j, 1)[0];
+          for (const p of ['edit', 'parts', 'wide']) if (hit.seg[p] !== undefined) seg[p] = hit.seg[p];
+          node = hit.el;
+          node.seg = seg;
+          seg.fresh = false;
+        }
+      }
+      if (!node) continue;
+      seg.el = node;
+      fileBadge(node, first ? name : null);
+      first = false;
+      if (!RENDER_CACHE.has(key)) RENDER_CACHE.set(key, []);
+      RENDER_CACHE.get(key).push({ el: node, seg, after, src: seg.src });
     }
   };
   walk(DOC.main);
@@ -321,7 +467,7 @@ function markBoxes(list) {
       if (!marked.length) return;
       navPush();
       markBoxes.at = ((markBoxes.at ?? -1) + 1) % marked.length;
-      marked[markBoxes.at].scrollIntoView({ block: 'center', behavior: 'smooth' });
+      marked[markBoxes.at].scrollIntoView({ block: 'center', behavior: SMOOTH() });
       marked[markBoxes.at].classList.add('boxflash');
       setTimeout(() => marked[markBoxes.at] && marked[markBoxes.at].classList.remove('boxflash'), 900);
     };
@@ -343,15 +489,42 @@ function layoutPages(doc) {
   // SyncTeX page breaks whose figures and columns can leave blank halves.
   const flowing = document.body.classList.contains('two');
   const exact = !flowing && DOC.pages && Object.keys(DOC.pages).length > 0;
+  // without SyncTeX (a Makefile build): the page of the PDF whose text holds
+  // the start of the block's text
+  const pdfText = !flowing && !exact && (DOC.pdftext || []).length > 1 ? DOC.pdftext : null;
+  let pdfAll = '', pdfStarts = [], pdfAt = 0;
+  if (pdfText) for (const t of pdfText) { pdfStarts.push(pdfAll.length); pdfAll += t; }
+  const pdfPageOf = (i) => { let k = 0; while (k + 1 < pdfStarts.length && pdfStarts[k + 1] <= i) k++; return k + 1; };
   const cls = (DOC.docclass || 'article').split('/')[0];
   const twoCol = cls === 'IEEEtran' || /twocolumn/.test(DOC.docclass || '');
   const perPage = Math.round((CHARS_PER_PAGE[cls] || 3300) * (flowing ? 1.55 : 1));
-  let page = 1, chars = 0, last = 0, box = null;
+  let page = 1, chars = 0, last = 0, box = null, at = null;
+  // the page boxes drawn before are kept (and with them the measured
+  // heights of their blocks); a block is moved only when it is not already
+  // where it goes
+  const old = new Map();
+  for (const s of doc.querySelectorAll(':scope > section.page')) if (!old.has(s.dataset.page)) old.set(s.dataset.page, s);
+  let prevBox = doc.querySelector(':scope > h1.doctitle');
+  const used = new Set();
   const startPage = (n) => {
-    box = el('section', 'page');
-    box.dataset.page = n;
-    box.append(el('div', 'pagemark', flowing ? 'review spread ' + n : (exact ? 'page ' : 'approx. page ') + n));
-    doc.append(box);
+    const label = flowing ? 'review spread ' + n : (exact || pdfText ? 'page ' : 'approx. page ') + n;
+    box = old.get(String(n));
+    old.delete(String(n));
+    if (!box) { box = el('section', 'page'); box.dataset.page = n; box.append(el('div', 'pagemark', label)); }
+    else if (box.firstElementChild && box.firstElementChild.textContent !== label) box.firstElementChild.textContent = label;
+    const want = prevBox ? prevBox.nextElementSibling : doc.firstElementChild;
+    if (want !== box) doc.insertBefore(box, want);
+    used.add(box);
+    prevBox = box;
+    at = box.firstElementChild ? box.firstElementChild.nextElementSibling : null;
+  };
+  const live = new Set(ORDER.filter((s) => s.el).map((s) => s.el));
+  const place = (node) => {
+    // a block no longer drawn (the old version of one that changed) is
+    // stepped over: inserting before it would move every block after it
+    while (at && !live.has(at)) at = at.nextElementSibling;
+    if (at === node) { at = node.nextElementSibling; return; }
+    box.insertBefore(node, at);
   };
   for (const seg of ORDER) {
     if (!seg.el) continue;
@@ -359,6 +532,22 @@ function layoutPages(doc) {
       const lines = DOC.pages[seg.file] || [];
       const hit = lines.find(([ln]) => ln >= seg.line && ln <= seg.lastLine);
       if (hit) page = Math.max(page, hit[1]);
+    } else if (pdfText) {
+      const letters = seg.edit && seg.edit.tagName !== 'TEXTAREA' ? pageProbe(seg.edit) : '';
+      // its start first; then its middle and end, so that a block edited
+      // near its start (not in the PDF yet) keeps its page, and the page
+      // marks (and the view) do not move as you type or undo
+      found: for (const len of [40, 24]) {
+        if (letters.length < len) continue;
+        for (const from of [0, Math.floor((letters.length - len) / 2), letters.length - len]) {
+          const i = pdfAll.indexOf(letters.slice(from, from + len), pdfAt);
+          if (i >= 0 && pdfPageOf(i) <= page + 3) {
+            page = Math.max(page, pdfPageOf(i));
+            if (from === 0) pdfAt = i;
+            break found;
+          }
+        }
+      }
     } else {
       const size = seg.kind === 'figure' || seg.kind === 'table'
         ? (seg.wide ? 0.5 : (twoCol ? 0.25 : 0.4)) * perPage
@@ -371,14 +560,41 @@ function layoutPages(doc) {
       startPage(page); last = page;
       // a heading never ends a page: it moves on with the block it heads
       // (in the PDF a float such as figure* can push that block over)
-      for (let tail; prev && (tail = prev.lastElementChild) && tail.seg && tail.seg.kind === 'heading';) {
-        box.insertBefore(tail, box.children[1] || null);
-        tail.seg.page = page;
-      }
+      // (nor does a heading followed only by blocks that print nothing, its \label)
+      const quiet = (e) => e.seg && (e.seg.kind === 'para' || e.seg.kind === 'quote') && e.seg.edit && e.seg.edit.classList.contains('quiet');
+      const tails = [];
+      for (let t = prev && prev.lastElementChild; t && t.seg && (t.seg.kind === 'heading' || quiet(t)); t = t.previousElementSibling) tails.unshift(t);
+      const h = tails.findIndex((t) => t.seg.kind === 'heading');
+      if (h >= 0) for (const t of tails.slice(h)) { place(t); t.seg.page = page; }
     }
     seg.page = page;
-    box.append(seg.el);
+    place(seg.el);
   }
+  // what is no longer drawn: blocks gone (or left in a box by a move), the
+  // boxes of pages that no longer have blocks, the marks of a diff
+  for (const b of [...doc.children]) {
+    if (b.matches('h1.doctitle')) continue;
+    if (!used.has(b)) { b.remove(); continue; }
+    for (const c of [...b.children].slice(1)) if (!live.has(c)) c.remove();
+  }
+}
+
+// The letters of a block's text as the PDF has them (maths, hidden LaTeX and
+// list marks left out), for finding its page in the PDF's text.
+function pageProbe(root) {
+  let t = '';
+  const walk = (node) => {
+    for (const n of node.childNodes) {
+      if (n.nodeType === 3) { t += n.data; continue; }
+      if (n.nodeType !== 1) continue;
+      const cl = n.classList;
+      if (cl.contains('hidden') || cl.contains('math') || cl.contains('tools') || cl.contains('boxbadge') || cl.contains('itemmark') || cl.contains('envmark') && cl.contains('hidden')) continue;
+      if (n.dataset.say !== undefined) { t += n.dataset.say.replace(/\s+/g, ''); continue; }
+      walk(n);
+    }
+  };
+  walk(root);
+  return t.normalize('NFKD').toLowerCase().replace(/[^a-z]/g, '');
 }
 
 // Mark a block as touched when anything inside it changes, however it was
@@ -402,7 +618,9 @@ function watchEdits() {
 }
 
 function documentTitle(text) {
-  const m = /\\title\s*(\[)?/.exec(text.replace(/(^|[^\\])%.*$/gm, '$1'));
+  // comments out first, and the offsets below are offsets of that text
+  text = text.replace(/(^|[^\\])%.*$/gm, '$1');
+  const m = /\\title\s*(\[)?/.exec(text);
   if (!m) return null;
   let i = m.index + m[0].length - (m[1] ? 1 : 0);
   if (text[i] === '[') i = L.groupEnd(text, i);
@@ -437,12 +655,27 @@ function wrapSeg(seg, inner, tools) {
   const t = el('div', 'tools');
   const plus = el('button', '', '+');
   plus.title = 'Add after this block (Ctrl+Alt+A)';
-  plus.onclick = (e) => { e.stopPropagation(); addMenu(seg, plus); };
+  plus.onclick = (e) => { e.stopPropagation(); addMenu(box.seg, plus); };   // box.seg: a kept block gets the new segment
   t.append(plus);
   for (const b of tools || []) t.append(b);
   box.append(t);
   box.seg = seg;
   return box;
+}
+
+// A line break of the source is a space, except where a printed line starts:
+// at the start of the paragraph, or after a displayed formula or a block.
+// There it would push the first letter in; it is kept (for saving) but not shown.
+function quietLeadingBreaks(root) {
+  let after = true;   // at the start of a line
+  for (const n of root.childNodes) {
+    if (n.nodeType === 3) { if (n.data.trim()) after = false; continue; }
+    if (n.nodeType !== 1) continue;
+    const cl = n.classList;
+    if (cl.contains('nl')) { cl.toggle('lead', after); continue; }
+    if (cl.contains('hidden')) continue;
+    after = cl.contains('display') || cl.contains('parbreak') || n.tagName === 'DIV' || (cl.contains('listing'));
+  }
 }
 
 function renderPara(seg, ctx) {
@@ -452,6 +685,7 @@ function renderPara(seg, ctx) {
   // italic theorem bodies: an open theorem environment carries over
   if (ctx.env.length && L.THM_ENVS.has(ctx.env[ctx.env.length - 1])) p.classList.add('thm');
   renderTokens(toks, p, ctx);
+  quietLeadingBreaks(p);
   if (toks.some((t) => t.t === 'env' && t.mode === 'begin' && L.THM_ENVS.has(t.env))) p.classList.add('thm');
   const visible = [...p.childNodes].some((n) => n.nodeType === 3 ? n.data.trim() : !(n.classList.contains('hidden') || n.classList.contains('nl')));
   if (!visible) { p.classList.add('quiet'); p.contentEditable = 'false'; }
@@ -499,21 +733,35 @@ function renderHeading(seg, ctx) {
   t.contentEditable = 'true';
   renderTokens(L.tokenize(h.title), t, ctx);
   node.append(t);
+  // its \label, for the structure view
+  for (const m of (h.prefix + h.suffix).matchAll(/\\label\{[^}]*\}/g)) {
+    const tag = el('span', 'hlabel');
+    tag.dataset.src = m[0];
+    tag.contentEditable = 'false';
+    node.append(tag);
+  }
   seg.edit = t;
   seg.parts = h;
   const del = el('button', '', 'Delete');
   del.title = 'Delete this heading, Ctrl+Alt+X (keeps the text under it)';
-  del.onclick = (e) => { e.stopPropagation(); if (confirm('Delete this heading?' + labelWarning(seg))) structural(() => removeSeg(seg)); };
+  // the segment of the block when clicked (a block kept by render() gets a new one)
+  const cur = (e) => segOf(e.target) || seg;
+  del.onclick = (e) => { e.stopPropagation(); const sg = cur(e); if (confirm('Delete this heading?' + labelWarning(sg))) structural(() => removeSeg(sg)); };
   const up = el('button', '', 'Up');
   up.title = 'Move this section up (Ctrl+Alt+Up)';
-  up.onclick = (e) => { e.stopPropagation(); moveSection(seg, -1); };
+  up.onclick = (e) => { e.stopPropagation(); moveSection(cur(e), -1); };
   const down = el('button', '', 'Down');
   down.title = 'Move this section down (Ctrl+Alt+Down)';
-  down.onclick = (e) => { e.stopPropagation(); moveSection(seg, 1); };
+  down.onclick = (e) => { e.stopPropagation(); moveSection(cur(e), 1); };
   const merge = el('button', '', 'Merge');
   merge.title = 'Combine this section with the previous one (Ctrl+Alt+J)';
-  merge.onclick = (e) => { e.stopPropagation(); if (confirm('Combine this section with the previous one?' + labelWarning(seg))) structural(() => removeSeg(seg)); };
-  return wrapSeg(seg, node, [up, down, merge, del]);
+  merge.onclick = (e) => { e.stopPropagation(); const sg = cur(e); if (confirm('Combine this section with the previous one?' + labelWarning(sg))) structural(() => removeSeg(sg)); };
+  const tofile = el('button', '', 'To file');
+  tofile.title = 'Move this section into a file of its own under sections/ (Ctrl+Alt+Y)';
+  tofile.onclick = (e) => { e.stopPropagation(); splitToFile(cur(e)); };
+  const tools = [up, down, merge, del];
+  if (HEADING_RANK[h.level] <= SECTION_RANK_MAX) tools.splice(3, 0, tofile);
+  return wrapSeg(seg, node, tools);
 }
 
 // Removing a heading removes its \label too: say how many references break
@@ -534,9 +782,130 @@ function renderCode(seg) {
   ta.value = c.body;
   ta.spellcheck = false;
   ta.rows = Math.max(2, c.body.split('\n').length);
-  ta.addEventListener('input', () => { seg.touched = true; lastTyping = Date.now(); markEditedSoon(); });
+  ta.addEventListener('input', () => { (segOf(ta) || seg).touched = true; lastTyping = Date.now(); markEditedSoon(); });
   seg.edit = ta;
-  return wrapSeg(seg, ta);
+  // a listing read from a file (\lstinputlisting, \ecsnippet{F}{x}): the
+  // code itself, with its LaTeX a click away
+  const view = !c.pre && hasListing(c.body) ? listingView(c.body.replace(/^\s*\\begin\{[^}]*\}(?:\[[^\]]*\])?|\\end\{[^}]*\}\s*$/g, '').trim()) : null;
+  if (!view) return wrapSeg(seg, ta);
+  const box = el('div', 'lst-seg');
+  ta.hidden = true;
+  box.append(view, ta);
+  const edit = el('button', '', 'LaTeX');
+  edit.title = 'Show or hide the LaTeX that reads this listing';
+  edit.onclick = (e) => {
+    e.stopPropagation();
+    ta.hidden = !ta.hidden;
+    edit.classList.toggle('on', !ta.hidden);
+    if (!ta.hidden) ta.focus();
+  };
+  // the edited command is read again when the LaTeX is left
+  ta.addEventListener('change', () => {
+    const fresh = listingView(ta.value.replace(/^\s*\\begin\{[^}]*\}(?:\[[^\]]*\])?|\\end\{[^}]*\}\s*$/g, '').trim());
+    if (fresh) box.replaceChild(fresh, box.firstChild);
+  });
+  view.addEventListener('dblclick', () => edit.click());
+  return wrapSeg(seg, box, [edit]);
+}
+
+// ------------------------------------------------------------ listings
+//
+// \lstinputlisting and the paper's macros around it (\ecsnippet{TSGame.ec}{x}
+// reads a marked range of ../TSGame.ec) are shown as the code they typeset,
+// highlighted with the keywords of the paper's \lstdefinelanguage.  The
+// server reads them (DOC.listings, by their source); a new or edited one is
+// asked for when it is drawn.
+const LISTING_FETCHES = new Map();
+function listingCommandRe() {
+  const names = ['lstinputlisting', ...((DOC && DOC.listing_macros) || [])];
+  return new RegExp('\\\\(?:' + names.map((n) => n.replace(/[.*+?^${}()|[\]\\@]/g, '\\$&')).join('|') + ')(?![A-Za-z@])', 'g');
+}
+function hasListing(src) { listingCommandRe().lastIndex = 0; return listingCommandRe().test(src); }
+
+function fetchListing(src) {
+  if (DOC.listings && DOC.listings[src]) return Promise.resolve(DOC.listings[src]);
+  if (!LISTING_FETCHES.has(src)) {
+    LISTING_FETCHES.set(src, fetch('/api/listing', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN }, body: JSON.stringify({ src }),
+    }).then((r) => r.json()).then((res) => { (DOC.listings = DOC.listings || {})[src] = res.listings || []; LISTING_FETCHES.delete(src); return DOC.listings[src]; })
+      .catch(() => { LISTING_FETCHES.delete(src); return [{ error: 'could not ask the server' }]; }));
+  }
+  return LISTING_FETCHES.get(src);
+}
+
+// Highlight code as listings would: keywords by class, (nested) comments,
+// strings.  Returns a fragment of text nodes and spans.
+function highlightListing(code, lang) {
+  lang = lang || {};
+  const frag = document.createDocumentFragment();
+  const classOf = new Map();
+  for (const [cls, words] of Object.entries(lang.keywords || {})) for (const w of words) classOf.set(w, cls);
+  const comments = lang.comments || [], lineComments = lang.line_comments || [], strings = [...new Set(lang.strings || [])];
+  let i = 0, plain = '';
+  const flush = () => { if (plain) { frag.append(plain); plain = ''; } };
+  const span = (cls, text) => { flush(); const s = el('span', cls, text); frag.append(s); };
+  while (i < code.length) {
+    const c = comments.find(([open]) => code.startsWith(open, i));
+    if (c) {
+      const [open, close, nested] = c;
+      let depth = 0, j = i;
+      while (j < code.length) {
+        if (nested && code.startsWith(open, j)) { depth++; j += open.length; continue; }
+        if (!nested && j === i) { depth = 1; j += open.length; continue; }
+        if (code.startsWith(close, j)) { depth--; j += close.length; if (!depth) break; continue; }
+        j++;
+      }
+      span('lst-comment', code.slice(i, j)); i = j; continue;
+    }
+    const lc = lineComments.find((open) => code.startsWith(open, i));
+    if (lc) { const j = code.indexOf('\n', i); const e = j < 0 ? code.length : j; span('lst-comment', code.slice(i, e)); i = e; continue; }
+    const q = strings.find((d) => code[i] === d);
+    if (q) { let j = i + 1; while (j < code.length && code[j] !== q && code[j] !== '\n') j += code[j] === '\\' ? 2 : 1; span('lst-string', code.slice(i, j + 1)); i = j + 1; continue; }
+    const w = /^[A-Za-z_][A-Za-z0-9_']*/.exec(code.slice(i, i + 80));
+    if (w) {
+      const cls = classOf.get(w[0]);
+      if (cls) span('lst-kw lst-kw' + cls, w[0]); else plain += w[0];
+      i += w[0].length; continue;
+    }
+    plain += code[i++];
+  }
+  flush();
+  return frag;
+}
+
+function drawListings(box, list) {
+  box.textContent = '';
+  for (const l of list.length ? list : [{ error: 'nothing to show' }]) {
+    const one = el('figure', 'lst-block');
+    if (l.title || l.file) {
+      const cap = el('figcaption', 'lst-title', l.title || l.file);
+      if (l.file) cap.title = l.file;
+      one.append(cap);
+    }
+    if (l.error) one.append(el('div', 'lst-error small', l.error));
+    else {
+      const pre = el('pre', 'lst-code');
+      pre.append(highlightListing(l.code || '', l.language));
+      one.append(pre);
+    }
+    box.append(one);
+  }
+}
+
+// The listings a piece of source typesets, drawn into a new element (filled
+// in when the server answers).
+function listingView(src) {
+  const box = el('div', 'lst-view');
+  box.contentEditable = 'false';
+  const re = listingCommandRe();
+  if (!re.test(src)) return null;
+  const known = DOC.listings && DOC.listings[src.trim()];
+  if (known) drawListings(box, known);
+  else {
+    box.append(el('div', 'small', 'Reading the listing…'));
+    fetchListing(src.trim()).then((list) => drawListings(box, list));
+  }
+  return box;
 }
 
 // Preview LaTeX tabulars without changing their source.  Cell editor remains
@@ -592,7 +961,7 @@ function renderFloat(seg) {
     const c = el('div', 'caption');
     const lab = /\\label\{([^}]*)\}/.exec(seg.src);
     const n = lab && labelValue(lab[1]);
-    const num = el('b', 'capnum', (seg.kind === 'figure' ? 'Fig. ' : 'Table ') + (n || '?') + '. ');
+    const num = el('b', 'capnum', (seg.kind === 'figure' ? ((DOC.cref || {}).figurename || 'Figure') + ' ' : 'Table ') + (n || '?') + '. ');
     const t = el('span');
     t.contentEditable = 'true';
     renderTokens(L.tokenize(cap.caption), t, {});
@@ -653,7 +1022,7 @@ function chip(cls, src, text) {
   return c;
 }
 
-const HIDDEN = new Set(['label', 'clearpage', 'newpage', 'maketitle', 'bibliographystyle', 'FloatBarrier',
+const HIDDEN = new Set(['label', 'crefalias', 'crefname', 'Crefname', 'urlstyle', 'addlinespace', 'morecmidrules', 'pagebreak', 'linebreak', 'newline', 'clearpage', 'newpage', 'maketitle', 'bibliographystyle', 'FloatBarrier',
   'vspace', 'noindent', 'centering', 'title', 'author', 'nonumber', 'medskip', 'smallskip', 'bigskip',
   'Needspace', 'raggedbottom', 'balance', 'IEEEauthorblockN', 'IEEEauthorblockA', 'leavevmode',
   'protect', 'institute', 'inst', 'orcidID', 'email', 'date', 'titlerunning', 'authorrunning', 'thanks',
@@ -664,6 +1033,9 @@ const HIDDEN = new Set(['label', 'clearpage', 'newpage', 'maketitle', 'bibliogra
   'authorrunning', 'subjclass', 'category', 'supplement', 'copyrightyear', 'acmYear', 'acmDOI', 'acmConference',
   'acmBooktitle', 'acmPrice', 'acmISBN', 'setcopyright', 'orcid', 'country', 'institution', 'city']);
 
+// A label of the bibliography as printed: alpha styles write BCK{$^+$}22
+const citeLabel = (v) => v === undefined || v === null ? '' : String(v)
+  .replace(/\{?\$\^\{?\+\}?\$\}?/g, '\u207a').replace(/\$\^\{?([^${}]*)\}?\$/g, '$1').replace(/[{}$]/g, '');
 const CITE_CMDS = /^(cite|citep|citet|citealp|citealt|citeauthor|citeyear|citeyearpar|citenum|parencite|textcite|autocite|footcite|smartcite|supercite)$/i;
 // a citation note as LaTeX prints it: \S 4.2 -> § 4.2, p.~7 -> p. 7
 const citeNote = (n) => n.replace(/\\S\s*/g, '§').replace(/~/g, '\u00a0').replace(/[{}]/g, '').trim();
@@ -687,7 +1059,7 @@ function renderChip(tok, ctx) {
     const keys = (cm ? cm[2] : arg()).split(',').map((k) => k.trim()).filter(Boolean);
     const opts = cm ? [...cm[1].matchAll(/\[((?:[^\]{}]|\{[^{}]*\})*)\]/g)].map((o) => citeNote(o[1])) : [];
     const [pre, post] = opts.length > 1 ? opts : ['', opts[0] || ''];
-    const num = (k) => DOC.aux.cites[k] || '?';
+    const num = (k) => citeLabel(DOC.aux.cites[k]) || '?';
     const info = (k) => (DOC.aux.citeinfo || {})[k] || {};
     const low = name.toLowerCase();
     let text;
@@ -706,6 +1078,12 @@ function renderChip(tok, ctx) {
     c.title = keys.map((k) => DOC.bib[k] || k).join('\n\n').replace(/\\[a-zA-Z]+|[{}]/g, '');
     return c;
   }
+  if (name === 'lstinputlisting' || ((DOC.listing_macros || []).includes(name))) {
+    // a listing read from a file, in running text or a box: shown as its code
+    const c = chip('src listing', tok.s);
+    const view = listingView(tok.s);
+    if (view) { c.append(view); c.title = tok.s + ' (click to edit)'; return c; }
+  }
   if (name === 'ec' || name === 'texttt' || name === 'url' || name === 'nolinkurl' || name === 'lstinline') return chip('ec', tok.s, arg());
   if (name === 'verb') {
     // \verb|x|, \lstinline|x <$ d|, \mintinline{lang}|x|: the text between the delimiters
@@ -719,7 +1097,7 @@ function renderChip(tok, ctx) {
     const key = (/\{([^}]*)\}\s*$/.exec(tok.s) || [])[1] || arg();
     const label = (/^\\bibitem\s*\[([^\]]*)\]/.exec(tok.s) || [])[1];
     const c = chip('item', tok.s);
-    c.append(el('span', 'itemmark', '[' + (label || DOC.aux.cites[key.trim()] || '?') + '] '));
+    c.append(el('span', 'itemmark', '[' + (label || citeLabel(DOC.aux.cites[key.trim()]) || '?') + '] '));
     return c;
   }
   if (name === 'item') {
@@ -733,6 +1111,27 @@ function renderChip(tok, ctx) {
     const c = chip('item', tok.s);
     c.append(el('span', 'itemmark', '\u00a0'.repeat(3 * Math.max(0, lists.length - 1)) + mark + ' '));
     if (opt) c.querySelector('.itemmark').style.fontWeight = 'bold';
+    return c;
+  }
+  // \textnormal{…}, \textsf{…}, \mbox{…} around text with citations or maths:
+  // the text, styled (editable through its source, as a group is)
+  const style = TEXT_STYLES[name];
+  if (style !== undefined && !['textbf', 'textit', 'emph', 'underline', 'ensuremath'].includes(name)) {
+    const m = new RegExp('^\\\\' + name + '\\s*\\{([^]*)\\}$').exec(tok.s);
+    if (m) {
+      const c = chip('styled', tok.s);
+      c.style.cssText = style;
+      renderTokens(L.tokenize(m[1]), c, ctx);
+      return c;
+    }
+  }
+  // a macro of the document that typesets a listing from a file
+  // (\ecsnippet{TSGame.ec}{decl} -> \lstinputlisting…): which file and part
+  const listingBody = DOC.macros['\\' + name];
+  if (listingBody !== undefined && /\\(lstinputlisting|inputminted|verbatiminput)\b/.test(listingBody)) {
+    const args = [...tok.s.matchAll(/\{([^{}]*)\}/g)].map((x) => x[1]);
+    const c = chip('ec listing', tok.s, '\u2398 ' + (args.length ? args.join(' \u203a ') : name));
+    c.title = 'Listing typeset from a file: ' + tok.s;
     return c;
   }
   if (name === 'footnote') { const c = chip('src', tok.s, '†'); c.title = arg(); return c; }
@@ -755,6 +1154,8 @@ function renderChip(tok, ctx) {
   if (name === 'textasciitilde') return chip('char', tok.s, '~');
   if (name === 'textasciicircum') return chip('char', tok.s, '^');
   if (name === 'textbackslash') return chip('char', tok.s, '\\');
+  if (name === 'textless') return chip('char', tok.s, '<');
+  if (name === 'textgreater') return chip('char', tok.s, '>');
   // Text accents belong to Unicode in the reading view, but keep their exact
   // LaTeX source in data-src so editing/saving still round-trips losslessly.
   const accents = { c: '\u0327', "'": '\u0301', '`': '\u0300', '"': '\u0308',
@@ -771,20 +1172,148 @@ function renderChip(tok, ctx) {
     typesetInto('$' + tok.s + '$', c, false);
     if (!c.classList.contains('bad')) return c;
   }
-  // a text macro (\oracle -> \textbf{Oracle}\ ): show what it prints
-  const textMacro = body !== undefined && tok.s === '\\' + name &&
-    /^\s*\\(textbf|textit|textsf|textrm|texttt|textsc|emph|mbox|text)\{([^{}\\$]*)\}\s*(\\ |~|\\xspace)?\s*$/.exec(body);
-  if (textMacro) {
-    const c = chip('src textmacro', tok.s, textMacro[2] + (textMacro[3] ? ' ' : ''));
-    c.style.fontWeight = textMacro[1] === 'textbf' ? 'bold' : '';
-    c.style.fontStyle = /textit|emph/.test(textMacro[1]) ? 'italic' : '';
-    c.title = tok.s;
-    return c;
+  // a text macro (\oracle -> \textbf{Oracle}\ , \TSUF{1} -> \textsf{TS-UF-}1\xspace):
+  // show what it prints
+  if (body !== undefined) {
+    const shown = textMacroNodes(tok.s);
+    if (shown) {
+      const c = chip('src textmacro', tok.s);
+      c.append(...shown.nodes);
+      c.dataset.say = shown.say;
+      c.title = tok.s;
+      return c;
+    }
   }
   return chip('src', tok.s, tok.s.length > 40 ? tok.s.slice(0, 38) + '…' : tok.s);
 }
 
+// What a use of a text macro of the document prints, as nodes: its body with
+// the arguments put in, where the body is only text, text styles (\textsf,
+// \textsc, \emph …), maths and other such macros.  Null for anything else
+// (the chip then shows the source).
+const TEXT_STYLES = { textbf: 'font-weight:bold', textit: 'font-style:italic', emph: 'font-style:italic',
+  textsl: 'font-style:oblique', textsf: 'font-family:system-ui,sans-serif', texttt: 'font-family:monospace',
+  textsc: 'font-variant:small-caps', textrm: '', textnormal: 'font-style:normal;font-weight:normal', textmd: 'font-weight:normal',
+  textup: 'font-style:normal', text: '', mbox: '', hbox: '', underline: 'text-decoration:underline', ensuremath: '' };
+const TEXT_SKIP = new Set(['xspace', 'relax', 'protect', '/', '@', 'nobreak', 'allowbreak', 'unskip']);
+function textMacroNodes(src) {
+  let say = '';
+  const readGroup = (s, i) => {
+    while (s[i] === ' ') i++;
+    if (s[i] !== '{') return null;
+    const e = L.groupEnd(s, i);
+    return e < 0 ? null : { text: s.slice(i + 1, e - 1), end: e };
+  };
+  const expand = (name, s, i, depth) => {
+    const body = DOC.macros['\\' + name];
+    if (body === undefined || depth > 4) return null;
+    const n = Math.max(0, ...[...body.matchAll(/#(\d)/g)].map((m) => +m[1]));
+    const args = [];
+    for (let k = 0; k < n; k++) { const g = readGroup(s, i); if (!g) return null; args.push(g.text); i = g.end; }
+    return { text: body.replace(/#(\d)/g, (_, k) => args[k - 1]), end: i };
+  };
+  const parse = (s, into, depth) => {
+    let i = 0, text = '';
+    const flush = () => { if (text) { into.append(document.createTextNode(text)); say += text; text = ''; } };
+    while (i < s.length) {
+      const ch = s[i];
+      if (ch === '\\') {
+        const m = /^\\([A-Za-z@]+|.)/.exec(s.slice(i));
+        if (!m) return false;
+        const name = m[1];
+        i += m[0].length;
+        if (TEXT_SKIP.has(name)) { if (/^[A-Za-z]/.test(name)) while (s[i] === ' ') i++; continue; }
+        if (name === ' ') { text += ' '; continue; }
+        if ('&%$#_{}'.includes(name)) { text += name; continue; }
+        if (name === 'textcolor' || name === 'color') {
+          // \textcolor{c}{x}; \color{c} colours the rest of its group
+          const c = readGroup(s, i);
+          if (!c) return false;
+          const css = colorOf(c.text);
+          let rest, end;
+          if (name === 'textcolor') { const g = readGroup(s, c.end); if (!g) return false; rest = g.text; end = g.end; }
+          else { rest = s.slice(c.end); end = s.length; }
+          flush();
+          const span = el('span', 'tcolor');
+          if (css) span.style.color = css;
+          if (!parse(rest, span, depth)) return false;
+          into.append(span);
+          i = end;
+          continue;
+        }
+        if (Object.prototype.hasOwnProperty.call(TEXT_STYLES, name)) {
+          const g = readGroup(s, i);
+          if (!g) return false;
+          flush();
+          const span = el('span');
+          span.style.cssText = TEXT_STYLES[name];
+          if (!parse(g.text, span, depth)) return false;
+          into.append(span);
+          i = g.end;
+          continue;
+        }
+        const x = expand(name, s, i, depth + 1);
+        if (!x) return false;
+        flush();
+        const span = el('span');
+        if (!parse(x.text, span, depth + 1)) return false;
+        into.append(...span.childNodes);
+        i = x.end;
+        continue;
+      }
+      if (ch === '$') {
+        const e = s.indexOf('$', i + 1);
+        if (e < 0) return false;
+        flush();
+        const m = el('span', 'tmath');
+        typesetInto(s.slice(i, e + 1), m, false);
+        if (m.classList.contains('bad')) return false;
+        into.append(m);
+        say += ' ' + mathSpeech(s.slice(i, e + 1)) + ' ';
+        i = e + 1;
+        continue;
+      }
+      if (ch === '{') {
+        const e = L.groupEnd(s, i);
+        if (e < 0) return false;
+        flush();
+        const span = el('span');
+        if (!parse(s.slice(i + 1, e - 1), span, depth)) return false;
+        into.append(...span.childNodes);
+        i = e;
+        continue;
+      }
+      if (ch === '}' || ch === '#' || ch === '^' || ch === '_' || ch === '&') return false;
+      if (ch === '~') { text += '\u00a0'; i++; continue; }
+      if (ch === '%') { const e = s.indexOf('\n', i); i = e < 0 ? s.length : e + 1; continue; }
+      if (s.startsWith('---', i)) { text += '\u2014'; i += 3; continue; }
+      if (s.startsWith('--', i)) { text += '\u2013'; i += 2; continue; }
+      text += ch === '\n' ? ' ' : ch;
+      i++;
+    }
+    flush();
+    return true;
+  };
+  const m = /^\\([A-Za-z@]+)/.exec(src);
+  if (!m) return null;
+  const x = expand(m[1], src, m[0].length, 0);
+  if (!x || src.slice(x.end).trim()) return null;
+  const box = el('span');
+  if (!parse(x.text, box, 0)) return null;
+  // the body ends with \  or ~: a space after it
+  if (/(\\ |~)\s*$/.test(x.text) && box.lastChild && box.lastChild.nodeType === 3) box.lastChild.data = box.lastChild.data.replace(/[ \u00a0]$/, '') + ' ';
+  if (!box.textContent.trim()) return null;
+  return { nodes: [...box.childNodes], say: say.replace(/\s+/g, ' ').trim() };
+}
+
 function envChip(tok, ctx) {
+  const c = envChipInner(tok, ctx);
+  // the structure view shows where every environment starts and ends
+  c.classList.add('envmark', tok.mode === 'begin' ? 'envbegin' : 'envend');
+  c.dataset.env = tok.env;
+  return c;
+}
+function envChipInner(tok, ctx) {
   if (tok.mode === 'begin') {
     ctx.env = ctx.env || [];
     ctx.env.push(tok.env);
@@ -853,6 +1382,23 @@ const KATEX_SHIMS = { '\\ensuremath': '#1', '\\xspace': '', '\\mathchoice': '#1'
 // cryptocode's keywords (\pcreturn, \sample …) preview in running text too, not
 // only in the game editor; the paper's own definitions still win
 const katexMacros = () => ({ ...KATEX_SHIMS, ...CRYPTOCODE_MACROS, ...DOC.macros });
+// A colour of the paper (\definecolor, \colorlet: gone = #009e73) or of
+// xcolor (red, blue …), as CSS; null for one the page cannot know.
+const XCOLORS = { red: '#ff0000', green: '#00ff00', blue: '#0000ff', black: '#000000', white: '#ffffff', gray: '#808080',
+  darkgray: '#404040', lightgray: '#bfbfbf', cyan: '#00ffff', magenta: '#ff00ff', yellow: '#ffff00', orange: '#ff8000',
+  violet: '#800080', purple: '#bf0040', brown: '#bf8040', teal: '#008080', olive: '#808000', lime: '#bfff00', pink: '#ffbfbf' };
+function colorOf(name) {
+  name = String(name || '').trim();
+  const own = ((DOC && DOC.colors) || {}).colors || {};
+  if (own[name]) return own[name];
+  if (XCOLORS[name]) return XCOLORS[name];
+  if (/^#[0-9a-f]{3,8}$/i.test(name)) return name;
+  return null;
+}
+// KaTeX writes \textcolor{gone}{…} as color:gone, which CSS does not know
+function paperColorsInto(html) {
+  return html.replace(/color:\s*([A-Za-z][\w]*)/g, (all, n) => { const c = colorOf(n); return c ? 'color:' + c : all; });
+}
 // A numbered display environment shows the numbers LaTeX gave it (from the
 // .aux), not KaTeX's own count, which restarts at (1) in every formula: each
 // row gets \tag{n}; rows without a label take the number after the row before.
@@ -904,7 +1450,7 @@ function typesetInto(src, node, display) {
         macros: katexMacros(), strict: false, trust: false });
       KATEX_CACHE.set(key, html);
     }
-    node.innerHTML = html;
+    node.innerHTML = paperColorsInto(html);
     node.classList.toggle('bad', !!node.querySelector('.katex-error'));
     if (node.classList.contains('bad')) node.title = 'KaTeX could not preview this formula';
     else node.removeAttribute('title');
@@ -927,7 +1473,7 @@ function refList(src) {
   for (const [k, n] of keys) {
     const li = el('li');
     li.dataset.key = k;
-    li.textContent = `[${n}] ` + (DOC.bib[k] || k).replace(/\\[a-zA-Z]+\s*|[{}~]/g, (m) => (m === '~' ? ' ' : ''));
+    li.append(el('span', 'reflabel', `[${citeLabel(n)}]`), (DOC.bib[k] || k).replace(/\\[a-zA-Z]+\s*|[{}~]/g, (m) => (m === '~' ? ' ' : '')));
     ol.append(li);
   }
   c.append(h, ol);
@@ -936,22 +1482,99 @@ function refList(src) {
 
 // ------------------------------------------------------------ references
 
-const TYPE_NAMES = { section: 'Section', subsection: 'Section', lemma: 'Lemma', theorem: 'Theorem',
-  corollary: 'Corollary', definition: 'Definition', figure: 'Fig.', table: 'Table', appendix: 'Appendix' };
+const TYPE_NAMES = { section: 'Section', subsection: 'Section', subsubsection: 'Section', chapter: 'Chapter',
+  lemma: 'Lemma', theorem: 'Theorem', corollary: 'Corollary', definition: 'Definition', proposition: 'Proposition',
+  remark: 'Remark', claim: 'Claim', example: 'Example', conjecture: 'Conjecture', fact: 'Fact', assumption: 'Assumption',
+  observation: 'Observation', notation: 'Notation', construction: 'Construction', game: 'Game', algorithm: 'Algorithm',
+  line: 'Line', footnote: 'Footnote', figure: 'Figure', table: 'Table', appendix: 'Appendix', listing: 'Listing',
+  equation: 'Equation', part: 'Part', note: 'Note', result: 'Result', enumi: 'Item' };
+const PLURAL_NAMES = { Appendix: 'Appendices', Corollary: 'Corollaries', Fig: 'Figs', 'Fig.': 'Figs.', 'Eq.': 'Eqs.', Line: 'Lines' };
+// cleveref's lower-case names (\cref) where it abbreviates them
+const CREF_ABBREV = { figure: ['fig.', 'figs.'], equation: ['eq.', 'eqs.'] };
+const SAME_AS = { subsection: 'section', subsubsection: 'section', paragraph: 'section' };
+const upFirst = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+const downFirst = (s) => s.charAt(0).toLowerCase() + s.slice(1);
 
 function labelValue(key) { const l = DOC.aux.labels[key.trim()]; return l && l.v; }
 
+// The name cleveref prints for a kind of label: \crefname / \Crefname of the
+// paper first (one derives the other, as in cleveref), then its defaults
+// (abbreviated for \cref unless noabbrev, capitalised with capitalise).
+function crefName(type, cap, plural) {
+  const cfg = DOC.cref || {};
+  const opts = cfg.options || [];
+  const t = SAME_AS[type] || type;
+  const pick = (pair) => pair && pair[plural ? 1 : 0];
+  const lower = pick((cfg.names || {})[t]) || pick((cfg.names || {})[type]);
+  const upper = pick((cfg.Names || {})[t]) || pick((cfg.Names || {})[type]);
+  cap = cap || opts.includes('capitalise') || opts.includes('capitalize');
+  if (cap) {
+    if (upper) return upper;
+    if (lower) return upFirst(lower);
+  } else {
+    if (lower) return lower;
+    if (upper) return downFirst(upper);
+  }
+  const theorem = (DOC.theorems || {})[type];
+  let name = TYPE_NAMES[t] || (theorem && theorem.name) || upFirst(t || '');
+  if (!name) return '';
+  if (plural) name = PLURAL_NAMES[name] || name + 's';
+  if (cap) return name;
+  if (!opts.includes('noabbrev') && CREF_ABBREV[t]) return CREF_ABBREV[t][plural ? 1 : 0];
+  return downFirst(name);
+}
+
+// Natural order of printed numbers: 2 < 10, 3.2 < 3.10, A < B, A.1 < A.2
+function compareNumbers(a, b) {
+  const pa = String(a).split(/[.\-]/), pb = String(b).split(/[.\-]/);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    if (pa[i] === undefined) return -1;
+    if (pb[i] === undefined) return 1;
+    const na = /^\d+$/.test(pa[i]), nb = /^\d+$/.test(pb[i]);
+    const c = na && nb ? +pa[i] - +pb[i] : na !== nb ? (na ? -1 : 1) : pa[i].localeCompare(pb[i]);
+    if (c) return c;
+  }
+  return 0;
+}
+
+// As cleveref prints it: one name per kind, in the plural for several, the
+// numbers of a kind sorted, and consecutive numbers as a range
+// (\Cref{a,b,c,d} -> Sections 4 to 7; \Cref{rem:2,rem:1} -> Remarks 1 and 2)
 function refText(cmd, keys) {
-  const parts = keys.split(',').map((k) => {
-    k = k.trim();
+  const cap = cmd === 'Cref' || cmd === 'autoref';
+  const items = keys.split(',').map((k) => k.trim()).filter(Boolean).map((k) => {
     const l = DOC.aux.labels[k] || {};
     const v = l.v || '??';
-    if (cmd === 'ref') return v;
-    if (cmd === 'eqref' || l.type === 'equation') return `(${v})`;
-    const n = k.startsWith('app:') ? 'Appendix' : (TYPE_NAMES[l.type] || '');
-    return (n ? n + '\u00a0' : '') + v;
+    if (cmd === 'ref') return { type: '', v };
+    if (cmd === 'eqref') return { type: '', v: `(${v})` };
+    const type = (k.startsWith('app:') || (l.type === 'section' && /^[A-Z]/.test(v))) ? 'appendix' : (l.type || '');
+    return { type, v: type === 'equation' ? `(${v})` : v, raw: v };
   });
-  return parts.join(' and ');
+  if (cmd === 'ref' || cmd === 'eqref') return items.map((x) => x.v).join(', ');
+  // grouped by kind, in the order the kinds first appear
+  const groups = [];
+  for (const x of items) {
+    const g = groups.find((y) => y.type === x.type);
+    if (g) g.items.push(x); else groups.push({ type: x.type, items: [x] });
+  }
+  for (const g of groups) if (!cmd.endsWith('nosort')) g.items.sort((a, b) => a.v === '??' || b.v === '??' ? 0 : compareNumbers(a.raw, b.raw));
+  const list = (a) => a.length > 1 ? a.slice(0, -1).join(', ') + ' and ' + a[a.length - 1] : a[0];
+  const numbers = (vs) => {
+    // runs of three or more consecutive numbers (4, 5, 6, 7 or 3.1, 3.2, 3.3) become ranges
+    const out = [];
+    for (let i = 0; i < vs.length;) {
+      let j = i;
+      const step = (a, b) => { const m = /^(.*?)(\d+)(\)?)$/.exec(a), n = /^(.*?)(\d+)(\)?)$/.exec(b); return m && n && m[1] === n[1] && +n[2] === +m[2] + 1; };
+      while (j + 1 < vs.length && step(vs[j], vs[j + 1])) j++;
+      if (j - i >= 2) { out.push(vs[i] + ' to ' + vs[j]); i = j + 1; } else { out.push(vs[i]); i++; }
+    }
+    return list(out);
+  };
+  return list(groups.map((g) => {
+    const vs = g.items.map((x) => x.v);
+    const name = g.type ? crefName(g.type, cap, vs.length > 1) : '';
+    return name ? name + ' ' + numbers(vs) : numbers(vs);
+  }));
 }
 
 function roman(n) {
@@ -994,7 +1617,9 @@ function ser(node) {
   let out = '';
   for (const n of node.childNodes) {
     if (n.nodeType === 3) {
-      let t = L.encodeText(n.data);
+      // zero-width characters (pasted from web pages) stop pdfLaTeX with
+      // "Unicode character U+200B"; they print nothing anyway
+      let t = L.encodeText(unicodeEngine() ? n.data : n.data.replace(PASTE_INVISIBLE_RE, ''));
       t = KEEP_UNICODE ? t.replace(/[\u2013\u2014\u2018\u2019\u201c\u201d\u2026]/g, (c) => (KEEP_UNICODE.includes(c) ? c : L.typeset(c))) : L.typeset(t);
       if (!unicodeEngine()) t = t.replace(UNI_MATH_RE, (c) => (KEEP_MATH_UNICODE.includes(c) ? c : '$\\' + UNI_MATH[c] + '$'));
       // text right after a % comment would end up inside the comment: start a new line
@@ -1075,12 +1700,16 @@ function commit(applyRules = true) {
 
 function editedFiles() {
   commit();
-  return Object.keys(FILES).filter((n) => FILES[n].text !== FILES[n].disk);
+  const edited = Object.keys(FILES).filter((n) => FILES[n].text !== FILES[n].disk);
+  if (!edited.some(isNewFile)) return edited;
+  const reach = reachableFiles();   // a new file nothing reads is not an edit
+  return edited.filter((n) => !isNewFile(n) || reach.has(n));
 }
 
 function markEdited() {
   flushEdits();
-  const files = editedFiles();
+  countWords();
+  const files = editedFiles().concat(SRC ? extraEdited() : []);
   $('#dirty').textContent = files.length ? files.length + ' file' + (files.length > 1 ? 's' : '') + ' edited' : '';
   $('#save').classList.toggle('has-changes', files.length > 0);
   for (const seg of ORDER) {
@@ -1088,17 +1717,62 @@ function markEdited() {
   }
 }
 
+// ------------------------------------------------------------ word count
+//
+// The words of the text as printed: paragraphs, headings and captions; an
+// inline formula counts as one word, citations and hidden LaTeX as none.
+function wordsOf(root) {
+  let t = '';
+  const walk = (node) => {
+    for (const n of node.childNodes) {
+      if (n.nodeType === 3) { t += n.data; continue; }
+      if (n.nodeType !== 1 && n.nodeType !== 11) continue;
+      const cl = n.classList;
+      if (!cl) { walk(n); continue; }
+      if (cl.contains('tools') || cl.contains('hidden') || cl.contains('boxbadge')) continue;
+      if (cl.contains('math')) { t += cl.contains('display') ? ' ' : ' x '; continue; }
+      if (cl.contains('cite') || cl.contains('item')) { t += ' '; continue; }
+      if (n.dataset && n.dataset.say !== undefined) { t += ' ' + n.dataset.say + ' '; continue; }
+      if (cl.contains('nl') || cl.contains('parbreak')) { t += ' '; continue; }
+      walk(n);
+    }
+  };
+  walk(root);
+  return (t.match(/[\p{L}\p{N}][\p{L}\p{N}'\u2019\-]*/gu) || []).length;
+}
+function countWords() {
+  let n = 0;
+  for (const seg of ORDER) if (seg.edit && seg.edit.isConnected && seg.edit.tagName !== 'TEXTAREA' && seg.el && seg.el.isConnected) n += wordsOf(seg.edit);
+  countWords.total = n;
+  // shown a moment later: reading the selection right after a render forces
+  // a layout of the whole page, which in the diff view is the whole paper
+  clearTimeout(showWords.t);
+  showWords.t = setTimeout(showWords, 0);
+}
+function showWords() {
+  const w = $('#words');
+  if (!w) return;
+  const total = (countWords.total || 0).toLocaleString('en');
+  const sel = getSelection();
+  let picked = null;
+  if (sel.rangeCount && !sel.isCollapsed && $('#doc').contains(sel.getRangeAt(0).commonAncestorContainer)) picked = wordsOf(sel.getRangeAt(0).cloneContents());
+  w.textContent = picked !== null ? `${picked.toLocaleString('en')} of ${total} words` : `${total} words`;
+  w.title = 'Words in the text, headings and captions (a formula counts as one word; citations and hidden LaTeX as none)';
+}
+document.addEventListener('selectionchange', () => { clearTimeout(showWords.t); showWords.t = setTimeout(showWords, 120); });
+
 // ------------------------------------------------------- structure edits
 
 // Commit, apply a change to the segment lists, re-render from the texts.
-function structural(change) {
+function structural(change, snap = true) {
   if (leaveDiff()) return;   // the blocks of the diff view are not the document
   // every structure change can be undone (Delete and Merge of a heading took
   // no snapshot, so Ctrl+Z could not bring the heading back)
-  snapshot();
+  if (snap) snapshot();
   // where the change was asked for: the new placeholder is the one nearest
   // there, not the first one in the paper (an earlier one may be unfilled)
   const at = (() => { try { const sg = segOf(editableAt(selRange()) || document.body); return sg && sg.file ? { file: sg.file, line: sg.line || 0 } : null; } catch (e) { return null; } })();
+  const view = viewAnchor();   // the text on screen stays where it is
   commit();
   // every segment of every file takes its current source first, so that the
   // texts rebuilt below keep the edits of files the change does not touch
@@ -1121,6 +1795,7 @@ function structural(change) {
   }
   for (const f of Object.values(FILES)) if (f.segs) f.text = f.segs.map((s) => s.removed ? '' : s.src).join('');
   render();
+  restoreAnchor(view);
   const near = INSERT_HINT || at;
   INSERT_HINT = null;
   if (focus) focusPlaceholder(focus, near);
@@ -1188,6 +1863,12 @@ function swapChunks(segs, i, j, k) {
 }
 
 function moveSection(seg, direction) {
+  // a section that is a whole file moves as its \input, among its siblings
+  // in the file that reads it (one section per file)
+  if (seg && seg.kind === 'heading' && seg.file !== DOC.main && sectionIsWholeFile(seg)) {
+    const inp = inputSegOf(seg.file);
+    if (inp && headingRank(inp) === headingRank(seg)) seg = inp;
+  }
   const segs = FILES[seg.file] && FILES[seg.file].segs;
   const start = segs ? segs.indexOf(seg) : -1;
   const rank = headingRank(seg);
@@ -1201,14 +1882,14 @@ function moveSection(seg, direction) {
       if (r !== null && r < rank) break;
       if (r === rank) { previous = i; break; }
     }
-    if (previous < 0 || segs[previous].kind !== 'heading') {
+    if (previous < 0 || !['heading', 'input'].includes(segs[previous].kind)) {
       banner(previous < 0 ? 'This section is already first among its siblings.' : 'The section before this one is in another file (\\input); move it there.');
       return;
     }
     [lo, mid, hi] = [previous, start, end];
   } else {
     const next = end < segs.length ? headingRank(segs[end]) : null;
-    if (next !== rank || segs[end].kind !== 'heading') {
+    if (next !== rank || !['heading', 'input'].includes(segs[end].kind)) {
       banner(next === rank ? 'The section after this one is in another file (\\input); move it there.' : 'This section is already last among its siblings.');
       return;
     }
@@ -1238,6 +1919,16 @@ function addMenu(seg, anchor) {
     b.onclick = () => { m.hidden = true; structural(() => { insertAfter(seg, src); return PLACEHOLDER; }); };
     m.append(b);
   }
+  const extra = [
+    ['Section in a new file (sections/)', () => newSectionFile('', seg)],
+    ['Figure from an image…', () => pickImages(seg)],
+    ['Include a file…', () => openFiles()],
+  ];
+  for (const [label, fn] of extra) {
+    const b = el('button', '', label);
+    b.onclick = () => { m.hidden = true; fn(); };
+    m.append(b);
+  }
   const r = anchor.getBoundingClientRect();
   m.style.left = (r.right + window.scrollX + 4) + 'px';
   m.style.top = (r.top + window.scrollY) + 'px';
@@ -1265,8 +1956,455 @@ function focusPlaceholder(text, near) {
   const r = document.createRange();
   r.setStart(best.n, best.i); r.setEnd(best.n, best.i + text.length);
   const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
-  best.seg.edit.focus();
-  best.seg.el.scrollIntoView({ block: 'center' });
+  best.seg.edit.focus({ preventScroll: true });
+  // the new block is shown only if it is out of view: adding a heading
+  // under the text you are reading does not move that text
+  const rect = r.getBoundingClientRect();
+  revealChanged(rect.height ? rect : best.seg.el.getBoundingClientRect(), best.seg);
+}
+
+// ------------------------------------------------------------- files
+//
+// One section per file: a section can move to a file of its own under
+// sections/ (beside the main file), every section at once, and back again.
+// New files exist only in the editor (FILES[name].base === null) until saved;
+// Undo takes them out again, and a new file nothing reads is never written.
+
+const SECTION_RANK_MAX = 2;   // \section (or \chapter, \part) start a file of their own
+function sectionsDir() {
+  const i = DOC.main.lastIndexOf('/');
+  return (i >= 0 ? DOC.main.slice(0, i + 1) : '') + 'sections/';
+}
+function slugify(s) {
+  const slug = String(s).normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/, '');
+  return slug || 'section';
+}
+function plainOfLatex(src) {
+  const d = el('span');
+  try { renderTokens(L.tokenize(src), d, {}); } catch (e) { return src; }
+  return d.textContent;
+}
+function knownFiles(except) {
+  // a new file nothing reads any more (undone, put back) does not hold its name
+  const reach = Object.keys(FILES).some(isNewFile) ? reachableFiles() : null;
+  const s = new Set([...((DOC && DOC.disk_files) || []), ...Object.keys(FILES).filter((n) => !isNewFile(n) || reach.has(n))]);
+  if (except) s.delete(except);
+  return s;
+}
+function freeFile(dir, slug, except) {
+  const known = knownFiles(except);
+  let name = dir + slug + '.tex', k = 2;
+  while (known.has(name)) name = dir + slug + '-' + (k++) + '.tex';
+  return name;
+}
+const inputArgOf = (name) => name.replace(/\.tex$/, '');
+function newFile(name, text) { FILES[name] = { text, disk: null, base: null }; }
+function isNewFile(name) { return !!FILES[name] && FILES[name].base === null; }
+
+// The files the document reads now, from the main file down, in order.
+function reachableFiles() {
+  const seen = new Set();
+  const visit = (name) => {
+    if (seen.has(name) || !FILES[name]) return;
+    seen.add(name);
+    const segs = FILES[name].segs || parseFile(name);
+    for (const s of segs) if (s.kind === 'input' && !s.removed && s.input) visit(s.input);
+  };
+  visit(DOC.main);
+  return seen;
+}
+// The \input segment that reads a file, and the file it is in.
+function inputSegOf(name) {
+  for (const f of Object.values(FILES)) for (const s of f.segs || []) if (s.kind === 'input' && !s.removed && s.input === name) return s;
+  return null;
+}
+
+// The name a section's file gets: its label (sec:intro -> intro), or its title.
+function sectionFileName(seg, except) {
+  const h = L.headingParts(seg.src);
+  const label = /\\label\{(?:sec:|section:|s:|app:|chap:)?([^}]*)\}/.exec(seg.src);
+  const title = h ? plainOfLatex(h.title) : '';
+  const slug = label ? slugify(label[1]) : slugify(title === PLACEHOLDER ? 'new-section' : title);
+  return freeFile(sectionsDir(), slug, except);
+}
+
+// The blocks of a section in its file: from its heading to the next heading
+// of the same or a higher rank, without what must stay where it is (the
+// bibliography, \appendix, \end{document}) and the blank lines after it.
+function sectionRange(seg) {
+  const segs = FILES[seg.file].segs;
+  const start = segs.indexOf(seg);
+  const rank = headingRank(seg);
+  if (start < 0 || rank === null) return null;
+  let end = sectionEnd(segs, start, rank);
+  for (let i = start + 1; i < end; i++) {
+    if (segs[i].kind !== 'gap' && !segs[i].removed && FIXED_RE.test(segs[i].src.replace(/(^|[^\\])%.*$/gm, '$1'))) { end = i; break; }
+  }
+  while (end > start + 1 && (segs[end - 1].kind === 'gap' || segs[end - 1].removed)) end--;
+  return [start, end];
+}
+// Whether a file holds just this section (blank lines and comments aside).
+function sectionIsWholeFile(seg) {
+  const r = sectionRange(seg);
+  if (!r) return false;
+  const segs = FILES[seg.file].segs;
+  const quiet = (s) => s.removed || s.kind === 'gap' || (s.kind === 'para' && !s.src.replace(/(^|[^\\])%.*$/gm, '$1').trim());
+  return segs.slice(0, r[0]).every(quiet) && segs.slice(r[1]).every(quiet);
+}
+
+// Move a section into a file of its own (inside a structural change).  A
+// section at the end of a file that is itself read by another goes beside
+// that file's \input (one section per file, not files in files).
+function extractSection(seg, name) {
+  const segs = FILES[seg.file].segs;
+  const r = sectionRange(seg);
+  if (!r) return null;
+  const [start, end] = r;
+  name = name || sectionFileName(seg);
+  const body = segs.slice(start, end).filter((s) => !s.removed).map((s) => s.src).join('').replace(/\s*$/, '\n');
+  newFile(name, body);
+  const atEnd = segs.slice(end).every((s) => s.removed || s.kind === 'gap');
+  const parent = seg.file !== DOC.main && atEnd && start > 0 ? inputSegOf(seg.file) : null;
+  const input = (file) => ({ kind: 'input', src: '\\input{' + inputArgOf(name) + '}', input: name, file });
+  if (parent) {
+    // out of this file (with the blank lines before it), in after its \input
+    let from = start;
+    while (from > 0 && segs[from - 1].kind === 'gap') from--;
+    segs.splice(from, end - from);
+    const psegs = FILES[parent.file].segs;
+    psegs.splice(psegs.indexOf(parent) + 1, 0, { kind: 'gap', src: '\n', file: parent.file }, input(parent.file));
+  } else {
+    segs.splice(start, end - start, input(seg.file));
+  }
+  return name;
+}
+
+// Put a file's text back where it is read; the file stays on disk (Files…
+// can move it to the trash once nothing reads it).
+function inlineFile(name) {
+  const inp = inputSegOf(name);
+  if (!inp || !FILES[name]) return false;
+  commit();
+  structural(() => { inp.src = FILES[name].text.replace(/\s+$/, ''); });
+  toast(isNewFile(name) ? `${name} was never saved: it is gone` : `${name} is back in ${inp.file}; the file stays on disk, unused (Files… can move it to the trash)`, 'ok');
+  return true;
+}
+
+// Rename a file the editor made and has not saved yet: only the editor knows it.
+function renameNewFile(from, to) {
+  const inp = inputSegOf(from);
+  FILES[to] = FILES[from];
+  delete FILES[from];
+  if (inp) { inp.src = inp.src.replace('{' + inputArgOf(from) + '}', '{' + inputArgOf(to) + '}').replace('{' + from + '}', '{' + to + '}'); inp.input = to; }
+}
+
+// A new file still called after its placeholder (sections/new-section.tex)
+// takes the name of its section once that has a title, when it is saved.
+function settleNewFileNames() {
+  const todo = [];
+  for (const name of Object.keys(FILES)) {
+    if (!isNewFile(name) || !/(^|\/)new-section(-\d+)?\.tex$/.test(name)) continue;
+    const seg = (FILES[name].segs || []).find((s) => s.kind === 'heading' && !s.removed);
+    if (!seg) continue;
+    const src = segSource(seg, []);
+    const h = L.headingParts(src);
+    if (!h || plainOfLatex(h.title).trim() === PLACEHOLDER) continue;
+    const want = sectionFileName({ src }, name);
+    if (want !== name) todo.push([name, want]);
+  }
+  if (!todo.length) return;
+  structural(() => { for (const [a, b] of todo) renameNewFile(a, b); }, false);
+}
+
+function splitToFile(seg) {
+  if (!seg || seg.kind !== 'heading') { toast('Put the cursor in a section heading for that', 'error'); return; }
+  const rank = headingRank(seg);
+  if (rank === null) return;
+  if (seg.file !== DOC.main && sectionIsWholeFile(seg)) { toast(`This section already has its file: ${seg.file}`); return; }
+  let name;
+  structural(() => { name = extractSection(seg); });
+  if (name) toast(`Section moved to ${name}; save to write it`, 'ok');
+}
+
+// Every section of the document in a file of its own.
+function planSectionFiles() {
+  const top = Math.min(...Object.values(FILES).flatMap((f) => (f.segs || []).filter((s) => s.kind === 'heading' && !s.removed).map(headingRank).filter((r) => r !== null)), SECTION_RANK_MAX);
+  const reach = reachableFiles();
+  const plan = [];
+  for (const name of reach) {
+    const heads = (FILES[name].segs || []).filter((s) => s.kind === 'heading' && !s.removed && headingRank(s) === top);
+    if (!heads.length) continue;
+    // a section file keeps its first section: the others leave it
+    const keep = name !== DOC.main && sectionIsWholeFile(heads[0]) ? 1 : (name !== DOC.main && !(FILES[name].segs || []).slice(0, FILES[name].segs.indexOf(heads[0])).some((s) => !s.removed && s.kind !== 'gap' && s.src.replace(/(^|[^\\])%.*$/gm, '$1').trim()) ? 1 : 0);
+    heads.slice(keep).forEach((s) => plan.push(s));
+  }
+  return plan;
+}
+function splitAllSections() {
+  commit();
+  const plan = planSectionFiles();
+  if (!plan.length) { toast('Every section already has a file of its own'); return; }
+  // names first, so that each is distinct
+  const taken = new Set();
+  const names = plan.map((s) => {
+    let n = sectionFileName(s);
+    for (let k = 2; taken.has(n); k++) n = n.replace(/(-\d+)?\.tex$/, '-' + k + '.tex');
+    taken.add(n);
+    return n;
+  });
+  const list = plan.map((s, i) => `  ${plainOfLatex((L.headingParts(s.src) || {}).title || '')} → ${names[i]}`).join('\n');
+  if (!confirm(`Move ${plan.length} section${plan.length === 1 ? '' : 's'} into files of their own?\n\n${list.slice(0, 1800)}\n\nEach is read with \\input where it was. Nothing is written until you save, and Undo puts them back.`)) return;
+  // from the last to the first: earlier places stay where they are
+  structural(() => { for (let i = plan.length - 1; i >= 0; i--) { taken.delete(names[i]); extractSection(plan[i], names[i]); } });
+  toast(`${plan.length} section file${plan.length === 1 ? '' : 's'} under ${sectionsDir()}; save to write them`, 'ok');
+}
+
+// Whether the paper keeps its sections in files of their own.
+function sectionFilesLayout() {
+  const dir = sectionsDir();
+  return [...reachableFiles()].some((n) => n.startsWith(dir));
+}
+
+// Where a new top-level section goes: after the section at the cursor (after
+// its file's \input when it has a file of its own), else before the end of
+// the text (the appendix, the bibliography, \end{document}).
+function newSectionPlace(seg) {
+  if (seg) {
+    let head = null;
+    const segs = FILES[seg.file].segs;
+    for (let i = segs.indexOf(seg); i >= 0; i--) if (segs[i].kind === 'heading' && headingRank(segs[i]) !== null && headingRank(segs[i]) <= SECTION_RANK_MAX) { head = segs[i]; break; }
+    if (head && head.file !== DOC.main && sectionIsWholeFile(head)) {
+      const inp = inputSegOf(head.file);
+      if (inp) return { segs: FILES[inp.file].segs, after: inp };
+    }
+    if (head) { const r = sectionRange(head); return { segs, after: segs[r[1] - 1] }; }
+    return { segs, after: seg };
+  }
+  const segs = FILES[DOC.main].segs;
+  const fixed = segs.findIndex((s) => s.kind !== 'gap' && FIXED_RE.test(s.src.replace(/(^|[^\\])%.*$/gm, '$1')));
+  let i = (fixed < 0 ? segs.length : fixed) - 1;
+  while (i > 0 && (segs[i].kind === 'gap' || segs[i].removed)) i--;
+  return { segs, after: segs[Math.max(0, i)] };
+}
+function insertInputAfter(place, name) {
+  const { segs, after } = place;
+  const file = after.file;
+  INSERT_HINT = { file: name, line: 1 };
+  segs.splice(segs.indexOf(after) + 1, 0, { kind: 'gap', src: after.kind === 'input' ? '\n' : '\n\n', file }, { kind: 'input', src: '\\input{' + inputArgOf(name) + '}', input: name, file });
+}
+function newSectionFile(title, seg) {
+  title = (title || '').trim();
+  const slug = slugify(title || 'new-section');
+  const name = freeFile(sectionsDir(), title ? slug : 'new-section');
+  const label = title ? '\\label{sec:' + slug + '}' : '';
+  const place = newSectionPlace(seg);
+  structural(() => {
+    newFile(name, `\\section{${title ? escapeIn(title, '&%$#_{}') : PLACEHOLDER}}${label}\n\n${PLACEHOLDER}\n`);
+    insertInputAfter(place, name);
+    return PLACEHOLDER;
+  });
+  toast(`New section file ${name}; save to write it`, 'ok');
+  return name;
+}
+
+// ---- adding images: the file goes to figures/, a figure after the block
+async function addImages(files, seg) {
+  const list = [...files].filter((f) => /^image\//.test(f.type) || /\.(pdf|eps)$/i.test(f.name));
+  if (!list.length) { toast('Only images (PNG, JPEG, PDF, EPS, SVG) can be added', 'error'); return; }
+  const added = [];
+  for (const f of list) {
+    if (f.size > 40e6) { banner(`${f.name} is larger than 40 MB`); continue; }
+    const data = await new Promise((ok, no) => { const r = new FileReader(); r.onload = () => ok(String(r.result).split(',')[1] || ''); r.onerror = no; r.readAsDataURL(f); });
+    const ext = (/\.[A-Za-z0-9]+$/.exec(f.name) || [''])[0] || ('.' + (f.type.split('/')[1] || 'png').replace('jpeg', 'jpg').replace('svg+xml', 'svg'));
+    const name = /^image\.[a-z]+$|^$/.test(f.name) || !/\./.test(f.name) ? 'pasted-' + new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '') + ext : f.name;
+    const r = await fetch('/api/upload', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN }, body: JSON.stringify({ name, data }) });
+    const res = await r.json().catch(() => ({}));
+    if (!r.ok) { banner(`Adding ${f.name} failed: ${res.error || r.status}`); continue; }
+    added.push(res.path);
+    DOC.graphicx = res.graphicx;
+  }
+  if (!added.length) return;
+  const target = seg || caretSeg() || ORDER.filter((s) => s.el && s.kind !== 'hidden').pop();
+  if (!target) return;
+  const figs = added.map((p) => {
+    const key = slugify(p.replace(/^.*\//, '').replace(/\.[^.]*$/, ''));
+    return `\\begin{figure}[t]\n  \\centering\n  \\includegraphics[width=\\linewidth]{${p}}\n  \\caption{${PLACEHOLDER}}\n  \\label{fig:${key}}\n\\end{figure}`;
+  });
+  structural(() => { insertAfter(target, figs.join('\n\n')); return PLACEHOLDER; });
+  toast(`Added ${added.join(', ')}; the picture shows after the next build`, 'ok');
+  if (!DOC.graphicx) offerPackage('graphicx', 'Figures with \\includegraphics need the graphicx package');
+}
+function offerPackage(pkg, why) {
+  const front = preambleSeg();
+  if (!front) { banner(why + ': add \\usepackage{' + pkg + '} to the preamble.'); return false; }
+  if (!confirm(why + ', which this paper does not load.\n\nAdd \\usepackage{' + pkg + '} to the preamble of ' + DOC.main + '? It is written when you save.')) return false;
+  const src = front.patched !== undefined ? front.patched : front.src;
+  const i = src.lastIndexOf('\\begin{document}');
+  front.patched = src.slice(0, i) + '\\usepackage{' + pkg + '}\n' + src.slice(i);
+  front.touched = true;
+  if (pkg === 'graphicx') DOC.graphicx = true;
+  markEdited();
+  return true;
+}
+function pickImages(seg) {
+  const inp = document.createElement('input');
+  inp.type = 'file';
+  inp.multiple = true;
+  inp.accept = 'image/*,.pdf,.eps';
+  inp.onchange = () => addImages(inp.files, seg);
+  inp.click();
+}
+$('#doc').addEventListener('dragover', (e) => {
+  if (DIFF.on || !e.dataTransfer || ![...e.dataTransfer.types].includes('Files')) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'copy';
+  $('#doc').classList.add('dropping');
+});
+$('#doc').addEventListener('dragleave', (e) => { if (e.target === $('#doc')) $('#doc').classList.remove('dropping'); });
+$('#doc').addEventListener('drop', (e) => {
+  $('#doc').classList.remove('dropping');
+  if (DIFF.on || !e.dataTransfer || !e.dataTransfer.files.length) return;
+  e.preventDefault();
+  const at = document.elementFromPoint(e.clientX, e.clientY);
+  addImages(e.dataTransfer.files, at ? segOf(at) : null);
+});
+// a picture pasted into the text (a screenshot): added as a figure
+$('#doc').addEventListener('paste', (e) => {
+  const files = e.clipboardData && [...e.clipboardData.files].filter((f) => /^image\//.test(f.type));
+  if (!files || !files.length || (e.clipboardData.getData('text/plain') || '').trim()) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  addImages(files, caretSeg());
+}, true);
+
+// ---- the file of a block: a menu on the first block of every file
+function fileMenu(name, anchor) {
+  const m = $('#menu');
+  m.textContent = '';
+  const inp = inputSegOf(name);
+  const items = [
+    [`Open ${name} in the source view`, () => toggleSource(true).then(() => openSourceFile(name))],
+    ['Rename…', () => renameFilePrompt(name)],
+  ];
+  if (inp) items.push([`Put the text back into ${inp.file}`, () => { if (confirm(`Put the text of ${name} back into ${inp.file}, where it is read?\n\nThe file stays on disk${isNewFile(name) ? ' (it was never saved)' : ', unused'}.`)) inlineFile(name); }]);
+  if (inp && inp.el === undefined) items.push(['Show where it is read', () => toggleSource(true).then(() => openSourceFile(inp.file, inp.line))]);
+  items.push(['Files…', () => openFiles()]);
+  for (const [label, fn] of items) {
+    const b = el('button', '', label);
+    b.onclick = () => { m.hidden = true; fn(); };
+    m.append(b);
+  }
+  const r = anchor.getBoundingClientRect();
+  m.style.left = (r.left + window.scrollX) + 'px';
+  m.style.top = (r.bottom + window.scrollY + 2) + 'px';
+  m.hidden = false;
+}
+
+async function renameFilePrompt(name) {
+  if (name === DOC.main) { toast('The main file is renamed outside the editor', 'error'); return; }
+  const ext = name.endsWith('.bib') ? '.bib' : '.tex';
+  const to = (prompt(`Rename ${name} to (a ${ext} path inside the paper's folder):`, name) || '').trim();
+  if (!to || to === name) return;
+  const dest = checkNewName(to, ext);
+  if (!dest) return;
+  if (isNewFile(name)) {
+    structural(() => renameNewFile(name, dest), false);
+    toast(`Renamed to ${dest} (not saved yet)`, 'ok');
+    refreshFiles();
+    return;
+  }
+  // a file on disk: its readers must be saved, then the server renames it
+  // and rewrites their \input
+  if (editedFiles().length) {
+    if (!confirm('Renaming writes to disk at once, so your edits are saved first. Save and rename?')) return;
+    await save();
+    if (editedFiles().length) { toast('Not renamed: some files could not be saved', 'error'); return; }
+  }
+  const batch = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  const r = await fetch('/api/file/rename', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN }, body: JSON.stringify({ from: name, to: dest, batch }) });
+  const res = await r.json().catch(() => ({}));
+  if (!r.ok) { banner(`Renaming ${name} failed: ${res.error || r.status}`); return; }
+  delete FILES[name];
+  if (SRC.extra) delete SRC.extra[name];
+  await load(true);
+  toast(`Renamed to ${dest}${res.changed.length ? '; updated ' + res.changed.join(', ') : ''}`, 'ok');
+  refreshFiles();
+  if (SRC.on) { await srcReloadFiles(); await openSourceFile(dest); }
+}
+
+// ---- the Files window
+const FILESUI = { at: null };
+function openFiles() {
+  FILESUI.at = caretSeg();
+  $('#filesbox').hidden = false;
+  refreshFiles();
+}
+function closeFiles() { $('#filesbox').hidden = true; }
+async function refreshFiles() {
+  if ($('#filesbox').hidden) return;
+  try { const r = await fetch('/api/srcfiles'); if (r.ok) DOC.disk_files = (await r.json()).map((f) => f.name); } catch (e) { /* keep the old list */ }
+  commit();
+  const reach = reachableFiles();
+  const order = [...reach];
+  const rest = (DOC.disk_files || []).filter((n) => !reach.has(n) && /\.tex$/.test(n)).sort();
+  const list = $('#files-list');
+  list.textContent = '';
+  const row = (name, used) => {
+    const r = el('div', 'file-row' + (used ? '' : ' unused'));
+    const n = el('span', 'file-name', name);
+    const inp = inputSegOf(name);
+    const depth = (() => { let d = 0, cur = inp; while (cur && d < 8) { d++; cur = inputSegOf(cur.file); } return d; })();
+    n.style.paddingLeft = (depth * 1.1) + 'em';
+    const tags = el('span', 'file-tags');
+    if (name === DOC.main) tags.append(el('span', 'tag', 'main'));
+    if (isNewFile(name)) tags.append(el('span', 'tag new', 'new, unsaved'));
+    else if (FILES[name] && FILES[name].text !== FILES[name].disk) tags.append(el('span', 'tag edited', 'edited'));
+    if (!used) tags.append(el('span', 'tag', 'not read by the document'));
+    const heads = FILES[name] && (FILES[name].segs || []).filter((s) => s.kind === 'heading' && !s.removed && headingRank(s) !== null && headingRank(s) <= SECTION_RANK_MAX);
+    if (heads && heads.length) tags.append(el('span', 'tag sec', heads.map((s) => plainOfLatex((L.headingParts(segSource(s, [])) || {}).title || '')).join(' · ').slice(0, 80)));
+    const acts = el('span', 'file-acts');
+    const btn = (label, title, fn) => { const b = el('button', '', label); b.title = title; b.onclick = fn; acts.append(b); };
+    if (used) {
+      const first = ORDER.find((s) => s.file === name && s.el);
+      if (first) btn('Go', 'Show it in the paper', () => { closeFiles(); navPush(); first.el.scrollIntoView({ block: 'start', behavior: SMOOTH() }); });
+    }
+    if (!isNewFile(name)) btn('Source', 'Open it in the source view', () => { closeFiles(); toggleSource(true).then(() => openSourceFile(name)); });
+    if (name !== DOC.main) btn('Rename…', 'Rename it (and every \\input of it)', () => renameFilePrompt(name));
+    if (inp) btn('Inline', `Put its text back into ${inp.file}`, () => { if (confirm(`Put the text of ${name} back into ${inp.file}?`)) { closeFiles(); inlineFile(name); } });
+    if (!used) {
+      btn('Include', 'Read it here: \\input after the block at the cursor (or at the end of the text)', () => {
+        closeFiles();
+        const place = FILESUI.at ? { segs: FILES[FILESUI.at.file].segs, after: FILESUI.at } : newSectionPlace(null);
+        (async () => {
+          if (!FILES[name]) {
+            const r = await fetch('/api/srcfile?name=' + encodeURIComponent(name));
+            const d = r.ok ? await r.json() : null;
+            if (!d) { toast('Could not read ' + name, 'error'); return; }
+            FILES[name] = { text: d.text, disk: d.text, base: d.hash };
+          }
+          structural(() => insertInputAfter(place, name));
+          toast(`${name} is read after the block at the cursor; save to keep it`, 'ok');
+        })();
+      });
+      btn('Trash', 'Move it to the editor\'s trash (.paper-editor/trash)', async () => {
+        if (!confirm(`Move ${name} to the editor's trash (.paper-editor/trash)? The document does not read it.`)) return;
+        const r = await fetch('/api/file/trash', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN }, body: JSON.stringify({ name }) });
+        const res = await r.json().catch(() => ({}));
+        if (!r.ok) { banner(`Could not move ${name}: ${res.error || r.status}`); return; }
+        toast(`${name} moved to ${res.trash}`, 'ok');
+        refreshFiles();
+      });
+    }
+    r.append(n, tags, acts);
+    list.append(r);
+  };
+  for (const n of order) row(n, true);
+  if (rest.length) list.append(el('div', 'files-sub', 'Other .tex files of the folder'));
+  for (const n of rest) row(n, false);
+  const plan = planSectionFiles();
+  $('#files-split').disabled = !plan.length;
+  $('#files-split').title = plan.length ? `Move ${plan.length} section${plan.length === 1 ? '' : 's'} into files of their own under ${sectionsDir()}` : 'Every section already has a file of its own';
 }
 
 // Join a paragraph to the previous one (Backspace at its start).
@@ -1580,6 +2718,9 @@ doc.addEventListener('click', (e) => {
   const c = outerChip(e.target);
   if (!c || c.classList.contains('nl') || c.classList.contains('tie') || c.classList.contains('parbreak')) return;
   if (c.closest('.refs')) return;
+  // a preview of a figure or table (shown after Apply, until the next build)
+  // is read only: it is edited in the figure window (double-click)
+  if (c.closest('.game-preview, .tabular-preview')) { e.preventDefault(); toast('This is a preview: double-click the figure to edit it'); return; }
   e.preventDefault();
   openDrawer(c, null, c.classList.contains('math') ? 'Edit maths' : 'Edit LaTeX');
 });
@@ -1602,6 +2743,21 @@ function markEditedSoon() { clearTimeout(markTimer); markTimer = setTimeout(mark
 // its own) and a plain text in which formulas are $...$, so that pasting it
 // back, here or from anywhere else, gives formulas again.
 const LATEX_MIME = 'application/x-paper-editor-latex';
+// Zero-width spaces, joiners, word joiners and byte-order marks come along
+// with text copied from web pages; they print nothing, and pdfLaTeX stops at
+// them ("Unicode character U+200B").  Pastes drop them everywhere.
+const PASTE_INVISIBLE_RE = /[\u200b-\u200d\u2060-\u2064\ufeff]/g;
+// Pastes into the text boxes (source view, drawer, figure LaTeX) too, as
+// the browser's own paste would keep them; insertText keeps native undo.
+document.addEventListener('paste', (e) => {
+  const t = e.target;
+  if (!t || !/^(TEXTAREA|INPUT)$/.test(t.tagName) || t.readOnly) return;
+  const text = e.clipboardData && e.clipboardData.getData('text/plain');
+  if (!text || !PASTE_INVISIBLE_RE.test(text)) return;
+  PASTE_INVISIBLE_RE.lastIndex = 0;
+  e.preventDefault();
+  document.execCommand('insertText', false, text.replace(PASTE_INVISIBLE_RE, ''));
+}, true);
 
 // Plain text: formulas between dollars ($...$, $$...$$, \(...\), \[...\])
 // become formulas, and so do control words with their arguments and ties
@@ -1662,14 +2818,14 @@ doc.addEventListener('paste', (e) => {
   e.preventDefault();
   if (!editableAt(selRange())) return;
   if (spansEditables()) { banner(ACROSS); return; }
-  const latex = e.clipboardData.getData(LATEX_MIME);
+  const latex = e.clipboardData.getData(LATEX_MIME).replace(PASTE_INVISIBLE_RE, '');
   let nodes;
   if (latex) {
     const frag = document.createDocumentFragment();
     renderTokens(L.tokenize(latex.replace(/\r\n?/g, '\n').replace(/\n{2,}/g, '\n')), frag, {});
     nodes = [...frag.childNodes];
   } else {
-    const text = e.clipboardData.getData('text/plain').replace(/\r\n?/g, '\n').replace(/\s*\n\s*/g, ' ');
+    const text = e.clipboardData.getData('text/plain').replace(PASTE_INVISIBLE_RE, '').replace(/\r\n?/g, '\n').replace(/\s*\n\s*/g, ' ');
     nodes = pastedNodes(text);
   }
   if (!nodes.length) return;
@@ -1695,8 +2851,14 @@ function plainOf(node) {
 function copySelection(e, cut) {
   if (/^(TEXTAREA|INPUT)$/.test(e.target.tagName)) return;
   const r = selectionInOneEditable();
-  if (!r) {              // across blocks: the browser's own copy, and no cut
-    if (cut && spansEditables()) { e.preventDefault(); banner(ACROSS); }
+  if (!r) {              // across blocks: the text of each block, and the cut takes them
+    const across = acrossParts();
+    if (!across) { if (cut && spansEditables()) { e.preventDefault(); banner(ACROSS); } return; }
+    KEEP_UNICODE = ''; KEEP_MATH_UNICODE = '';
+    e.clipboardData.setData('text/plain', across.plain);
+    e.clipboardData.setData(LATEX_MIME, across.latex);
+    e.preventDefault();
+    if (cut) deleteAcross();
     return;
   }
   const frag = r.cloneContents();
@@ -1718,6 +2880,107 @@ function segOf(node) {
   return box ? box.seg : null;
 }
 
+// ------------------------------------------------- selecting across blocks
+//
+// Every block is its own editable text, and a browser keeps a drag, a
+// Shift+click or Shift+arrow inside the one it started in.  Here they go on
+// into the next blocks; such a selection can be copied, cut, deleted or typed
+// over (the blocks between go, the first and the last are joined).
+const hostOf = (n) => { const e = n && (n.nodeType === 1 ? n : n.parentElement); return e && e.closest('#doc [contenteditable=true]'); };
+function pointAt(x, y) {
+  if (document.caretPositionFromPoint) { const p = document.caretPositionFromPoint(x, y); return p && { node: p.offsetNode, offset: p.offset }; }
+  const r = document.caretRangeFromPoint && document.caretRangeFromPoint(x, y);
+  return r && { node: r.startContainer, offset: r.startOffset };
+}
+const DRAG = { anchor: null, crossed: false };
+doc.addEventListener('mousedown', (e) => {
+  DRAG.anchor = null; DRAG.crossed = false;
+  if (e.button !== 0 || e.detail > 1) return;
+  const sel = getSelection();
+  const at = pointAt(e.clientX, e.clientY);
+  if (!at || !hostOf(at.node) || (at.node.parentElement && at.node.parentElement.closest('.chip'))) return;
+  if (e.shiftKey && sel.rangeCount && hostOf(sel.anchorNode) && hostOf(sel.anchorNode) !== hostOf(at.node)) {
+    // Shift+click in another block: from where the selection starts to here
+    e.preventDefault();
+    sel.setBaseAndExtent(sel.anchorNode, sel.anchorOffset, at.node, at.offset);
+    return;
+  }
+  if (!e.shiftKey) DRAG.anchor = at;
+});
+addEventListener('mousemove', (e) => {
+  if (!DRAG.anchor || !(e.buttons & 1)) return;
+  const at = pointAt(e.clientX, e.clientY);
+  if (!at || !hostOf(at.node)) return;
+  if (!DRAG.crossed && hostOf(at.node) === hostOf(DRAG.anchor.node)) return;
+  DRAG.crossed = true;
+  // after the browser's own handling of the move, which would clip it
+  const a = DRAG.anchor;
+  requestAnimationFrame(() => { if (DRAG.anchor === a) try { getSelection().setBaseAndExtent(a.node, a.offset, at.node, at.offset); } catch (err) { /* gone */ } });
+});
+addEventListener('mouseup', () => { setTimeout(() => { DRAG.anchor = null; }, 0); });
+// Shift+arrows at the edge of a block go on into the next (or previous) one
+doc.addEventListener('keydown', (e) => {
+  if (!e.shiftKey || e.ctrlKey || e.altKey || e.metaKey || !/^Arrow(Up|Down|Left|Right)$/.test(e.key)) return;
+  const sel = getSelection();
+  if (!sel.rangeCount || !hostOf(sel.focusNode)) return;
+  const fwd = e.key === 'ArrowDown' || e.key === 'ArrowRight';
+  const fn = sel.focusNode, fo = sel.focusOffset;
+  sel.modify('extend', fwd ? 'forward' : 'backward', /Up|Down/.test(e.key) ? 'line' : 'character');
+  e.preventDefault();
+  if (sel.focusNode !== fn || sel.focusOffset !== fo) return;
+  const hosts = [...doc.querySelectorAll('[contenteditable=true]')].filter((h) => h.getClientRects().length);
+  const next = hosts[hosts.indexOf(hostOf(fn)) + (fwd ? 1 : -1)];
+  if (!next) return;
+  const r = document.createRange(); r.selectNodeContents(next); r.collapse(!fwd);
+  sel.setBaseAndExtent(sel.anchorNode, sel.anchorOffset, r.startContainer, r.startOffset);
+}, true);
+
+// The blocks of a selection across blocks, in order: the first and the last
+// with the selected part, null if it is not one that can be edited (blocks
+// of one file: paragraphs, quotes and the blocks between them).
+function acrossParts() {
+  const sel = getSelection();
+  if (!sel.rangeCount || sel.isCollapsed) return null;
+  const r = sel.getRangeAt(0);
+  const ha = hostOf(r.startContainer), hb = hostOf(r.endContainer);
+  if (!ha || !hb || ha === hb) return null;
+  const sa = segOf(ha), sb = segOf(hb);
+  if (!sa || !sb || sa.file !== sb.file || sa.edit !== ha || sb.edit !== hb) return null;
+  const segs = FILES[sa.file].segs;
+  const i = segs.indexOf(sa), j = segs.indexOf(sb);
+  if (i < 0 || j <= i) return null;
+  const middle = segs.slice(i + 1, j).filter((x) => !x.removed);
+  const head = document.createRange(); head.setStart(r.startContainer, r.startOffset); head.setEnd(ha, ha.childNodes.length);
+  const tail = document.createRange(); tail.setStart(hb, 0); tail.setEnd(r.endContainer, r.endOffset);
+  snapOutOfChips(head); snapOutOfChips(tail);
+  KEEP_UNICODE = ''; KEEP_MATH_UNICODE = '';
+  const parts = [head.cloneContents(), ...middle.filter((x) => x.kind !== 'gap').map((x) => x), tail.cloneContents()];
+  const latex = parts.map((p) => p.nodeType === 11 ? ser(p).trim() : segSource(p, []).trim()).filter(Boolean).join('\n\n');
+  const plain = parts.map((p) => p.nodeType === 11 ? plainOf(p).trim() : (p.edit && p.edit.tagName !== 'TEXTAREA' ? plainOf(p.edit).trim() : '')).filter(Boolean).join('\n\n');
+  const editable = (x) => x.kind === 'para' || x.kind === 'quote';
+  return { sa, sb, middle, head, tail, latex, plain, ok: editable(sa) && editable(sb) && !middle.some((x) => x.kind === 'input' || x.kind === 'hidden') };
+}
+// Delete a selection across blocks; the caret ends where it started.
+function deleteAcross() {
+  const p = acrossParts();
+  if (!p || !p.ok) { banner('Only text between paragraphs of one file can be deleted at once.'); return false; }
+  snapshot();
+  p.head.deleteContents();
+  p.tail.deleteContents();
+  const caretAt = p.sa.edit.childNodes.length;
+  for (const x of p.middle) { x.removed = true; if (x.el) x.el.remove(); }
+  while (p.sb.edit.firstChild) p.sa.edit.append(p.sb.edit.firstChild);
+  p.sb.removed = true;
+  if (p.sb.el) p.sb.el.remove();
+  p.sa.touched = true;
+  const r = document.createRange();
+  r.setStart(p.sa.edit, Math.min(caretAt, p.sa.edit.childNodes.length)); r.collapse(true);
+  p.sa.edit.focus({ preventScroll: true });
+  const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
+  markEdited();
+  return true;
+}
+
 function caretAtStart(editable) {
   const sel = getSelection();
   if (!sel.rangeCount || !sel.isCollapsed) return false;
@@ -1728,37 +2991,64 @@ function caretAtStart(editable) {
   return !frag.textContent.trim() && !frag.querySelector('.chip:not(.hidden)');
 }
 
-$('#cols').onclick = () => {
-  // This handler also restores the remembered mode before the first load().
-  // No document exists yet in that case, so defer any rerender.
-  if (DOC) commit();
-  const caret = DOC ? captureEditorState() : null;
-  const y = viewAnchor();
-  const two = document.body.classList.toggle('two');
+// The view of each paper (text size, width, columns, what the diff compares
+// with) is kept by its main file, so a paper opens as it was left.  The last
+// choice of each is also kept on its own, as the start for a paper opened for
+// the first time.
+const VIEW = {
+  key: () => DOC && DOC.path ? 'view:' + DOC.path : null,
+  read() {
+    try { return (this.key() && JSON.parse(localStorage.getItem(this.key()) || 'null')) || {}; } catch (e) { return {}; }
+  },
+  save(field, value) {
+    try {
+      localStorage.setItem(field, String(value));
+      const k = this.key();
+      if (k) localStorage.setItem(k, JSON.stringify({ ...this.read(), [field]: value }));
+    } catch (e) { /* storage unavailable */ }
+  },
+  // before a newly opened paper is first drawn: its own view, where it has one
+  apply() {
+    const v = this.read();
+    if (v.docsize) setTextSize(+v.docsize, false, false);
+    if (v.docwidth) setDocWidth(+v.docwidth);
+    if (v.cols) setCols(v.cols === '2', false);
+    if (v.diff) setDiffBase(v.diff);
+  },
+};
+// Two columns or one.  With redraw false only the mode is set (before the
+// first load, or before a newly opened paper is drawn).
+function setCols(two, redraw = true) {
+  redraw = redraw && !!DOC;
+  if (redraw) commit();
+  const caret = redraw ? captureEditorState() : null;
+  const y = redraw ? viewAnchor() : null;
+  document.body.classList.toggle('two', two);
   $('#cols').setAttribute('aria-pressed', String(two));
   $('#cols').title = (two ? 'Two columns: on (click for one column)' : 'One column (click for two columns)') + ' (Ctrl+Alt+W)';
-  if (DOC) toast(two ? 'Two columns' : 'One column');
-  if (DOC) {
+  if (redraw) {
+    toast(two ? 'Two columns' : 'One column');
     render();
     restoreEditorState(caret);
     restoreAnchor(y);
   }
-  try { localStorage.setItem('cols', two ? '2' : '1'); } catch (e) { /* storage unavailable */ }
-};
-try { if (localStorage.getItem('cols') === '2') $('#cols').click(); } catch (e) { /* storage unavailable */ }
+  VIEW.save('cols', two ? '2' : '1');
+}
+$('#cols').onclick = () => setCols(!document.body.classList.contains('two'));
+try { setCols(localStorage.getItem('cols') === '2', false); } catch (e) { /* storage unavailable */ }
 $('#help').onclick = () => { $('#helpbox').hidden = false; };
 // The paper's text size, apart from the interface (browser zoom changes both).
 const TEXT_SIZES = [12, 13, 14, 15, 16, 17, 18, 20, 22, 24, 27, 30];
-function setTextSize(px, say = true) {
+function setTextSize(px, say = true, keep = true) {
   px = TEXT_SIZES.includes(px) ? px : 16;
-  const y = DOC ? viewAnchor() : null;
+  const y = DOC && keep ? viewAnchor() : null;
   document.documentElement.style.setProperty('--doc-size', px + 'px');
   $('#textsize').textContent = Math.round(px / 16 * 100) + '%';
   $('#textsmaller').disabled = px === TEXT_SIZES[0];
   $('#textbigger').disabled = px === TEXT_SIZES[TEXT_SIZES.length - 1];
   if (y) restoreAnchor(y);
   if (say) toast('Text size ' + $('#textsize').textContent);
-  try { localStorage.setItem('docsize', String(px)); } catch (e) { /* storage unavailable */ }
+  VIEW.save('docsize', px);
 }
 const textSizeNow = () => parseInt(getComputedStyle(document.documentElement).getPropertyValue('--doc-size')) || 16;
 $('#textsmaller').onclick = () => setTextSize(TEXT_SIZES[Math.max(0, TEXT_SIZES.indexOf(textSizeNow()) - 1)]);
@@ -1797,13 +3087,172 @@ $('#helpclose').onclick = () => { $('#helpbox').hidden = true; };
 // saves sent together would carry the same base hash, and the second would
 // be refused as a conflict with the first).  The poller stays away while
 // SAVING, so that it never mistakes our own write for an outside change.
+// ---- new code: the page reloads itself, and comes back where it was
+//
+// The status the page polls carries the version of the editor's code. When
+// it changes (app.js, the styles, the server), the page waits for a pause
+// (nothing typed or clicked for a moment, no dialog, no save, not reading
+// aloud), keeps where it is in sessionStorage — the view, the cursor, the
+// source view, the find bar, the diff — and its unsaved edits (the draft),
+// reloads, and puts all of that back.
+const RESUME = {
+  code: null, pending: false, reloading: false, state: null, lastInput: 0,
+  read() {
+    try {
+      const s = JSON.parse(sessionStorage.getItem('pe-resume') || 'null');
+      sessionStorage.removeItem('pe-resume');
+      this.state = s && Date.now() - s.t < 120000 && s.paper === (DOC.path || DOC.main) ? s : null;
+    } catch (e) { this.state = null; }
+  },
+  apply() {
+    const s = this.state;
+    if (!s) return;
+    this.state = null;
+    requestAnimationFrame(async () => {
+      if (s.view) restoreAnchor(s.view);
+      if (s.caret) restoreEditorState(s.caret);
+      if (s.find) {
+        openFind(!!s.find.r);
+        $('#find-q').value = s.find.q; $('#find-r').value = s.find.r;
+        $('#find-re').checked = s.find.re; $('#find-case').checked = s.find.c; $('#find-word').checked = s.find.w;
+        $('#find-q').dispatchEvent(new Event('input'));
+      }
+      if (s.diff) { $('#diffbase').value = DIFF.want = s.diff; if (!DIFF.on) ACTIONS.diff(); }
+      if (s.src) {
+        await toggleSource(true);
+        await openSourceFile(s.src.name);
+        const ta = $('#srcta');
+        ta.setSelectionRange(s.src.a, s.src.b);
+        ta.scrollTop = s.src.top;
+        ta.dispatchEvent(new Event('scroll'));
+      }
+      toast('Updated to the new version of the editor', 'ok');
+    });
+  },
+};
+for (const ev of ['keydown', 'pointerdown', 'wheel', 'compositionstart']) addEventListener(ev, () => { RESUME.lastInput = Date.now(); }, { capture: true, passive: true });
+function codeVersion(code) {
+  if (RESUME.code === null) { RESUME.code = code; return; }
+  if (code === RESUME.code || RESUME.pending) return;
+  RESUME.pending = true;
+  reloadWhenQuiet();
+}
+function reloadWhenQuiet() {
+  const busy = Date.now() - RESUME.lastInput < 2500 || SAVING || topDialog() || !$('#drawer').hidden || !$('#palette').hidden ||
+    (typeof TTS !== 'undefined' && TTS.speaking());
+  if (busy) { setTimeout(reloadWhenQuiet, 1000); return; }
+  try {
+    flushSource();
+    commit();
+    writeDraft();
+    // the draft is the edits; this is where the page was
+    const ta = SRC.on && $('#srcta');
+    sessionStorage.setItem('pe-resume', JSON.stringify({
+      t: Date.now(), paper: DOC.path || DOC.main,
+      view: viewAnchor(), caret: captureEditorState(),
+      src: SRC.on ? { name: SRC.name, a: ta.selectionStart, b: ta.selectionEnd, top: ta.scrollTop } : null,
+      find: $('#findbar').hidden ? null : { q: $('#find-q').value, r: $('#find-r').value, re: $('#find-re').checked, c: $('#find-case').checked, w: $('#find-word').checked },
+      diff: DIFF.on ? $('#diffbase').value : null,
+    }));
+  } catch (e) { /* storage off: reload anyway, the draft offer still stands */ }
+  RESUME.reloading = true;
+  location.reload();
+}
+
+// ---- drafts: unsaved edits survive a crash or a closed tab
+//
+// Every few seconds (and when the page is hidden or closed) the texts of the
+// edited files, with the version on disk each started from, are kept in the
+// browser under the paper's path; a save clears them.  When the paper opens
+// with a draft left over, the page offers it back.  A file that changed on
+// disk since is restored against the version it started from, so that saving
+// it asks (Reload / Overwrite / Backup) instead of overwriting the other one.
+const DRAFT = { key: () => DOC && 'draft:' + (DOC.path || DOC.main), last: '' };
+function writeDraft() {
+  if (!DOC) return;
+  let files, extra;
+  try {
+    files = editedFiles();
+    extra = typeof SRC !== 'undefined' && SRC ? extraEdited() : [];
+  } catch (e) { return; }
+  try {
+    if (!files.length && !extra.length) { if (DRAFT.last) localStorage.removeItem(DRAFT.key()); DRAFT.last = ''; return; }
+    const d = { t: Date.now(), files: {}, extra: {} };
+    for (const n of files) d.files[n] = { text: FILES[n].text, base: FILES[n].base };
+    for (const n of extra) d.extra[n] = { text: SRC.extra[n].text, base: SRC.extra[n].base };
+    const s = JSON.stringify(d);
+    if (s.slice(s.indexOf(',')) === DRAFT.last) return;   // unchanged since the last one (time aside)
+    localStorage.setItem(DRAFT.key(), s);
+    DRAFT.last = s.slice(s.indexOf(','));
+  } catch (e) { /* storage full or off: the warning on leaving still stands */ }
+}
+setInterval(writeDraft, 3000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') writeDraft(); });
+addEventListener('pagehide', writeDraft);
+
+function checkDraft() {
+  // the draft left by the last session moves aside (…:kept) while it is on
+  // offer, so that drafts of this session never write over it
+  const key = DRAFT.key(), kept = key + ':kept';
+  let d = null;
+  try {
+    const left = localStorage.getItem(key);
+    if (left) { localStorage.setItem(kept, left); localStorage.removeItem(key); }
+    d = JSON.parse(localStorage.getItem(kept) || 'null');
+  } catch (e) { d = null; }
+  DRAFT.last = '';
+  if (!d || !d.files) return;
+  const files = Object.keys(d.files).filter((n) => !FILES[n] || FILES[n].text !== d.files[n].text);
+  const extra = Object.keys(d.extra || {});
+  if (!files.length && !extra.length) { try { localStorage.removeItem(kept); } catch (e) { /* none */ } return; }
+  const ago = Math.round((Date.now() - d.t) / 60000);
+  const when = ago < 1 ? 'less than a minute ago' : ago < 120 ? `${ago} min ago` : new Date(d.t).toLocaleString();
+  const changed = files.filter((n) => FILES[n] && d.files[n].base && FILES[n].base !== d.files[n].base);
+  // the page reloaded itself for new code a moment ago: its edits come back
+  // without asking (unless a file changed on disk meanwhile)
+  if (RESUME.state && !changed.length) {
+    restoreDraft(d, files, extra, true);
+    try { localStorage.removeItem(kept); } catch (e) { /* none */ }
+    return;
+  }
+  const n = files.length + extra.length;
+  banner(`Unsaved edits from ${when} were kept (${n} file${n === 1 ? '' : 's'}: ${[...files, ...extra].join(', ')})` +
+    (changed.length ? `; ${changed.join(', ')} changed on disk since, so saving will ask first.` : '.'), [
+    ['Restore', () => { restoreDraft(d, files, extra); try { localStorage.removeItem(kept); } catch (e) { /* none */ } }, 'Put these edits back as unsaved edits (Undo takes them out)'],
+    ['Discard', () => { try { localStorage.removeItem(kept); } catch (e) { /* none */ } $('#banner').hidden = true; toast('Kept edits discarded'); }, 'Forget these edits'],
+  ]);
+}
+async function restoreDraft(d, files, extra, quiet = false) {
+  snapshot();
+  for (const n of files) {
+    const f = d.files[n];
+    if (!FILES[n]) newFile(n, f.text);
+    else { FILES[n].text = f.text; if (f.base) FILES[n].base = f.base; }
+  }
+  for (const n of extra) {
+    const f = d.extra[n];
+    const r = await fetch('/api/srcfile?name=' + encodeURIComponent(n)).catch(() => null);
+    const cur = r && r.ok ? await r.json() : null;
+    SRC.extra[n] = { text: f.text, disk: cur ? cur.text : null, base: f.base };
+  }
+  $('#banner').hidden = true;
+  const y = viewAnchor();
+  render();
+  restoreAnchor(y);
+  markEdited();
+  writeDraft();
+  if (!quiet) toast('Unsaved edits restored: save to keep them', 'ok');
+}
+
 let SAVING = false, SAVE_AGAIN = false;
 async function save() {
   leaveDiff();
+  flushSource();
   if (SAVING) { SAVE_AGAIN = true; return; }
   SAVING = true;
   try {
     do { SAVE_AGAIN = false; await saveOnce(); } while (SAVE_AGAIN);
+    writeDraft();   // what was saved is no longer a draft
   } catch (e) {
     banner('Saving failed: ' + e.message + '. Your edits are still here.');
   } finally {
@@ -1812,6 +3261,7 @@ async function save() {
 }
 
 async function saveOnce() {
+  settleNewFileNames();
   commit(false);
   const rawTexts = Object.fromEntries(Object.entries(FILES).map(([name, f]) => [name, f.text]));
   let warnings = commit(true);
@@ -1824,7 +3274,15 @@ async function saveOnce() {
       warnings = [];
     }
   }
-  const files = Object.keys(FILES).filter((n) => FILES[n].text !== FILES[n].disk);
+  // a new file nothing reads (its section was put back, or undone) is not written
+  const reach = reachableFiles();
+  const files = Object.keys(FILES).filter((n) => FILES[n].text !== FILES[n].disk && (!isNewFile(n) || reach.has(n)));
+  if (!files.length && extraEdited().length) {
+    const n = await saveExtra(Date.now().toString(36) + Math.random().toString(36).slice(2, 8));
+    if (n) toast(`Saved ${n} file${n > 1 ? 's' : ''}`, 'ok');
+    markEdited();
+    return;
+  }
   if (!files.length) { setBuild({ state: 'idle', message: 'nothing to save' }); toast('Nothing to save'); return; }
   const conflicts = [];
   let saved = 0;
@@ -1839,10 +3297,12 @@ async function saveOnce() {
     if (r.status === 409) { conflicts.push([name, res.hash]); continue; }
     if (r.status === 403) { banner(`Saving ${name} failed: the editor was restarted and no longer accepts this page. Your edits are still here: copy them out, then reload the page.`); continue; }
     if (!r.ok) { banner(`Saving ${name} failed: ${res.error || r.status}. Your edits are still here.`); continue; }
+    if (FILES[name].base === null && DOC.disk_files && !DOC.disk_files.includes(name)) DOC.disk_files.push(name);
     FILES[name].disk = text;
     FILES[name].base = res.hash;
     saved++;
   }
+  saved += await saveExtra(batch);
   // the blocks take the source just saved (with or without the house rules,
   // as chosen), so that the page and the file agree; typing that happened
   // while the save was on its way stays an edit
@@ -1863,12 +3323,58 @@ async function saveOnce() {
   if (saved && !conflicts.length && /^Sav(ing|e) .*failed/.test($('#banner').textContent)) { $('#banner').hidden = true; clearTimeout(banner.t); }
   if (saved) { setBuild({ state: 'running', message: 'saved; rebuilding PDF' }); toast(`Saved ${saved} file${saved > 1 ? 's' : ''}; rebuilding the PDF`, 'ok'); }
   if (conflicts.length) toast(`${conflicts.length} file${conflicts.length > 1 ? 's' : ''} not saved: changed on disk`, 'error');
-  if (warnings.length && saved) banner('Saved. House rules: ' + [...new Set(warnings)].join('; '));
+  if (warnings.length && saved) houseBanner('Saved. ', warnings);
   if (conflicts.length) showExternal(conflicts, true);
   // a new \input names a file the page has not read yet
   if (saved && Object.values(FILES).some((f) => (f.segs || []).some((s) => s.kind === 'input' && !s.removed && !s.input))) {
     await load(true);
   }
+}
+
+// ---- one way to close: a × in the corner of every bar, panel and dialog
+//
+// The text "Close" buttons become a ×, labelled for screen readers; panels
+// that only closed with Esc or another button get one too.  Esc still closes
+// whatever is on top.
+function xButton(label, fn, title = 'Close (Esc)') {
+  const b = el('button', 'xclose');
+  b.type = 'button';
+  b.innerHTML = '<svg class="ic" aria-hidden="true"><use href="#i-close"/></svg>';
+  b.setAttribute('aria-label', label);
+  b.title = title;
+  if (fn) b.addEventListener('click', (e) => { e.stopPropagation(); fn(); });
+  return b;
+}
+function asX(id, label) {
+  const b = document.getElementById(id);
+  if (!b) return;
+  b.classList.add('xclose');
+  b.innerHTML = '<svg class="ic" aria-hidden="true"><use href="#i-close"/></svg>';
+  b.setAttribute('aria-label', label);
+  b.title = 'Close (Esc)';
+}
+for (const [id, label] of [['find-close', 'Close find and replace'], ['md-close', 'Close Paper'], ['files-close', 'Close Files'],
+  ['history-close', 'Close History'], ['keys-close', 'Close Keys'], ['fv-close', 'Close the figure viewer'], ['helpclose', 'Close Help']]) asX(id, label);
+{
+  // the find bar: its × right after its buttons, where the eye already is
+  const fx = $('#find-close');
+  if (fx && $('#find-all')) $('#find-all').after(fx);
+  // Help: its × in the corner, not at the end of a long text
+  const help = $('#helpbox'), x = $('#helpclose');
+  if (help && x) { help.prepend(x); x.classList.add('corner'); }
+  // the search palette (cite, ref, insert LaTeX…)
+  const ph = document.querySelector('#palette .pal-head');
+  if (ph) ph.append(xButton('Close the search', () => closePalette()));
+  // the LaTeX drawer: × is Cancel
+  const dh = document.querySelector('#drawer .drawer-head');
+  if (dh) dh.append(xButton('Close the LaTeX editor without applying', () => $('#drawer-cancel').click(), 'Cancel (Esc)'));
+  // files changed on disk: × is Later
+  const ex = $('#external');
+  if (ex) { const b = xButton('Decide later', () => $('#external-later').click(), 'Later (Esc)'); b.classList.add('corner'); ex.prepend(b); }
+  const ob = $('#openbox');
+  if (ob) { const b = xButton('Cancel opening', () => $('#open-cancel').click(), 'Cancel (Esc)'); b.classList.add('corner'); ob.prepend(b); }
+  const nb = $('#newbox');
+  if (nb) { const b = xButton('Cancel the new paper', () => $('#new-cancel').click(), 'Cancel (Esc)'); b.classList.add('corner'); nb.prepend(b); }
 }
 
 // Leaving the page (closing the tab, reloading) with unsaved edits asks first.
@@ -1879,7 +3385,7 @@ addEventListener('pagehide', () => {
   try { navigator.sendBeacon('/api/bye', JSON.stringify({ token: TOKEN, c: CLIENT_ID })); } catch (e) { /* none */ }
 });
 window.addEventListener('beforeunload', (e) => {
-  if (!DOC) return;
+  if (!DOC || RESUME.reloading) return;   // reloading for new code: the edits come back by themselves
   let edited = false;
   try { edited = editedFiles().length > 0; } catch (err) { edited = false; }
   if (edited || SAVING) { e.preventDefault(); e.returnValue = ''; }
@@ -1897,12 +3403,62 @@ function showWhere() {
   document.title = ($('#title').textContent || 'Crypto Paper Reviewer') + ' — ' + rel;
 }
 
-function banner(msg) {
+// A message under the bars: it closes by itself after a while, or with its ×;
+// `actions` ([label, fn, title]) add buttons, and a message with actions stays
+// until it is closed.
+function banner(msg, actions = []) {
   const b = $('#banner');
   b.textContent = msg;
+  for (const [label, fn, title] of actions) {
+    const a = el('button', 'banner-act', label);
+    if (title) a.title = title;
+    a.onclick = (e) => { e.stopPropagation(); fn(a); };
+    b.append(' ', a);
+  }
+  const x = el('button', 'banner-close xclose');
+  x.innerHTML = '<svg class="ic" aria-hidden="true"><use href="#i-close"/></svg>';
+  x.setAttribute('aria-label', 'Dismiss');
+  x.title = 'Dismiss (Esc)';
+  x.onclick = () => { b.hidden = true; clearTimeout(banner.t); };
+  b.append(x);
   b.hidden = false;
   clearTimeout(banner.t);
-  banner.t = setTimeout(() => { b.hidden = true; }, 12000);
+  if (!actions.length) banner.t = setTimeout(() => { b.hidden = true; }, 12000);
+}
+
+// House-rule warnings point at their blocks: every block of the paper where
+// the rule holds now, to step through; a warning can be silenced for good.
+function mutedHouseWarnings() { try { return JSON.parse(localStorage.getItem('mutedHouse') || '[]'); } catch (e) { return []; } }
+function houseWarningSegs(msg) {
+  const rules = (DOC.config || {}).house_rules;
+  return ORDER.filter((s) => s.el && !s.removed && ['para', 'quote', 'heading', 'figure', 'table'].includes(s.kind) &&
+    L.houseRules(segSource(s, [], null, false), rules)[1].includes(msg));
+}
+function houseBanner(prefix, warnings) {
+  const muted = mutedHouseWarnings();
+  const list = [...new Set(warnings)].filter((w) => !muted.includes(w));
+  if (!list.length) { if (prefix) toast(prefix.replace(/\.\s*$/, ''), 'ok'); return; }
+  const actions = [];
+  for (const w of list) {
+    const segs = houseWarningSegs(w);
+    if (!segs.length) continue;
+    let k = -1;
+    actions.push([`Show (${segs.length})`, (btn) => {
+      k = (k + 1) % segs.length;
+      const s = segs[k];
+      if (!s.el || !s.el.isConnected) return;
+      navPush();
+      s.el.scrollIntoView({ block: 'center', behavior: SMOOTH() });
+      s.el.classList.remove('house-flag'); void s.el.offsetWidth; s.el.classList.add('house-flag');
+      btn.textContent = `Next (${k + 1} of ${segs.length})`;
+    }, `Where: ${w} (${segs.length} block${segs.length === 1 ? '' : 's'}); click again for the next`]);
+  }
+  actions.push(['Don\'t warn again', () => {
+    try { localStorage.setItem('mutedHouse', JSON.stringify([...new Set([...muted, ...list])])); } catch (e) { /* storage unavailable */ }
+    $('#banner').hidden = true;
+    toast('These house-rule warnings are off (Keys… → Reset brings them back)', 'ok');
+  }, 'Stop showing these warnings in this browser']);
+  banner(prefix + 'House rules: ' + list.join('; '), actions);
 }
 
 function setBuild(b) {
@@ -2004,7 +3560,11 @@ async function poll() {
     if (s && !SAVING) {
       setBuild(s.build);
       if (s.boxes) markBoxes(s.boxes);
-      const busy = Date.now() - lastTyping < 4000 || !$('#drawer').hidden || PENDING_EXTERNAL || !$('#figview').hidden || DIFF_SHOWN || DIFF.on;
+      // not while you type, move or select in the text (a selection held for
+      // a while does not hold the reload off for ever)
+      const sel = getSelection();
+      const selecting = sel.rangeCount && !sel.isCollapsed && $('#doc').contains(sel.anchorNode) && Date.now() - RESUME.lastInput < 30000;
+      const busy = Date.now() - lastTyping < 4000 || Date.now() - RESUME.lastInput < 2500 || selecting || !$('#drawer').hidden || PENDING_EXTERNAL || !$('#figview').hidden || DIFF_SHOWN || DIFF.on;
       const changed = Object.keys(s.hashes).filter((n) => FILES[n] && s.hashes[n] !== FILES[n].base);
       if (!busy && (changed.length || s.auxver !== AUXVER)) {
         commit();
@@ -2019,6 +3579,7 @@ async function poll() {
       // the figures are cut after the PDF is built: show the new pictures
       // (an edited game, a table) when they are ready
       if (s.figver !== undefined && s.figver !== FIGVER) { FIGVER = s.figver; await refreshFigures(); }
+      if (s.code) codeVersion(s.code);
     }
   } catch (e) { /* server restarting */ }
   setTimeout(poll, 2000);
@@ -2037,6 +3598,8 @@ const TTS = (() => {
   let anchor = null;
   let generation = 0;
   let speakTimer = 0, stalls = 0;        // a browser-voice utterance that never finishes is noticed, not waited for
+  let keepAlive = 0;                     // Chrome stops a network voice after about 15 s unless nudged
+  let fetching = false, fails = 0;       // a clip on its way; server clips that failed in a row
   const clips = new Map();               // url -> Promise<{ src, span }>: fetched audio, ahead of time
   const synth = window.speechSynthesis;
   const voiceSel = $('#voice');
@@ -2050,6 +3613,9 @@ const TTS = (() => {
     $('#play').classList.toggle('reading', reading);
     $('#ttsbar').classList.toggle('active', speaking);
     $('#pause').querySelector('.label').textContent = paused ? 'Resume' : 'Pause';
+    if (navigator.mediaSession) {
+      try { navigator.mediaSession.playbackState = !speaking ? 'none' : paused ? 'paused' : 'playing'; } catch (e) { /* unsupported */ }
+    }
   }
   function voices() { return synth ? synth.getVoices() : []; }
   // Option values are "engine|voice"; engine "browser" is speechSynthesis,
@@ -2100,7 +3666,24 @@ const TTS = (() => {
       : (seg.kind === 'heading' || seg.kind === 'figure' || seg.kind === 'table') ? seg.edit : null;
     if (!node) return [];
     const map = speechMap(node);
-    return phraseBounds(map.text).map(([a, b]) => ({ seg, text: map.text.slice(a, b), range: () => rangeFor(map, a, b) }));
+    const bounds = phraseBounds(map.text);
+    return bounds.map(([a, b], k) => {
+      const text = map.text.slice(a, b);
+      // the range of the phrase in the block as it is drawn now: a map made
+      // when the queue was filled goes stale when the block is drawn again
+      // (a chip typeset, a figure refreshed), and the highlight went with it
+      const range = () => {
+        const live = seg.edit && seg.edit.isConnected ? seg.edit : null;
+        if (!live) return null;
+        const m = speechMap(live);
+        if (m.text === map.text) return rangeFor(m, a, b);
+        const bs = phraseBounds(m.text);
+        let j = bs.findIndex(([x, y]) => m.text.slice(x, y) === text);
+        if (j < 0) j = Math.min(k, bs.length - 1);
+        return j >= 0 ? rangeFor(m, bs[j][0], bs[j][1]) : null;
+      };
+      return { seg, text, range };
+    });
   }
   function build(from, to = ORDER.length) {
     const q = [];
@@ -2232,8 +3815,17 @@ const TTS = (() => {
     updateControls();
     next();
   }
+  // Whether sound is coming out now (or about to: a clip being fetched).
+  function audible() {
+    if (audio) return !audio.paused && !audio.done;
+    if (fetching) return true;
+    return !!(synth && (synth.speaking || synth.pending) && !synth.paused);
+  }
   function play() {
     if (speaking && paused) { pause(); return; }
+    // the page says Reading but nothing is heard: read the phrase again
+    // rather than ignore the key
+    if (speaking && cur && !audible()) { again(); return; }
     if (speaking) return;
     if (!voiceOk()) return;
     stop();
@@ -2279,6 +3871,9 @@ const TTS = (() => {
     generation++;
     clearTimeout(speakTimer);
     speakTimer = 0;
+    clearInterval(keepAlive);
+    keepAlive = 0;
+    fetching = false;
     if (synth) synth.cancel();
     if (audio) { audio.done = true; audio.pause(); audio = null; }
   }
@@ -2292,7 +3887,7 @@ const TTS = (() => {
     extend();
     if (idx >= queue.length) idx = Math.max(0, queue.length - 1);
     halt();
-    if (queue[idx]) { speaking = true; paused = false; next(); }
+    if (queue[idx]) { speaking = true; paused = false; next(); } else stop();
   }
 
   function highlight(seg) {
@@ -2330,19 +3925,38 @@ const TTS = (() => {
     heard = item.text;
     const [engine, name] = voiceSel.value.split(/\|(.*)/s);
     if (engine !== 'browser') {
+      fetching = true;
       clip(engine, name, item.text).then((c) => {
         if (run !== generation) return;
+        fetching = false;
+        fails = 0;
         const a = new Audio(c.src);
         audio = a;
         a.playbackRate = rate();
+        // paused or played by something else (a media key, a headset taken
+        // off, the system): the reader follows, so its buttons say what is heard
+        a.onpause = () => {
+          if (a.done || run !== generation || audio !== a || paused || a.ending) return;
+          if (a.currentTime >= (a.duration || Infinity) - 0.05) return;   // the end of the clip
+          paused = true; setState('Paused'); updateControls();
+        };
+        a.onplay = () => {
+          if (a.done || run !== generation || audio !== a || !paused) return;
+          paused = false; setState('Reading'); updateControls();
+        };
         const finish = () => {
           if (a.done || run !== generation) return;
-          a.done = true; a.pause();
+          a.done = true; a.ending = true; a.pause();
           if (audio === a) audio = null;
           next(run);
         };
         a.onended = finish;
-        a.onerror = () => { if (run === generation && !a.done) { banner('Speech failed for this voice; see the server output.'); stop(); } };
+        a.onerror = () => {
+          if (run !== generation || a.done) return;
+          a.done = true;
+          if (audio === a) audio = null;
+          skipOrStop(run, 'the audio could not be played');
+        };
         // the voice's own silence before and after the phrase is skipped:
         // phrases follow each other as in speech, not with a second between
         const span = c.span;
@@ -2364,8 +3978,8 @@ const TTS = (() => {
         });
       }, (e) => {
         if (run !== generation) return;
-        banner('Speech failed for this voice: ' + e.message);
-        stop();
+        fetching = false;
+        skipOrStop(run, e.message);
       });
       // the next phrases are fetched (and made by the server) meanwhile
       extend();
@@ -2384,12 +3998,16 @@ const TTS = (() => {
     // quiet; one that never started is skipped, and if two in a row never
     // start the engine is wedged, so reading stops with the reason instead of
     // failing silently.
-    let started = false;
-    const budget = 4000 + (item.text.split(/\s+/).length * 420) / rate();
+    let started = false, waited = 0;
+    const budget = 5000 + (item.text.split(/\s+/).length * 600) / rate();
     const arm = (ms) => {
       clearTimeout(speakTimer);
       speakTimer = setTimeout(() => {
         if (run !== generation || paused || u.done) return;
+        // still talking (a network voice sends no word events, and a phrase
+        // with maths read out is long): wait for it, up to three budgets,
+        // instead of cutting it off mid-sentence
+        if (started && synth.speaking && !synth.paused && (waited += ms) < budget * 3) { arm(2000); return; }
         u.done = true;                 // its own events, if any come late, are ignored
         synth.cancel();
         if (started) { stalls = 0; next(run); return; }
@@ -2405,6 +4023,8 @@ const TTS = (() => {
     u.onboundary = () => { if (run === generation) arm(4000); };   // quiet for this long mid-phrase: it is over
     u.onend = () => {
       if (u.done || run !== generation) return;    // a late event of a cancelled attempt
+      u.done = true;
+      clearInterval(keepAlive);
       stalls = 0;
       clearTimeout(speakTimer);
       speakTimer = 0;
@@ -2420,6 +4040,24 @@ const TTS = (() => {
     synth.speak(u);
     if (synth.paused) synth.resume();   // a wedged engine refuses to start speaking otherwise
     arm(budget + 4000);                 // for the utterance that never begins at all
+    // Chrome cuts a network voice (Google UK English …) off after about 15 s
+    // without an end event; a pause and resume every 10 s keeps it going
+    clearInterval(keepAlive);
+    if (v && v.localService === false) {
+      keepAlive = setInterval(() => {
+        if (run !== generation || paused || u.done) { clearInterval(keepAlive); return; }
+        if (synth.speaking && !synth.paused) { synth.pause(); synth.resume(); }
+      }, 10000);
+    }
+  }
+
+  // A server clip that failed: once is skipped (with a word), three in a row
+  // stop reading with the reason.
+  function skipOrStop(run, why) {
+    if (run !== generation) return;
+    if (++fails >= 3) { banner('Reading stopped: speech failed three times in a row (' + why + '); see the server output.'); stop(); fails = 0; return; }
+    toast('Skipped a sentence the voice could not read (' + why + ')', 'error');
+    next(run);
   }
 
   function clip(engine, voice, text) {
@@ -2475,7 +4113,7 @@ const TTS = (() => {
     speaking = false;
     paused = false;
     cur = null; curRange = null; stale = false;
-    stalls = 0;
+    stalls = 0; fails = 0;
     highlight(null);
     markPhrase(null);
     setState('Stopped');
@@ -2492,7 +4130,7 @@ const TTS = (() => {
     updateControls();
     if (paused) {
       if (audio) audio.pause();
-      else { generation++; clearTimeout(speakTimer); speakTimer = 0; if (synth) synth.cancel(); }
+      else { generation++; clearTimeout(speakTimer); speakTimer = 0; clearInterval(keepAlive); keepAlive = 0; fetching = false; if (synth) synth.cancel(); }
       return;
     }
     if (stale) refresh();
@@ -2507,7 +4145,12 @@ const TTS = (() => {
   // The page is drawn again (a save, a build): the voice goes on, and the
   // phrase is found again in the new page.
   function detach() {
-    if (!speaking || !cur) { reset(); return null; }
+    if (!speaking || !cur) {
+      // not reading: the place to start from (the last click) is kept
+      const a = anchor && anchor.seg.edit && anchor.seg.edit.isConnected && placeOf(anchor.seg, anchor.range);
+      reset();
+      return a ? { anchorOnly: a } : null;
+    }
     const p = phrases(cur.seg);
     const state = { file: cur.seg.file, src: cur.seg.src, text: cur.text, paused,
       at: ORDER.indexOf(cur.seg), k: Math.max(0, p.findIndex((x) => x.text === cur.text)) };
@@ -2518,7 +4161,17 @@ const TTS = (() => {
   }
   function reattach(state) {
     if (!state) return;
-    if (!locate(state)) { stop(); return; }
+    if (state.anchorOnly) { const p = rangeOfPlace(state.anchorOnly); if (p) anchor = p; return; }
+    if (!locate(state)) {
+      // the phrase is gone (rewritten, its block deleted): go on from the
+      // first block with text at or after where it was, rather than stop
+      let i = Math.min(state.at || 0, ORDER.length - 1);
+      while (i >= 0 && i < ORDER.length && !phrases(ORDER[i]).length) i++;
+      if (i < 0 || i >= ORDER.length) { stop(); return; }
+      startAt(i);
+      if (!queue.length) { stop(); return; }
+      heard = '';
+    }
     cur = queue[idx++];
     curRange = cur.range();
     highlight(cur.seg);
@@ -2532,7 +4185,7 @@ const TTS = (() => {
     return { text: queue[idx]?.text || null, index: idx };
   }
 
-  return { play, stop, pause, prev: () => jump(-1), next: () => jump(1), setAnchor, reset, detach, reattach,
+  return { play, stop, pause, speaking: () => speaking && !paused, hold: () => { if (speaking && !paused) pause(); }, prev: () => jump(-1), next: () => jump(1), setAnchor, reset, detach, reattach,
     edited, fillVoices, loadServerVoices, build, testPrepare, playHere, playSection, playTop };
 })();
 $('#play').onclick = () => TTS.play();
@@ -2544,6 +4197,57 @@ $('#readhere').onclick = () => TTS.playHere();
 $('#readsection').onclick = () => TTS.playSection();
 $('#readtop').onclick = () => TTS.playTop();
 $('#doc').addEventListener('input', () => TTS.edited());
+// media keys and the system's media controls drive the reader, so they cannot
+// pause the sound behind its back
+if (navigator.mediaSession) {
+  for (const [action, fn] of [['play', () => TTS.play()], ['pause', () => TTS.hold()], ['stop', () => TTS.stop()],
+    ['previoustrack', () => TTS.prev()], ['nexttrack', () => TTS.next()]]) {
+    try { navigator.mediaSession.setActionHandler(action, fn); } catch (e) { /* not supported */ }
+  }
+}
+
+// Pressing inside a selection starts a new selection (as in a text field),
+// not a drag of the selected text, which would move LaTeX around; dragging
+// text inside the paper is off altogether.
+$('#doc').addEventListener('mousedown', (e) => {
+  if (e.button !== 0 || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey || DIFF.on) return;
+  const sel = getSelection();
+  if (!sel.rangeCount || sel.isCollapsed) return;
+  const r = sel.getRangeAt(0);
+  const inside = [...r.getClientRects()].some((b) => e.clientX >= b.left && e.clientX <= b.right && e.clientY >= b.top && e.clientY <= b.bottom);
+  if (!inside) return;
+  const at = document.caretRangeFromPoint ? document.caretRangeFromPoint(e.clientX, e.clientY) : null;
+  if (at) { sel.removeAllRanges(); sel.addRange(at); }
+}, true);
+$('#doc').addEventListener('dragstart', (e) => {
+  if (e.target.closest && e.target.closest('#doc') && !e.target.closest('[draggable="true"]')) e.preventDefault();
+});
+
+// A place in the text that survives a redraw: the block (by its file and
+// index there, or its source) and the character offset in its text.
+function placeOf(seg, range) {
+  try {
+    const before = document.createRange();
+    before.selectNodeContents(seg.edit);
+    before.setEnd(range.startContainer, range.startOffset);
+    const segs = (FILES[seg.file] && FILES[seg.file].segs) || [];
+    return { file: seg.file, index: segs.indexOf(seg), src: seg.src, offset: before.toString().length };
+  } catch (e) { return null; }
+}
+function rangeOfPlace(p) {
+  const segs = (FILES[p.file] && FILES[p.file].segs) || [];
+  let seg = segs[p.index];
+  if (!seg || seg.src !== p.src) seg = segs.find((x) => x.src === p.src) || seg;
+  if (!seg || !seg.edit || !seg.edit.isConnected || seg.edit.tagName === 'TEXTAREA') return null;
+  const w = document.createTreeWalker(seg.edit, NodeFilter.SHOW_TEXT);
+  let n, off = p.offset;
+  while ((n = w.nextNode())) {
+    if (off <= n.data.length) { const r = document.createRange(); r.setStart(n, off); r.collapse(true); return { seg, range: r }; }
+    off -= n.data.length;
+  }
+  const r = document.createRange(); r.selectNodeContents(seg.edit); r.collapse(false);
+  return { seg, range: r };
+}
 
 function rangeContainsCaret(phrase, caret) {
   try {
@@ -2628,6 +4332,7 @@ function speechMap(root) {
       if (cl.contains('hidden')) continue;
       if (cl.contains('math')) { add(' ' + mathSpeech(n.dataset.src) + ' ', n, 'chip'); continue; }
       if (cl.contains('parbreak')) { add('. ', n, 'chip'); continue; }
+      if (n.dataset.say !== undefined) { add(' ' + n.dataset.say + ' ', n, 'chip'); continue; }
       if (cl.contains('cite') || cl.contains('src')) { add(' ', n, 'chip'); continue; }
       if (cl.contains('chip')) { add(n.textContent, n, 'chip'); continue; }
       walk(n);
@@ -2712,7 +4417,7 @@ function revealRange(range, smooth, force = false) {
   }
   const delta = r.top - top - (innerHeight - top) / 3;
   const glide = smooth && !far && Math.abs(delta) < innerHeight / 2;   // a short move glides, a long one jumps
-  window.scrollBy({ top: delta, behavior: glide ? 'smooth' : 'auto' });
+  window.scrollBy({ top: delta, behavior: glide ? SMOOTH() : 'auto' });
   // blocks just scrolled past are measured for real in the next frames and
   // push the range away: place it again until it stays (a few frames)
   if (!glide) {
@@ -2734,7 +4439,20 @@ const SPOKEN = { '≤': ' at most ', '≥': ' at least ', '=': ' equals ', '≠'
   '⊆': ' a subset of ', '∧': ' and ', '∨': ' or ', '¬': ' not ', '∘': ' composed with ', '…': ', and so on, ',
   '⋯': ', and so on, ', '⇒': ' implies ', '⟹': ' implies ', '⟺': ' if and only if ', '↔': ' swapped with ',
   '≈': ' approximately ', '∞': ' infinity ', '∀': ' for all ', '∃': ' there is ', ':': ' such that ',
-  '∅': ' the empty set ', '⊕': ' x-or ', '$': ' ', '!': ' factorial ' };
+  '∅': ' the empty set ', '⊕': ' x-or ', '$': ' \u0001 ', '!': ' factorial ', '∕': ' over ', '∖': ' minus ',
+  '≔': ' is defined as ', '≡': ' is equivalent to ', '⊂': ' a subset of ', '⊇': ' a superset of ', '±': ' plus or minus ',
+  '·': ' times ', '∥': ' concatenated with ', '‖': ' concatenated with ', '⌊': ' the floor of ', '⌋': ' ', '⌈': ' the ceiling of ', '⌉': ' ',
+  '⟨': ' ', '⟩': ' ', '≪': ' much less than ', '≫': ' much greater than ', '∼': ' distributed as ', '≃': ' approximately ' };
+// letters a voice would otherwise spell out, or skip
+const GREEK = { α: 'alpha', β: 'beta', γ: 'gamma', δ: 'delta', ε: 'epsilon', ϵ: 'epsilon', ζ: 'zeta', η: 'eta', θ: 'theta',
+  ϑ: 'theta', ι: 'iota', κ: 'kappa', λ: 'lambda', μ: 'mu', ν: 'nu', ξ: 'xi', π: 'pi', ϖ: 'pi', ρ: 'rho', ϱ: 'rho', σ: 'sigma',
+  ς: 'sigma', τ: 'tau', υ: 'upsilon', φ: 'phi', ϕ: 'phi', χ: 'chi', ψ: 'psi', ω: 'omega', Γ: 'Gamma', Δ: 'Delta', Θ: 'Theta',
+  Λ: 'Lambda', Ξ: 'Xi', Π: 'Pi', Σ: 'Sigma', Υ: 'Upsilon', Φ: 'Phi', Ψ: 'Psi', Ω: 'Omega', ℓ: 'ell', '∂': 'partial', '∇': 'nabla' };
+const INVISIBLE_RE = /[\u2061-\u2064\u200b-\u200d\u2060\ufeff]/g;
+const FENCES = new Set(['|', '∣', '‖', '∥']);
+function spokenChars(t) {
+  return [...t].map((c) => GREEK[c] !== undefined ? ' ' + GREEK[c] + ' ' : SPOKEN[c] !== undefined ? SPOKEN[c] : c).join('');
+}
 
 function mathSpeech(src) {
   let [body] = mathBody(src);
@@ -2743,17 +4461,36 @@ function mathSpeech(src) {
   try { html = katex.renderToString(body, { output: 'mathml', throwOnError: false, macros: katexMacros(), strict: false }); }
   catch (e) { return ''; }
   const m = new DOMParser().parseFromString(html, 'text/html').querySelector('math');
-  return m ? speak(m).replace(/\s+/g, ' ').trim() : '';
+  if (!m) return '';
+  return speak(m)
+    .replace(/\bgets\s+\u0001/g, 'is sampled from')       // x \sample S: x ←$ S
+    .replace(/\u0001/g, ' ')
+    .replace(/\bPr\b(?!\s+over\b)/g, 'the probability that')
+    .replace(/\bsuch that\s+equals\b/g, 'is defined as')
+    .replace(/\s+([,.])/g, '$1')
+    .replace(/\s+/g, ' ').trim();
 }
 
 function speak(e) {
   const tag = e.tagName.toLowerCase();
   const kids = [...e.children];
-  const txt = () => (e.textContent || '').normalize('NFKC');
+  // NFKC keeps Greek letters and ℓ apart from Latin ones (ℓ would become l)
+  const txt = () => (e.textContent || '').replace(INVISIBLE_RE, '').replace(/[^ℓ]+/g, (s) => s.normalize('NFKC'));
   switch (tag) {
     case 'annotation': return '';
-    case 'mi': case 'mn': case 'mtext': { const t = txt(); return t.length > 1 && tag === 'mi' ? ' ' + t + ' ' : t; }
-    case 'mo': { const t = txt(); return SPOKEN[t] !== undefined ? SPOKEN[t] : ' ' + t + ' '; }
+    case 'mi': case 'mn': case 'mtext': {
+      const t = txt();
+      if (!t) return '';
+      if (tag === 'mtext') return ' ' + t + ' ';
+      // a single sign set as an identifier (KaTeX writes / and | so): spoken as a sign
+      if ([...t].length === 1) return GREEK[t] !== undefined || SPOKEN[t] !== undefined ? spokenChars(t) : (tag === 'mi' ? ' ' + t + ' ' : t);
+      return ' ' + spokenChars(t) + ' ';
+    }
+    case 'mo': {
+      const t = txt();
+      if (!t) return '';
+      return SPOKEN[t] !== undefined ? SPOKEN[t] : ' ' + spokenChars(t) + ' ';
+    }
     case 'mfrac': return ` ${speak(kids[0])} over ${speak(kids[1])} `;
     case 'msqrt': return ` the square root of ${kids.map(speak).join('')} `;
     case 'msub': case 'munder': {
@@ -2774,7 +4511,34 @@ function speak(e) {
     }
     case 'msubsup': case 'munderover': return ` ${speak(kids[0])} from ${speak(kids[1])} to ${speak(kids[2])} `;
     case 'mtable': return kids.map(speak).join('. ');
-    default: return kids.map(speak).join('');
+    default: {
+      // |X| (the size of a set), ‖x‖: a fence on each side of a group
+      const sign = (k) => k && /^m[oi]$/.test(k.tagName.toLowerCase()) ? (k.textContent || '').replace(INVISIBLE_RE, '') : null;
+      if (kids.length >= 3 && FENCES.has(sign(kids[0])) && sign(kids[0]) === sign(kids[kids.length - 1]))
+        return ` the size of ${kids.slice(1, -1).map(speak).join('')} `;
+      // the same in a flat row: |H(X)| <= |X|/2; \mid (spaced as a relation) is "given"
+      const bar = (k) => FENCES.has(sign(k)) && !(k.getAttribute('lspace') || '').startsWith('0.27');
+      // \mathrm{eval}, \mathsf{Coll}: KaTeX writes a letter per identifier; they are one word
+      const letter = (k) => k && k.tagName.toLowerCase() === 'mi' && k.getAttribute('mathvariant') && /^[A-Za-z]$/.test(k.textContent || '');
+      let out = '';
+      for (let i = 0; i < kids.length; i++) {
+        if (letter(kids[i]) && letter(kids[i + 1]) && kids[i].getAttribute('mathvariant') === kids[i + 1].getAttribute('mathvariant')) {
+          let w = '';
+          const v = kids[i].getAttribute('mathvariant');
+          while (letter(kids[i]) && kids[i].getAttribute('mathvariant') === v) w += kids[i++].textContent;
+          i--;
+          out += ' ' + w + ' ';
+          continue;
+        }
+        if (bar(kids[i])) {
+          let j = i + 1;
+          while (j < kids.length && !(bar(kids[j]) && sign(kids[j]) === sign(kids[i]))) j++;
+          if (j < kids.length && j > i + 1) { out += ` the size of ${kids.slice(i + 1, j).map(speak).join('')} `; i = j; continue; }
+        }
+        out += speak(kids[i]);
+      }
+      return out;
+    }
   }
 }
 
@@ -2950,10 +4714,85 @@ function restore(from, to) {
   while (texts && Object.keys(texts).every((n) => texts[n] === cur[n])) texts = from.pop();
   if (!texts) return;
   to.push(cur);
-  for (const [n, t] of Object.entries(texts)) if (FILES[n]) FILES[n].text = t;
+  // where the texts differ, and the text of the block there, to put the
+  // caret at the change afterwards
+  const change = textChange(cur, texts);
+  // a file made since (a section moved to its own file) is left unread; one
+  // made before and dropped since comes back, still to be written
+  for (const [n, t] of Object.entries(texts)) if (FILES[n]) FILES[n].text = t; else newFile(n, t);
   const y = viewAnchor();
   render();
   restoreAnchor(y);
+  if (SRC.on) { refreshSourceView(); return; }
+  caretAtChange(change);
+}
+
+// The first change between two sets of file texts: the file, where it
+// starts and ends in the new text, and the text the block there showed.
+function textChange(oldTexts, newTexts) {
+  const files = [...new Set([...ORDER.map((s) => s.file), ...Object.keys(newTexts)])];
+  for (const n of files) {
+    const a = oldTexts[n], b = newTexts[n];
+    if (a === undefined || b === undefined || a === b) continue;
+    let p = 0;
+    while (p < a.length && p < b.length && a[p] === b[p]) p++;
+    let s = 0;
+    while (s < a.length - p && s < b.length - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
+    const seg = segAtOffset(n, p);
+    return { file: n, start: p, end: b.length - s, was: seg && seg.edit && seg.edit.isContentEditable ? seg.edit.textContent : null };
+  }
+  return null;
+}
+function segAtOffset(name, offset) {
+  let at = 0;
+  for (const s of (FILES[name] && FILES[name].segs) || []) {
+    if (s.removed) continue;
+    const len = s.src.length;
+    if (offset < at + len || (offset === at + len && s.kind !== 'gap')) return s.kind === 'gap' ? null : s;
+    at += len;
+  }
+  return null;
+}
+
+// After an undo or redo: the caret goes where the text changed (the end of
+// the changed part, in the first block drawn again), and that is shown.
+function caretAtChange(change) {
+  if (!change || !FILES[change.file]) return;
+  // the block at the end of the change (the start, if that is a blank line)
+  let seg = segAtOffset(change.file, Math.max(change.start, change.end - 1)) || segAtOffset(change.file, change.start);
+  if (!seg || !seg.el) return;
+  if (!seg.edit || !seg.edit.isContentEditable) { revealChanged(seg.el.getBoundingClientRect(), seg); return; }
+  const segs = FILES[seg.file].segs;
+  const index = segs.indexOf(seg);
+  const now = seg.edit.textContent;
+  const was = change.was;
+  let offset = now.length;
+  if (typeof was === 'string') {
+    let a = 0;
+    while (a < now.length && a < was.length && now[a] === was[a]) a++;
+    let b = 0;
+    while (b < now.length - a && b < was.length - a && now[now.length - 1 - b] === was[was.length - 1 - b]) b++;
+    offset = now.length - b;
+  }
+  restoreEditorState({ file: seg.file, index, src: seg.src, offset });
+  const sel = getSelection();
+  if (!sel.rangeCount) return;
+  const r = sel.getRangeAt(0).getBoundingClientRect();
+  revealChanged(r.height ? r : seg.el.getBoundingClientRect(), seg);
+}
+// Bring the place of an undone change into view only when it is not in view;
+// a third of the way down, at once (a glide would fight the held view).
+function revealChanged(rect, seg) {
+  const top = chromeBottom();
+  if (rect.top >= top + 8 && rect.bottom <= innerHeight - 24) return;
+  if (anchorHold) anchorHold();
+  if (!rect.height && !rect.top) { seg.el.scrollIntoView({ block: 'center' }); return; }
+  // just out of view: the least scroll that shows it (as an editor does);
+  // far away: a third of the way down
+  // the same edges as the test above: a caret just inside them is not nudged
+  const up = rect.top - (top + 8), down = rect.bottom - (innerHeight - 24);
+  const near = rect.bottom > top - innerHeight && rect.top < innerHeight * 2;
+  window.scrollBy(0, near ? (up < 0 ? up : down) : rect.top - top - (innerHeight - top) / 3);
 }
 const undo = () => restore(HISTORY.undo, HISTORY.redo);
 const redo = () => restore(HISTORY.redo, HISTORY.undo);
@@ -2985,7 +4824,7 @@ function wrap(prefix, tag) {
   }
   snapshot();
   // already formatted that way: remove the formatting from the selection
-  const sel = tag === 'strong' ? 'strong, b' : 'em, i';
+  const sel = tag === 'strong' ? 'strong, b' : tag === 'code' ? 'code' : 'em, i';
   const anc = r.commonAncestorContainer;
   const root = (anc.nodeType === 1 ? anc : anc.parentElement).closest('[contenteditable="true"]');
   const fmt = (anc.nodeType === 1 ? anc : anc.parentElement).closest(sel);
@@ -3050,10 +4889,17 @@ function spansEditables(r = selRange()) {
   const endNode = r.endContainer.nodeType === 1 ? r.endContainer : r.endContainer.parentElement;
   return !a || !endNode || endNode.closest('[contenteditable=true]') !== a;
 }
-const ACROSS = 'Select inside one paragraph (or heading) to change it: a selection across blocks is only for copying.';
+const ACROSS = 'Select inside one paragraph (or heading) for that: a selection across paragraphs can be copied, cut, deleted or typed over.';
 document.addEventListener('beforeinput', (e) => {
   if (e.target.closest && e.target.closest('#doc') && e.target.isContentEditable && spansEditables()) {
     e.preventDefault();
+    // typing (or deleting) over blocks of text joins them first
+    const t = e.inputType || '';
+    const across = acrossParts();
+    if (across && across.ok && (t === 'insertText' || t === 'insertReplacementText' || /^delete/.test(t)) && t !== 'deleteByCut') {
+      if (deleteAcross() && /^insert/.test(t) && e.data) document.execCommand('insertText', false, e.data);
+      return;
+    }
     banner(ACROSS);
   }
 }, true);
@@ -3083,6 +4929,7 @@ function wrapLiteral(open, close) {
   return true;
 }
 
+const TEXT_CHAR_CMD = /^\\text(?:backslash|asciitilde|asciicircum|less|greater)\b/;
 // The LaTeX of a piece of the page taken as maths: typed text as it is (an
 // x^2 typed as text is maths x^2), formulas without their dollars.
 function mathSourceOf(node, top = true) {
@@ -3093,6 +4940,10 @@ function mathSourceOf(node, top = true) {
     if (n.nodeType === 3) { out += escapeIn(n.data.replace(/ /g, '~'), '%#&$'); continue; }
     if (n.nodeType !== 1) continue;
     if (n.classList.contains('math')) { out += mathBody(n.dataset.src)[0]; continue; }
+    // a character typed as text and saved as \textbackslash{}, \textless{}…:
+    // in maths it is that character again, as when just typed (\G1 typed,
+    // saved and then made maths is $\G1$, not $\textbackslash{}G1$)
+    if (n.classList.contains('char') && TEXT_CHAR_CMD.test(n.dataset.src || '')) { out += n.textContent; continue; }
     if (n.dataset.src !== undefined) { out += n.classList.contains('nl') ? ' ' : n.dataset.src; continue; }
     out += mathSourceOf(n, false);
   }
@@ -3235,6 +5086,16 @@ function headingAtCaret(level) {
     : [chip('parbreak', '\n\n', ''), chip('src', src, src), chip('parbreak', '\n\n', '')];
   if (!insertBreak(nodes)) return;
   structural(() => PLACEHOLDER);
+  // one section per file: a section split off inside a section file goes to
+  // a file of its own, read right after that one
+  if (HEADING_RANK[level] <= SECTION_RANK_MAX && seg.file !== DOC.main && seg.file.startsWith(sectionsDir())) {
+    const fresh = (FILES[seg.file].segs || []).find((s) => s.kind === 'heading' && !s.removed && L.headingParts(s.src) && plainOfLatex(L.headingParts(s.src).title) === PLACEHOLDER);
+    if (fresh && FILES[seg.file].segs.indexOf(fresh) > 0) {
+      let name;
+      structural(() => { name = extractSection(fresh); return PLACEHOLDER; }, false);
+      if (name) toast(`The new section has its own file, ${name} (named after its title when you save)`, 'ok');
+    }
+  }
 }
 
 function splitSectionAtCaret() {
@@ -3281,6 +5142,42 @@ function neighbours(r) {
   return { before, after };
 }
 
+// A footnote at the caret: the selection (if any) becomes its text
+function insertFootnote() {
+  const r = selectionInOneEditable();
+  const text = r ? ser(r.cloneContents()) : '';
+  if (r) { const s = getSelection(); s.removeAllRanges(); s.addRange(r); }
+  insertLatex('\\footnote{' + text + '}', 'Footnote');
+  if (!text) { const ta = $('#drawer-src'); if (ta) { ta.setSelectionRange(10, 10); ta.focus(); } }
+}
+// A list at the caret, edited in place: the selected lines (or one line of
+// placeholder text) become its items
+function insertList(env) {
+  const r = selRange();
+  if (!editableAt(r)) { toast('Put the cursor in the text first', 'error'); return; }
+  const one = selectionInOneEditable();
+  if (!r.collapsed && !one) { banner('Select text inside one paragraph to make a list of it.'); return; }
+  const text = one ? ser(one.cloneContents()).trim() : '';
+  if (one) { const s = getSelection(); s.removeAllRanges(); s.addRange(one); }
+  const items = (text ? text.split(/\n+|(?<=[.;])\s+/) : ['text']).filter((x) => x.trim());
+  // no newline after \end: the line break after it, if any, is already there
+  // (a second one would make a blank line, a paragraph break)
+  const src = `\n\\begin{${env}}\n` + items.map((x) => '  \\item ' + x.trim()).join('\n') + `\n\\end{${env}}`;
+  const frag = document.createDocumentFragment();
+  renderTokens(L.tokenize(src), frag, { env: [], lists: [], counters: {}, heads: {} });
+  const nodes = [...frag.childNodes];
+  if (!insertNodes(nodes)) return;
+  // the first item's text is selected, ready to be typed over
+  const first = nodes.find((n) => n.nodeType === 1 && n.classList.contains('item'));
+  const t = first && first.nextSibling;
+  if (t && t.nodeType === 3) {
+    const lead = t.data.length - t.data.trimStart().length;
+    const end = t.data.indexOf('\n', lead);
+    const sel = document.createRange(); sel.setStart(t, lead); sel.setEnd(t, end < 0 ? t.data.length : end);
+    const s = getSelection(); s.removeAllRanges(); s.addRange(sel);
+  }
+}
+
 function insertLatex(src, title) {
   const c = chip('src', src, src);
   // the starting text is an example: selected, so typing replaces it
@@ -3289,13 +5186,41 @@ function insertLatex(src, title) {
 
 // C-d: delete the current line.  M-w: cut the region, or the line.
 // C-p: duplicate the region, or the line.  C-+: word, line, paragraph.
+// (copy and cut go through the page's own copy and cut, so the clipboard
+// gets the LaTeX as well as the text, and a cut across paragraphs joins them)
 async function cutRegionOrLine() {
   const s = getSelection();
   if (s.isCollapsed) selectLine();
+  if (document.execCommand('cut')) return;
   snapshot();
   try { await navigator.clipboard.writeText(s.toString()); } catch (e) { /* clipboard refused */ }
   selRange().deleteContents();
   markEditedSoon();
+}
+// C-w: copy the region, or the line
+function copyRegionOrLine() {
+  const s = getSelection();
+  const line = s.isCollapsed;
+  if (line) selectLine();
+  document.execCommand('copy');
+  if (line) s.collapseToEnd();
+  toast(line ? 'Line copied' : 'Copied');
+}
+// C-q: delete the character before the caret
+function deleteBackwardChar() { document.execCommand('delete'); }
+// C-Backspace: delete back to the previous space (not only the word)
+function deleteToSpace() {
+  const s = getSelection();
+  if (!s.rangeCount) return;
+  if (!s.isCollapsed) { document.execCommand('delete'); return; }
+  const n = s.focusNode, o = s.focusOffset;
+  if (n.nodeType !== 3 || o === 0) { s.modify('extend', 'backward', 'word'); document.execCommand('delete'); return; }
+  let i = o;
+  while (i > 0 && /\s/.test(n.data[i - 1])) i--;          // the spaces just before, then the word
+  while (i > 0 && !/\s/.test(n.data[i - 1])) i--;
+  const r = document.createRange(); r.setStart(n, i); r.setEnd(n, o);
+  s.removeAllRanges(); s.addRange(r);
+  document.execCommand('delete');
 }
 function deleteLine() { snapshot(); selectLine(); selRange().deleteContents(); markEditedSoon(); }
 function duplicate() {
@@ -3357,9 +5282,12 @@ function keyName(e) {
 }
 
 function closeCurrentMenu() {
+  if (SRC.on && $('#palette').hidden && $('#external').hidden) { toggleSource(false); return; }
   if (!$('#external').hidden) { $('#external-later').click(); return; }
   if (!$('#openbox').hidden) { $('#open-cancel').click(); return; }
+  if (!$('#newbox').hidden) { $('#new-cancel').click(); return; }
   if (!$('#historybox').hidden) { $('#historybox').hidden = true; return; }
+  if (!$('#filesbox').hidden) { closeFiles(); return; }
   if (!$('#palette').hidden) { closePalette(); return; }
   if (!$('#keysbox').hidden) { RECORDING = null; $('#keysbox').hidden = true; return; }
   if (!$('#paperbox').hidden) { $('#md-close').click(); return; }
@@ -3367,7 +5295,8 @@ function closeCurrentMenu() {
   if (!$('#drawer').hidden) { closeDrawer(); return; }
   if (!$('#findbar').hidden) { closeFind(); return; }
   if (!$('#helpbox').hidden) { $('#helpbox').hidden = true; return; }
-  if (!$('#menu').hidden) $('#menu').hidden = true;
+  if (!$('#menu').hidden) { $('#menu').hidden = true; return; }
+  if (!$('#banner').hidden) { $('#banner').hidden = true; clearTimeout(banner.t); }
 }
 
 // Bindings available anywhere on the page.
@@ -3379,6 +5308,8 @@ const GLOBAL_KEYS = {
   'C-M-ArrowLeft': () => TTS.prev(), 'C-M-ArrowRight': () => TTS.next(),
   'Escape': closeCurrentMenu,
 };
+// Bindings in the text of the source view (filled from ACTION_DEFS).
+const SOURCE_KEYS = {};
 // Bindings inside the text of the paper.
 const TEXT_KEYS = {
   'C-b': () => wrap('\\textbf{', 'strong'),
@@ -3405,7 +5336,16 @@ const TEXT_KEYS = {
 document.addEventListener('keydown', (e) => {
   const k = keyName(e);
   const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) && !e.target.closest('.seg');
-  if (inField && !['C-s', 'C-S', 'C-f', 'Escape'].includes(k)) return;   // a field keeps its own keys (undo)
+  if (inField && !['C-s', 'C-S', 'C-f', 'Escape'].includes(k)) {
+    // the source view's text keeps its own keys too, but switches back
+    if (SRC.on && e.target.id === 'srcta' && (USER_KEYS.source || ['C-M-e']).includes(k)) { e.preventDefault(); toggleSource(false); }
+    // and opens the file in the user's own editor
+    if (SRC.on && e.target.id === 'srcta' && (USER_KEYS.external || ['C-M-z']).includes(k)) { e.preventDefault(); openExternalHere(); }
+    return;
+  }
+  if (SRC.on && k === 'C-f') return;   // the browser's own find, in the source text
+  // the figure viewer and the drawer keep their arrows (Alt+Up moves a game statement)
+  if (GLOBAL_KEYS[k] && /Arrow|Page/.test(k) && e.target.closest && e.target.closest('#figview, #drawer, #palette')) return;
   if (GLOBAL_KEYS[k]) { e.preventDefault(); GLOBAL_KEYS[k](); return; }
   const inText = e.target.isContentEditable && segOf(e.target);
   if (!inText) return;
@@ -3413,7 +5353,11 @@ document.addEventListener('keydown', (e) => {
   if (spansEditables() && ((e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) ||
       ['Enter', 'Backspace', 'Delete', 'Tab'].includes(e.key))) {
     e.preventDefault();
-    banner(ACROSS);
+    // across blocks: they are joined, then the key does what it does at the caret
+    if (e.key === 'Tab' || e.key === '$' || WRAP_PAIRS[e.key] || !acrossParts()) { banner(ACROSS); return; }
+    if (!deleteAcross()) return;
+    if (e.key.length === 1) document.execCommand('insertText', false, e.key);
+    else if (e.key === 'Enter') insertBreak();
     return;
   }
   // a bracket or quote typed over a selection wraps it instead of replacing it
@@ -3478,7 +5422,11 @@ document.addEventListener('keydown', (e) => {
   if (!$('#external').hidden && 'robl'.includes(e.key)) {
     e.preventDefault();
     ({ r: $('#external-reload'), o: $('#external-overwrite'), b: $('#external-backup'), l: $('#external-later') })[e.key].click();
-  } else if (!$('#openbox').hidden && e.key === 'Enter') {
+  } else if (!$('#openbox').hidden && /^[1-9]$/.test(e.key) && document.querySelectorAll('#open-recent .open-paper')[+e.key - 1]) {
+    // like an editor's start page: the number of a recent paper opens it
+    e.preventDefault(); document.querySelectorAll('#open-recent .open-paper')[+e.key - 1].click();
+  } else if (!$('#openbox').hidden && e.key === 'Enter' && !e.target.closest('button') && !$('#open-mainrow').hidden) {
+    // (Enter on a button presses that button: a recent paper, a folder)
     e.preventDefault(); $('#open-confirm').click();
   } else if (!$('#figview').hidden && /^[1-6]$/.test(e.key)) {
     // only the tabs on show count (the Games and Cells tabs hide when not used)
@@ -3975,6 +5923,51 @@ function setColourBlind(on) {
   setColourBlind(on);
 }
 
+// The width of the paper in one column (the slider in the ☰ menu).
+function setDocWidth(em, say = false) {
+  em = Math.max(30, Math.min(100, Math.round(em)));
+  document.documentElement.style.setProperty('--doc-width', em + 'em');
+  $('#docwidth').value = em;
+  $('#docwidthval').textContent = em + 'em';
+  VIEW.save('docwidth', em);
+  if (say) toast('Width ' + em + 'em');
+}
+$('#docwidth').addEventListener('input', () => setDocWidth(+$('#docwidth').value));
+try { const w = parseFloat(localStorage.getItem('docwidth')); if (w) setDocWidth(w); } catch (e) { /* storage unavailable */ }
+
+// The structure view: environment starts and ends, and labels, as small tags.
+// The tags take room above and inside the blocks: the view stays on the
+// caret's line when it is on screen, otherwise on the block at the top.
+function setDetails(on) {
+  const sel = getSelection();
+  let caret = null;
+  if (sel.rangeCount && $('#doc').contains(sel.anchorNode)) {
+    const r = sel.getRangeAt(0).cloneRange(); r.collapse(true);
+    const rect = r.getClientRects()[0] || (sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement).getBoundingClientRect();
+    if (rect && rect.top >= chromeBottom() && rect.bottom <= innerHeight) caret = { r, top: rect.top };
+  }
+  const anchor = caret ? null : viewAnchor();
+  document.body.classList.toggle('details', !!on);
+  if (caret) {
+    const rect = caret.r.getClientRects()[0] || (sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement).getBoundingClientRect();
+    if (rect) window.scrollBy(0, rect.top - caret.top);
+  } else if (anchor && anchor.list) restoreAnchor(anchor);
+  for (const id of ['detailsbtn', 'structbtn']) {
+    const b = document.getElementById(id);
+    if (b) { b.setAttribute('aria-pressed', on ? 'true' : 'false'); b.classList.toggle('pressed', !!on); }
+  }
+  try { localStorage.setItem('details', on ? '1' : ''); } catch (e) { /* storage unavailable */ }
+}
+{
+  const b = document.getElementById('detailsbtn');
+  const flip = () => { const on = !document.body.classList.contains('details'); setDetails(on); toast(on ? 'Structure shown' : 'Structure hidden'); };
+  if (b) b.addEventListener('click', flip);
+  document.getElementById('structbtn').addEventListener('click', flip);
+  let on = false;
+  try { on = localStorage.getItem('details') === '1'; } catch (e) { /* storage unavailable */ }
+  setDetails(on);
+}
+
 // -------------------------------------------------------------- toolbar
 
 const ACTIONS = {
@@ -3991,13 +5984,17 @@ const ACTIONS = {
   splitsection: splitSectionAtCaret,
   newpara: () => insertBreak(),
   find: () => openFind(false),
+  mono: () => wrap('\\texttt{', 'code'),
+  footnote: insertFootnote,
+  itemize: () => insertList('itemize'),
+  enumerate: () => insertList('enumerate'),
   undo, redo,
 };
 // Edits from the toolbar (and their keys) say what they did, or that there
 // was nothing to do: the page changing is the only other sign.
 let DOC_CHANGES = 0;
 new MutationObserver(() => { DOC_CHANGES++; }).observe($('#doc'), { childList: true, subtree: true, characterData: true });
-const SAID = { bold: 'Bold', emph: 'Emphasis', math: 'Inline maths', display: 'Displayed equation', section: 'Section heading',
+const SAID = { mono: 'Typewriter', itemize: 'Bulleted list', enumerate: 'Numbered list', bold: 'Bold', emph: 'Emphasis', math: 'Inline maths', display: 'Displayed equation', section: 'Section heading',
   subsection: 'Subsection heading', paragraph: 'Paragraph heading', splitsection: 'Section split', newpara: 'New paragraph',
   undo: 'Undone', redo: 'Redone' };
 const NOTHING = { undo: 'Nothing to undo', redo: 'Nothing to redo' };
@@ -4288,20 +6285,72 @@ function lcs(a, b, eq) {
   return ops;
 }
 
-function renderWordDiff(oldSrc, newSrc, into) {
+// The word diff as runs, each either equal ({eq: true, b}) or a change
+// ({eq: false, a, b}: the old units replaced by the new ones), after a
+// semantic cleanup (as in diff-match-patch): a short equal run between two
+// changes, no longer than the changes on both sides of it, or one with no
+// letters or digits (a space, a comma), is folded into a single change.
+// Without it a rewritten sentence reads as alternating fragments of the old
+// and new wording, matched on the spaces and the words "the" and "of".
+function wordDiffRuns(oldSrc, newSrc) {
   const ops = lcs(diffUnits(oldSrc), diffUnits(newSrc), (x, y) => x.key === y.key);
+  if (!ops) return null;
+  const runs = [];
+  for (const [op, a, b] of ops) {
+    const eq = op === '=';
+    let r = runs[runs.length - 1];
+    if (!r || r.eq !== eq) { r = { eq, a: [], b: [] }; runs.push(r); }
+    if (op !== '+') r.a.push(a);
+    if (op !== '-') r.b.push(b);
+  }
+  const len = (us) => us.reduce((n, u) => n + u.key.length - 1, 0);
+  const wordy = (us) => us.some((u) => u.key[0] === 'K' || /[\p{L}\p{N}]/u.test(u.key));
+  for (let changed = true; changed;) {
+    changed = false;
+    for (let k = 1; k + 1 < runs.length; k++) {
+      const [p, e, q] = [runs[k - 1], runs[k], runs[k + 1]];
+      if (!e.eq || p.eq || q.eq) continue;
+      const n = len(e.b);
+      if (wordy(e.b) && (n > Math.max(len(p.a), len(p.b)) || n > Math.max(len(q.a), len(q.b)))) continue;
+      runs.splice(k - 1, 3, { eq: false, a: [...p.a, ...e.a, ...q.a], b: [...p.b, ...e.b, ...q.b] });
+      changed = true;
+      break;
+    }
+  }
+  return runs;
+}
+
+// How alike two sources are, from 0 to 1: the share of their words (and
+// formulas) that the word diff keeps.
+function diffSimilarity(oldSrc, newSrc) {
+  const words = (s) => diffUnits(s).filter((u) => u.key !== 'T ' && !/^T\s+$/.test(u.key));
+  const a = words(oldSrc), b = words(newSrc);
+  if (!a.length && !b.length) return 1;
+  const ops = lcs(a, b, (x, y) => x.key === y.key);
+  let same;
+  if (ops) same = ops.filter((o) => o[0] === '=').length;
+  else {   // too long for the LCS: count shared words regardless of order
+    const bag = new Map();
+    for (const u of a) bag.set(u.key, (bag.get(u.key) || 0) + 1);
+    same = 0;
+    for (const u of b) if (bag.get(u.key) > 0) { bag.set(u.key, bag.get(u.key) - 1); same++; }
+  }
+  return 2 * same / (a.length + b.length);
+}
+
+function renderWordDiff(oldSrc, newSrc, into) {
+  const runs = wordDiffRuns(oldSrc, newSrc);
   into.textContent = '';
-  if (!ops) { // too large to diff word by word
+  if (!runs) { // too large to diff word by word
     const d = el('span', 'd-del'); renderTokens(L.tokenize(oldSrc), d, {});
     const n = el('span', 'd-ins'); renderTokens(L.tokenize(newSrc), n, {});
     into.append(d, n);
     return;
   }
-  for (const [op, a, b] of ops) {
-    const u = op === '-' ? a : b;
-    const target = op === '=' ? into : el('span', op === '-' ? 'd-del' : 'd-ins');
-    renderTokens([u.tok], target, {});
-    if (op !== '=') into.append(target);
+  for (const r of runs) {
+    if (r.eq) { renderTokens(r.b.map((u) => u.tok), into, {}); continue; }
+    if (r.a.length) { const d = el('span', 'd-del'); renderTokens(r.a.map((u) => u.tok), d, {}); into.append(d); }
+    if (r.b.length) { const n = el('span', 'd-ins'); renderTokens(r.b.map((u) => u.tok), n, {}); into.append(n); }
   }
 }
 
@@ -4337,7 +6386,7 @@ function showPeek(seg) {
     markEdited();
     toast('Block reverted to the last save', 'ok');
   };
-  head.append(revert);
+  head.append(revert, xButton('Close', () => hidePeek(), 'Close'));
   const body = el('div', 'peek-body');
   const a = contentOf(seg, seg.src), b = contentOf(seg, now);
   if (a === b) body.append(el('div', 'small', 'Changed outside the text shown (LaTeX of the block):'));
@@ -4388,7 +6437,63 @@ function contentOf(seg, src) {
   return src;
 }
 
-async function diffOn() {
+// The commits of the paper's folder, in the diff's "compare with" list.
+// Read again each time the diff view opens, and on its reload button, so a
+// commit made outside the editor shows.
+let COMMITS = null;
+async function loadCommits() {
+  try { COMMITS = await (await fetch('/api/commits', { cache: 'no-store' })).json(); } catch (e) { COMMITS = []; }
+  const sel = $('#diffbase'), was = DIFF.want || sel.value;
+  DIFF.want = null;
+  const g = $('#diffcommits');
+  g.textContent = '';
+  const ago = (s) => {
+    const d = Date.now() / 1000 - s, n = Math.round(d / 86400);
+    return d < 3600 ? Math.max(1, Math.round(d / 60)) + ' min ago' : d < 86400 ? Math.round(d / 3600) + ' h ago'
+      : d < 86400 * 60 ? n + (n === 1 ? ' day ago' : ' days ago') : new Date(s * 1000).toISOString().slice(0, 10);
+  };
+  // short labels: the native list is as wide as its longest option, and runs
+  // off the window's edge otherwise (the whole subject is in the tooltip)
+  const short = (t) => (t.length > 34 ? t.slice(0, 33).trimEnd() + '…' : t);
+  // the first is HEAD, already "since the last commit"
+  for (const c of COMMITS.slice(1)) {
+    const o = new Option(`${c.short} · ${ago(c.t)} · ${short(c.subject)}`, c.hash);
+    o.title = `${c.subject}\n${c.author}, ${new Date(c.t * 1000).toLocaleString()}`;
+    g.append(o);
+  }
+  g.hidden = !g.children.length;
+  // rebuilding the list drops a chosen commit: choose it again, or the last
+  // commit when it is now the last one (or gone)
+  sel.value = was;
+  if (sel.value !== was) sel.value = 'head';
+}
+function diffBaseName(ref) {
+  if (ref === 'save') return 'the last save';
+  if (ref === 'session') return 'when the editor opened';
+  if (ref === 'head') return 'the last commit';
+  const c = (COMMITS || []).find((x) => x.hash === ref);
+  return c ? `commit ${c.short} (${c.subject.slice(0, 50)})` : 'commit ' + ref.slice(0, 7);
+}
+
+// Undo one change of the diff view: the block as it was in the baseline.
+function diffRevert(name, fn) {
+  const segs = FILES[name] && FILES[name].segs;
+  if (!segs) return;
+  snapshot();
+  const cs = (s) => s.removed ? '' : s.diffSrc !== undefined ? s.diffSrc : s.kind === 'hidden' && s.patched !== undefined ? s.patched : s.src;
+  fn(segs);
+  FILES[name].text = segs.map(cs).join('');
+  for (const s of segs) delete s.diffSrc;
+  const y = viewAnchor();
+  render();
+  restoreAnchor(y);
+  DIFF.on = true;
+  diffOn(true);
+  markEdited();
+  toast('Change reverted (Ctrl+Z brings it back); save to keep it', 'ok');
+}
+
+async function diffOn(quiet = false) {
   commit();
   const ref = $('#diffbase').value;
   DIFF.marks = [];
@@ -4398,10 +6503,19 @@ async function diffOn() {
   for (const ta of document.querySelectorAll('#doc textarea')) ta.readOnly = true;
   const names = Object.keys(FILES).filter((n) => FILES[n].segs);
   let changedFiles = 0;
+  // Last save is the editor's disk snapshot; any other version is read for
+  // all files at once.
+  let bases = {};
+  if (ref !== 'save') {
+    try {
+      const r = await fetch(`/api/baselines?ref=${encodeURIComponent(ref)}`);
+      bases = r.ok ? await r.json() : {};
+    } catch (e) { bases = {}; }
+  }
   for (const name of names) {
-    // Last save is the editor's disk snapshot; Git HEAD is fetched separately.
     let base;
     if (ref === 'save') base = FILES[name].disk;
+    else if (name in bases) base = bases[name];
     else {
       const r = await fetch(`/api/baseline?name=${encodeURIComponent(name)}&ref=${ref}`);
       base = r.ok ? (await r.json()).text : null;
@@ -4424,20 +6538,51 @@ async function diffOn() {
       const dels = ops.slice(i, j).filter((o) => o[0] === '-').map((o) => o[1]);
       const ins = ops.slice(i, j).filter((o) => o[0] === '+').map((o) => o[2]);
       const anchor = (ins[0] && ins[0].el) || (ops[j] && ops[j][2] && ops[j][2].el) || null;
+      // An inserted block is paired with the deleted block of its kind whose
+      // words it shares most, at least half of them, so that a rewritten or
+      // moved paragraph is not word-diffed against an unrelated one; pairs
+      // keep the order of the file.
+      let from = 0;
       for (const b of ins) {
-        const k = dels.findIndex((d) => d.kind === b.kind);
+        let k = -1, best = 0.5;
+        for (let x = from; x < dels.length; x++) {
+          if (dels[x].kind !== b.kind) continue;
+          const sim = diffSimilarity(contentOf(dels[x], dels[x].src), contentOf(b, now.get(b)));
+          if (sim >= best) { best = sim; k = x; }
+        }
         if (k >= 0) {
+          from = k;
           const d = dels.splice(k, 1)[0];
           b.el.classList.add('diff-changed');
+          b.el.diffRevert = () => diffRevert(name, () => { b.diffSrc = d.src; });
           const target = b.edit && b.edit.tagName !== 'TEXTAREA' ? b.edit : null;
           if (target) renderWordDiff(contentOf(d, d.src), contentOf(b, now.get(b)), target);
           DIFF.marks.push(b.el);
-        } else { b.el.classList.add('diff-new'); DIFF.marks.push(b.el); }
+        } else {
+          b.el.classList.add('diff-new');
+          b.el.diffRevert = () => diffRevert(name, (segs) => {
+            const i = segs.indexOf(b);
+            b.removed = true;
+            if (segs[i + 1] && segs[i + 1].kind === 'gap') segs[i + 1].removed = true;
+            else if (i > 0 && segs[i - 1].kind === 'gap') segs[i - 1].removed = true;
+          });
+          DIFF.marks.push(b.el);
+        }
       }
       for (const d of dels) {   // deleted blocks, shown where they were
         const ghost = renderSeg({ ...d }, { sec: 0, sub: 0, subsub: 0, app: false, counters: {}, heads: {}, env: [] });
         if (!ghost) continue;
         ghost.classList.add('diff-gone', 'diff-ghost');
+        const before = (ins[0] && !ins[0].removed && ins[0]) || (ops[j] && ops[j][2]) || null;
+        ghost.diffRevert = () => diffRevert(name, (segs) => {
+          const block = { kind: d.kind, src: d.src, file: name }, gap = { kind: 'gap', src: '\n\n', file: name };
+          const i = before ? segs.indexOf(before) : -1;
+          if (i >= 0) segs.splice(i, 0, block, gap);
+          else {
+            const last = cur.length ? segs.indexOf(cur[cur.length - 1]) : segs.length - 1;
+            segs.splice(last + 1, 0, gap, block);
+          }
+        });
         for (const e of ghost.querySelectorAll('[contenteditable]')) e.contentEditable = 'false';
         if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(ghost, anchor);
         else if (cur.length && cur[cur.length - 1].el) cur[cur.length - 1].el.after(ghost);
@@ -4447,12 +6592,21 @@ async function diffOn() {
     }
   }
   DIFF.marks.sort((a, b) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
+  // every change can be put back as it was in the baseline
+  for (const m of DIFF.marks) {
+    if (!m.diffRevert || m.querySelector(':scope > .diff-revert')) continue;
+    const b = el('button', 'diff-revert', '\u21b6 Revert');
+    b.title = 'Put this block back as it was in ' + diffBaseName(ref) + ' (Ctrl+Alt+Backspace on the current change)';
+    b.contentEditable = 'false';
+    b.onclick = (e) => { e.stopPropagation(); m.diffRevert(); };
+    m.append(b);
+  }
   DIFF.cur = -1;
   fillDiffMap();
   $('#diffnav').hidden = false;
   $('#diffcount').textContent = DIFF.marks.length ? `${DIFF.marks.length} changes` : 'no changes';
-  banner(DIFF.marks.length ? `${DIFF.marks.length} changed blocks in ${changedFiles} file(s), compared with ${ref === 'save' ? 'the last save' : 'the last commit'}. The page is read-only until you leave diff mode.`
-    : 'No changes.');
+  if (!quiet || !DIFF.marks.length) banner(DIFF.marks.length ? `${DIFF.marks.length} changed blocks in ${changedFiles} file(s), compared with ${diffBaseName(ref)}. The page is read-only until you leave diff mode; Revert puts a block back.`
+    : 'No changes since ' + diffBaseName(ref) + '.');
 }
 
 function diffOff() {
@@ -4485,7 +6639,7 @@ function diffStep(d) {
   const e = DIFF.marks[DIFF.cur];
   navPush();
   e.classList.add('diff-current');
-  e.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  e.scrollIntoView({ block: 'center', behavior: SMOOTH() });
   $('#diffcount').textContent = `${DIFF.cur + 1} of ${DIFF.marks.length}`;
   updateDiffMap();
 }
@@ -4496,9 +6650,24 @@ ACTIONS.diff = () => {
   $('#diffbtn').setAttribute('aria-pressed', 'true');
   $('#diffbtn').title = 'Leave the diff view (Ctrl+Alt+V)';
   $('#diffbase').hidden = false;
-  diffOn();
+  loadCommits().then(() => { if (DIFF.on) diffOn(); });
 };
-$('#diffbase').onchange = () => { if (DIFF.on) { const y = viewAnchor(); render(); restoreAnchor(y); DIFF.on = true; diffOn(); } };
+// after a commit outside the editor: the new list of commits, and the diff
+// computed again against it
+$('#diffreload').onclick = async () => {
+  if (!DIFF.on) return;
+  await loadCommits();
+  const y = viewAnchor(); render(); restoreAnchor(y); DIFF.on = true; diffOn();
+};
+// What the diff compares with, as kept for this paper: a commit is chosen
+// when the list of commits is read (it falls back to the last commit when
+// that commit is gone).
+function setDiffBase(ref) {
+  const sel = $('#diffbase');
+  sel.value = ref;
+  if (sel.value !== ref) DIFF.want = ref;
+}
+$('#diffbase').onchange = () => { VIEW.save('diff', $('#diffbase').value); if (DIFF.on) { const y = viewAnchor(); render(); restoreAnchor(y); DIFF.on = true; diffOn(); } };
 $('#diffprev').onclick = () => diffStep(-1);
 $('#diffnext').onclick = () => diffStep(1);
 // no editing while diffing
@@ -4856,8 +7025,12 @@ function previewGames(src) {
       const mark = colorMarked(l);
       const text = el('span', mark ? 'gp-mark' : '');
       if (mark) text.dataset.mark = mark[1];
-      renderTokens(L.tokenize(mark ? mark[2] : l.content), text, {});
+      // a two-way macro (\layoutchoice) shows as the page prints it
+      const ch = !mark && choiceHead(l.content);
+      const shown = ch ? topComment(choiceExpanded(ch.tail) || '') : null;
+      renderTokens(L.tokenize(mark ? mark[2] : ch ? ch.head : l.content), text, {});
       body.append(text);
+      if (shown && shown.comment !== null) { const cm = el('span', 'gp-comment', '▹ '); renderTokens(L.tokenize(shown.comment), cm, {}); body.append(cm); }
       if (/^(If|ElsIf)$/.test(l.cmd)) body.append(el('b', '', ' then'));
       if (/^(For|ForAll|While)$/.test(l.cmd)) body.append(el('b', '', ' do'));
       const c = /\\Comment\s*\{([^]*)\}/.exec(l.suffix || '');
@@ -4999,13 +7172,19 @@ function gameBox(g, gi, lay, at) {
   head.append(actions);
   box.append(head);
   let depth = 0, no = 0;
+  const boxes = [];   // the open \BeginBox regions: their colours
   g.lines.forEach((l, li) => {
     if (g.kind === 'proc') { box.append(procLine(g, l, li)); return; }
     // the empty lines a body starts and ends with (\begin{...}\n ... \n\end): not shown
     if (l.raw && !l.prefix.trim() && (li === 0 || li === g.lines.length - 1)) return;
     if (BLOCK_CLOSE.has(l.cmd) || l.cmd === 'ElsIf' || l.cmd === 'Else') depth = Math.max(0, depth - 1);
-    // numbered as in the paper: \Statex and comments get no number
-    box.append(algoLine(g, l, li, depth, l.raw || l.cmd === 'Statex' ? '' : String(++no)));
+    const begin = l.raw && /^\s*\\BeginBox\b/.test(l.prefix), end = l.raw && /^\s*\\EndBox\b/.test(l.prefix);
+    if (begin) boxes.push(boxColor(l.prefix));
+    // numbered as in the paper: \Statex, comments and box marks get no number
+    const row = algoLine(g, l, li, depth, l.raw || l.cmd === 'Statex' ? '' : String(++no));
+    if (boxes.length) { row.classList.add('in-gbox'); row.style.setProperty('--gbox', boxes[boxes.length - 1]); }
+    box.append(row);
+    if (end) boxes.pop();
     if (BLOCK_OPEN.has(l.cmd) || l.cmd === 'ElsIf' || l.cmd === 'Else') depth++;
   });
   return box;
@@ -5049,7 +7228,9 @@ function renderGames(body) {
     if (lay.cols > 1) for (let c = 0; c < lay.cols; c++) grid.append(cell(lay.rows.length, c, [], true));
     body.append(grid);
   }
-  body.append(el('p', 'small', 'Add: insert common statements, conditions and loops. Up/Down or Alt+Up/Down: reorder safe statements. ' +
+  body.append(el('p', 'small', 'Enter: a new statement. Backspace on an empty line or Ctrl+Shift+K: delete the line (a whole block from its first or last line). ' +
+    'Box: put a line in a box or take it out; click the edge of a box to restyle, grow, shrink or remove it. Up/Down also move a line into or out of a box. ' +
+    'Add: insert common statements, conditions and loops. Up/Down or Alt+Up/Down: reorder safe statements. ' +
     'Mark: coloured xcolor boxes. Ctrl+Z/Ctrl+Shift+Z: undo/redo; Ctrl+Enter: Apply; Ctrl+S: Apply and Save. ' +
     'Changes are not written until Apply, then Save.'));
 }
@@ -5060,6 +7241,17 @@ function gameMoveLine(g, index, offset) {
   while (g.lines[otherIndex] && g.lines[otherIndex].raw && !g.lines[otherIndex].prefix.trim())
     otherIndex += offset;
   const other = g.lines[otherIndex];
+  // a statement steps over the edge of a box (into it or out of it), and an
+  // edge steps over a statement (the box grows or shrinks)
+  const lineBox = boxMarker(line), otherBox = boxMarker(other);
+  if (line && other && (lineBox || otherBox) && !(lineBox && otherBox) &&
+      !(lineBox ? other : line).raw && !(lineBox && (BLOCK_OPEN.has(other.cmd) || BLOCK_CLOSE.has(other.cmd)))) {
+    gameCheckpoint();
+    const [moved] = g.lines.splice(index, 1);
+    g.lines.splice(otherIndex, 0, moved);
+    showFigTab('games');
+    return { to: otherIndex };
+  }
   if (!line || !other || line.raw || other.raw ||
       BLOCK_OPEN.has(line.cmd) || BLOCK_CLOSE.has(line.cmd) ||
       BLOCK_OPEN.has(other.cmd) || BLOCK_CLOSE.has(other.cmd) ||
@@ -5071,7 +7263,253 @@ function gameMoveLine(g, index, offset) {
   const [moved] = g.lines.splice(index, 1);
   g.lines.splice(otherIndex, 0, moved);
   showFigTab('games');
-  return true;
+  return { to: otherIndex };
+}
+
+// algpseudocodex's boxes (\BeginBox[gbox=one] … \EndBox): a line that is one
+// of their edges, its kind and options
+const BOX_RE = /^\s*\\(BeginBox|EndBox)(?![A-Za-z])(?:\[([^\]]*)\])?/;
+function boxMarker(l) {
+  const m = l && l.raw && BOX_RE.exec(l.prefix);
+  return m ? { kind: m[1], opts: m[2] || '' } : null;
+}
+// the boxes of a game: the indexes of their \BeginBox and \EndBox lines
+function boxPairs(g) {
+  const out = [], open = [];
+  g.lines.forEach((l, k) => {
+    const b = boxMarker(l);
+    if (b && b.kind === 'BeginBox') open.push(k);
+    else if (b && open.length) out.push({ begin: open.pop(), end: k });
+  });
+  return out;
+}
+// the innermost box that line li is in (or that it is an edge of)
+function boxAround(g, li) {
+  let best = null;
+  for (const p of boxPairs(g)) if (p.begin <= li && li <= p.end && (!best || p.end - p.begin < best.end - best.begin)) best = p;
+  return best;
+}
+// The box options the paper uses (gbox=one, gbox=two, …), in order of first
+// use; '' is a box without options. Empty when the paper has no boxes and
+// does not load algpseudocodex, which defines them.
+function gameBoxStyles() {
+  const seen = new Set();
+  const texts = [figureWithEdits(), ...Object.values(FILES).map((f) => f.text || '')];
+  for (const t of texts) for (const m of t.matchAll(/\\BeginBox(?![A-Za-z])(?:\[([^\]]*)\])?/g)) seen.add(m[1] || '');
+  if (!seen.size && texts.some((t) => /\\usepackage(\[[^\]]*\])?\{[^}]*algpseudocodex/.test(t))) seen.add('');
+  return [...seen];
+}
+const boxLabel = (opts) => opts ? opts.replace(/^\w+=/, '') : 'plain';
+const blankLine = (l) => l.raw && !l.prefix.trim();
+// The lines a statement takes: a block (if … end if) from its first line or
+// its last, an else branch up to the next branch or the end of the block
+function lineSpan(g, li) {
+  const l = g.lines[li];
+  const open = (x) => BLOCK_OPEN.has(x.cmd), close = (x) => BLOCK_CLOSE.has(x.cmd);
+  if (open(l) || l.cmd === 'Else' || l.cmd === 'ElsIf') {
+    let depth = 0;
+    for (let k = li + 1; k < g.lines.length; k++) {
+      const x = g.lines[k];
+      if (open(x)) depth++;
+      else if (close(x)) { if (depth === 0) return open(l) ? [li, k] : [li, k - 1]; depth--; }
+      else if (depth === 0 && !open(l) && (x.cmd === 'Else' || x.cmd === 'ElsIf')) return [li, k - 1];
+    }
+  } else if (close(l)) {
+    let depth = 0;
+    for (let k = li - 1; k >= 0; k--) {
+      const x = g.lines[k];
+      if (close(x)) depth++;
+      else if (open(x)) { if (depth === 0) return [k, li]; depth--; }
+    }
+  }
+  return [li, li];
+}
+// boxes left with nothing in them go
+function dropEmptyBoxes(g) {
+  for (let again = true; again;) {
+    again = false;
+    for (const p of boxPairs(g)) {
+      if (g.lines.slice(p.begin + 1, p.end).every(blankLine)) { g.lines.splice(p.begin, p.end - p.begin + 1); again = true; break; }
+    }
+  }
+}
+const cloneLine = (l) => parseGameLine(gameLineSrc(l));
+// put line li (with its block) in a new box
+function gameBoxWrap(g, li, opts) {
+  const [a, b] = lineSpan(g, li);
+  const indent = /^\s*/.exec(g.lines[a].prefix)[0];
+  gameCheckpoint();
+  g.lines.splice(b + 1, 0, parseGameLine(indent + '\\EndBox'));
+  g.lines.splice(a, 0, parseGameLine(indent + '\\BeginBox' + (opts ? '[' + opts + ']' : '')));
+  showFigTab('games');
+  return a + 1;
+}
+// take line li (with its block) out of its box: the box closes before it and
+// opens again after it, as far as it has lines there
+function gameBoxTakeOut(g, li) {
+  const p = boxAround(g, li);
+  if (!p) return li;
+  const [a, b] = lineSpan(g, li);
+  if (a <= p.begin || b >= p.end) { banner('This block starts or ends outside the box: change the box in the LaTeX tab.'); return li; }
+  gameCheckpoint();
+  const begin = g.lines[p.begin], end = g.lines[p.end];
+  const before = g.lines.slice(p.begin + 1, a), mid = g.lines.slice(a, b + 1), after = g.lines.slice(b + 1, p.end);
+  const out = [];
+  if (before.every(blankLine)) out.push(...before); else out.push(begin, ...before, cloneLine(end));
+  const at = p.begin + out.length;
+  out.push(...mid);
+  if (after.every(blankLine)) out.push(...after); else out.push(cloneLine(begin), ...after, end);
+  g.lines.splice(p.begin, p.end - p.begin + 1, ...out);
+  showFigTab('games');
+  return at;
+}
+// remove the box with an edge at li; its lines stay, or go too
+function gameBoxRemove(g, li, withLines = false) {
+  const p = boxAround(g, li);
+  if (!p) return li;
+  gameCheckpoint();
+  if (withLines) g.lines.splice(p.begin, p.end - p.begin + 1);
+  else { g.lines.splice(p.end, 1); g.lines.splice(p.begin, 1); }
+  showFigTab('games');
+  return p.begin;
+}
+function gameBoxRestyle(g, li, opts) {
+  const l = g.lines[li];
+  if (!boxMarker(l) || boxMarker(l).kind !== 'BeginBox') return;
+  gameCheckpoint();
+  g.lines[li] = parseGameLine(l.prefix.replace(/\\BeginBox(\[[^\]]*\])?/, '\\BeginBox' + (opts ? '[' + opts + ']' : '')));
+  showFigTab('games');
+}
+// Delete line li in one step: a block goes whole (if … end if), the edge of a
+// box removes the box and keeps its lines, and a box left empty goes too.
+// The index of the line to go on editing.
+function gameDeleteLine(g, li) {
+  if (boxMarker(g.lines[li])) return gameBoxRemove(g, li);
+  const [a, b] = lineSpan(g, li);
+  gameCheckpoint();
+  g.lines.splice(a, b - a + 1);
+  dropEmptyBoxes(g);
+  showFigTab('games');
+  if (b > a) toast('Deleted the whole block (' + (b - a + 1) + ' lines): Ctrl+Z restores it');
+  return a - 1;
+}
+// a new empty statement after line li (inside it, when it opens a block)
+function gameNewLine(g, li) {
+  const l = g.lines[li];
+  const indent = /^\s*/.exec(l.prefix)[0] + (BLOCK_OPEN.has(l.cmd) || l.cmd === 'Else' || l.cmd === 'ElsIf' ? '  ' : '');
+  gameCheckpoint();
+  g.lines.splice(li + 1, 0, parseGameLine(indent + '\\State '));
+  showFigTab('games');
+  return li + 1;
+}
+// the cursor in the editable line nearest to li (at or before it, else after)
+function focusGameLine(g, li, atEnd = true) {
+  const gi = FV.games.indexOf(g);
+  let best = null;
+  for (const r of document.querySelectorAll(`#fv-body .gline[data-game="${gi}"]`)) {
+    const t = r.querySelector('.gtext[contenteditable=true]') || (r.tabIndex >= 0 ? r : null);
+    if (!t) continue;
+    if (+r.dataset.line <= li) best = t;
+    else { if (!best) best = t; break; }
+  }
+  if (!best) return;
+  best.focus();
+  if (best.isContentEditable) {
+    const r = document.createRange(); r.selectNodeContents(best); r.collapse(!atEnd);
+    getSelection().removeAllRanges(); getSelection().addRange(r);
+  }
+}
+
+// A \Comment of a game line as the paper prints it: maths, dashes, colours.
+function gameComment(src) {
+  const c = el('span', 'gcomment');
+  c.append('\u25b9 ');
+  renderTokens(L.tokenize(src), c, {});
+  for (const n of c.querySelectorAll('[contenteditable]')) n.contentEditable = 'false';
+  return c;
+}
+// The colour of \BeginBox[gbox=one]: a TikZ style of the paper that draws in
+// a colour named after its argument (gbox/.style={draw=g#1}: gone), or draw=…
+function boxColor(prefix) {
+  const opts = (/\[([^\]]*)\]/.exec(prefix) || [])[1] || '';
+  const styles = ((DOC && DOC.colors) || {}).styles || {};
+  for (const part of opts.split(',')) {
+    const [k, v] = part.split('=').map((x) => (x || '').trim());
+    if (styles[k] !== undefined) { const c = colorOf(styles[k].replace(/#1/g, v || '')); if (c) return c; }
+    if ((k === 'draw' || k === 'color') && colorOf(v)) return colorOf(v);
+  }
+  return 'var(--accent)';
+}
+// A macro of the paper that picks one of its arguments by an \if
+// (\newcommand{\layoutchoice}[2]{\ifmobile#1\else#2\fi}): the text with it
+// replaced by the branch the paper prints (the \if is false unless the
+// preamble sets it true); null when there is none.
+function choiceExpanded(src) {
+  let changed = false, s = String(src), guard = 0;
+  for (;;) {
+    let hit = false;
+    for (const [name, body] of Object.entries(DOC.macros || {})) {
+      // (the server may have dropped the branch that is off: \ifmobile\else#2\fi)
+      const m = /^\s*\\if([A-Za-z@]+)\s*(?:#(\d))?\s*\\else\s*(?:#(\d))?\s*\\fi\s*$/.exec(body);
+      if (!m) continue;
+      const at = s.indexOf(name + '{');
+      if (at < 0 || /[A-Za-z@]/.test(s[at + name.length]) ) continue;
+      const a = at + name.length, ae = L.groupEnd(s, a);
+      if (ae < 0 || s[ae] !== '{') continue;
+      const be = L.groupEnd(s, ae);
+      if (be < 0) continue;
+      const args = [s.slice(a + 1, ae - 1), s.slice(ae + 1, be - 1)];
+      const on = new RegExp('\\\\' + m[1] + 'true\\b').test(FILES[DOC.main] ? FILES[DOC.main].text.split('\\begin{document}')[0] : '');
+      const pick = on ? m[2] : m[3];
+      s = s.slice(0, at) + (pick ? args[+pick - 1] : '') + s.slice(be);
+      hit = changed = true;
+      if (++guard > 20) return s;
+    }
+    if (!hit) break;
+  }
+  return changed ? s : null;
+}
+// The two-way macros of the paper (\layoutchoice{phone}{page}) used in s,
+// with where the first one starts
+function choiceAt(s) {
+  let best = null;
+  for (const [name, body] of Object.entries(DOC.macros || {})) {
+    if (!/^\s*\\if[A-Za-z@]+\s*(?:#\d)?\s*\\else\s*(?:#\d)?\s*\\fi\s*$/.test(body)) continue;
+    for (let at = s.indexOf(name + '{'); at >= 0; at = s.indexOf(name + '{', at + 1)) {
+      if (/[A-Za-z@]/.test(s[at + name.length])) continue;
+      if (!best || at < best.at) best = { at, name };
+      break;
+    }
+  }
+  return best;
+}
+function choiceName(s) { const c = choiceAt(s); return c ? c.name : 'a layout macro'; }
+// A line that is a statement and then a two-way macro: the statement (to
+// edit) and the rest from the macro on, with the % and line break before it
+function choiceHead(s) {
+  const c = choiceAt(String(s));
+  if (!c) return null;
+  const m = /%?\s*$/.exec(s.slice(0, c.at));
+  const cut = m ? m.index : c.at;
+  const head = s.slice(0, cut), tail = s.slice(cut);
+  if (!head.trim() || choiceAt(head) || choiceExpanded(tail) === null) return null;
+  // braces must pair up on both sides
+  let depth = 0;
+  for (let k = 0; k < head.length; k++) { if (head[k] === '\\') { k++; continue; } if (head[k] === '{') depth++; if (head[k] === '}') depth--; }
+  return depth === 0 ? { head, tail } : null;
+}
+// A text split at its top-level \Comment{…}
+function topComment(s) {
+  for (let k = 0, depth = 0; k < s.length; k++) {
+    const ch = s[k];
+    if (ch === '\\' && depth === 0 && /^\\Comment\s*\{/.test(s.slice(k))) {
+      const open = s.indexOf('{', k), e = L.groupEnd(s, open);
+      return { text: s.slice(0, k).trim(), comment: s.slice(open + 1, e - 1) };
+    }
+    if (ch === '\\') { k++; continue; }
+    if (ch === '{') depth++; else if (ch === '}') depth--;
+  }
+  return { text: s, comment: null };
 }
 
 function algoLine(g, l, li, depth, no = String(li + 1)) {
@@ -5080,8 +7518,49 @@ function algoLine(g, l, li, depth, no = String(li + 1)) {
   row.append(el('span', 'gno', no));
   const pad = el('span'); pad.style.width = (depth * 1.4) + 'em'; pad.style.flex = 'none';
   row.append(pad);
-  if (l.raw) {
+  const boxMark = l.raw && /^\s*\\(BeginBox|EndBox)\b(?:\[([^\]]*)\])?/.exec(l.prefix);
+  if (boxMark) {
+    // algpseudocodex's boxes: a band beside the lines, in its colour
+    row.classList.add(boxMark[1] === 'BeginBox' ? 'gbox-begin' : 'gbox-end');
+    row.title = l.prefix.trim() + ': click for the box tools';
+    row.tabIndex = 0;
+    if (boxMark[1] === 'BeginBox') row.append(el('span', 'gbox-label', boxMark[2] ? boxMark[2].replace(/^\w+=/, '') : 'box'));
+    row.append(boxTools(g, li));
+    return row;
+  } else if (l.raw) {
     row.append(el('code', 'gcomment', l.prefix.trim() || ' '));
+  } else if (choiceHead(l.content)) {
+    // a statement followed by a two-way macro (\State $L\assign…$%
+    // \layoutchoice{\Statex…}{\Comment{…}}): the statement is edited here,
+    // the macro is kept as it is and shown as the page prints it
+    const { head, tail } = choiceHead(l.content);
+    if (KW[l.kind]) row.append(el('span', 'gkw', KW[l.kind]));
+    const t = el('span', 'gtext'); t.contentEditable = 'true';
+    renderTokens(L.tokenize(head), t, {});
+    t.addEventListener('input', () => {
+      gameCheckpoint(t);
+      l.content = ser(t) + tail;
+      row.classList.add('edited');
+    });
+    t.addEventListener('blur', () => { FV.lastEditor = null; });
+    row.append(t);
+    const shown = topComment(choiceExpanded(tail) || '');
+    const rest = el('span', 'gtext readonly');
+    rest.title = 'This part chooses between layouts (' + choiceName(tail) + '): edit it in the LaTeX tab';
+    renderTokens(L.tokenize(shown.text.replace(/^\s*%?\s*/, '').replace(/^\\Statex\b/, '')), rest, {});
+    row.append(rest);
+    if (shown.comment !== null) row.append(gameComment(shown.comment));
+  } else if (choiceExpanded(l.content) !== null) {
+    // a line with a two-way macro (\layoutchoice{phone}{page}): shown as the
+    // page prints it; its LaTeX is edited in the LaTeX tab
+    const shown = choiceExpanded(l.content);
+    const split = topComment(shown);
+    if (KW[l.kind]) row.append(el('span', 'gkw', KW[l.kind]));
+    const t = el('span', 'gtext readonly');
+    t.title = 'This line chooses between layouts (' + choiceName(l.content) + '): edit it in the LaTeX tab';
+    renderTokens(L.tokenize(split.text), t, {});
+    row.append(t);
+    if (split.comment !== null) row.append(gameComment(split.comment));
   } else {
     if (KW[l.kind]) row.append(el('span', 'gkw', KW[l.kind]));
     const t = el('span', 'gtext'); t.contentEditable = 'true';
@@ -5099,10 +7578,8 @@ function algoLine(g, l, li, depth, no = String(li + 1)) {
     });
     t.addEventListener('blur', () => { FV.lastEditor = null; });
     row.append(t);
-    if (/\\Comment/.test(l.suffix)) {
-      const c = /\\Comment\s*\{([^]*)\}/.exec(l.suffix);
-      row.append(el('span', 'gcomment', '▹ ' + (c ? cleanTex(c[1]) : '')));
-    }
+    const cm = suffixComment(l);
+    if (cm) row.append(editableComment(g, l, row));
   }
   const tools = el('span', 'gtools');
   const indent = /^\s*/.exec(l.prefix)[0];
@@ -5142,11 +7619,106 @@ function algoLine(g, l, li, depth, no = String(li + 1)) {
   mark.value = colorMarked(l) ? colorMarked(l)[1] : 'none';
   mark.disabled = l.raw;
   mark.onchange = () => gameChangeColor(l, mark.value);
-  const del = el('button', '', 'Delete'); del.title = 'Delete this line; Undo restores it';
-  del.onclick = () => { gameCheckpoint(); g.lines.splice(li, 1); showFigTab('games'); };
-  tools.append(addChoice, add, up, down, mark, del);
+  const del = el('button', '', 'Delete');
+  del.title = BLOCK_OPEN.has(l.cmd) || BLOCK_CLOSE.has(l.cmd) ? 'Delete this whole block (Ctrl+Shift+K); Undo restores it'
+    : 'Delete this line (Ctrl+Shift+K, or Backspace on an empty line); Undo restores it';
+  del.onclick = () => focusGameLine(g, gameDeleteLine(g, li));
+  tools.append(addChoice, add, up, down, mark);
+  if (!l.raw) {
+    const styles = gameBoxStyles(), around = boxAround(g, li);
+    const box = el('select', 'g-box');
+    box.title = 'Put this line in a box (\\BeginBox … \\EndBox), or take it out of its box';
+    const opt = (value, label) => { const o = el('option', '', label); o.value = value; box.append(o); };
+    opt('', 'Box…');
+    for (const st of styles) opt('in:' + st, 'In a new box: ' + boxLabel(st));
+    if (around) opt('out', 'Out of its box');
+    box.disabled = box.options.length === 1;
+    if (box.disabled) box.title = 'Boxes need algpseudocodex (\\BeginBox), which this paper does not load';
+    box.onchange = () => {
+      const v = box.value;
+      focusGameLine(g, v === 'out' ? gameBoxTakeOut(g, li) : gameBoxWrap(g, li, v.slice(3)));
+    };
+    tools.append(box);
+    if (!suffixComment(l) && !choiceHead(l.content) && choiceExpanded(l.content) === null && !BLOCK_CLOSE.has(l.cmd)) {
+      const c = el('button', '', '▹ Comment'); c.title = 'Add a comment at the right of this line (\\Comment{…})';
+      c.onclick = () => {
+        gameCheckpoint();
+        l.suffix = l.suffix.replace(/\s*$/, '') + ' \\Comment{}' + /\s*$/.exec(l.suffix)[0];
+        showFigTab('games');
+        const t = document.querySelector(`#fv-body .gline[data-game="${FV.games.indexOf(g)}"][data-line="${li}"] .gcomment-edit`);
+        if (t) t.focus();
+      };
+      tools.append(c);
+    }
+  }
+  tools.append(del);
   row.append(tools);
   return row;
+}
+
+// The tools of the edge of a box: its style, moving it, removing it.
+function boxTools(g, li) {
+  const tools = el('span', 'gtools');
+  const b = boxMarker(g.lines[li]);
+  if (b.kind === 'BeginBox') {
+    const style = el('select', 'g-box');
+    style.title = 'The style of this box';
+    const styles = gameBoxStyles();
+    if (!styles.includes(b.opts)) styles.push(b.opts);
+    for (const st of styles) { const o = el('option', '', 'Style: ' + boxLabel(st)); o.value = st; style.append(o); }
+    style.value = b.opts;
+    style.onchange = () => { gameBoxRestyle(g, li, style.value); focusGameLine(g, li); };
+    tools.append(style);
+  }
+  const step = (label, title, offset) => {
+    const x = el('button', '', label); x.title = title;
+    x.onclick = () => { const r = gameMoveLine(g, li, offset); if (r) focusGameLine(g, r.to); };
+    tools.append(x);
+  };
+  if (b.kind === 'BeginBox') { step('Up', 'Grow the box by the line above', -1); step('Down', 'Shrink the box by its first line', 1); }
+  else { step('Up', 'Shrink the box by its last line', -1); step('Down', 'Grow the box by the line below', 1); }
+  const rm = el('button', '', 'Remove box'); rm.title = 'Remove this box and keep its lines (Delete or Backspace)';
+  rm.onclick = () => focusGameLine(g, gameBoxRemove(g, li));
+  const rmAll = el('button', '', 'Delete box and lines'); rmAll.title = 'Delete this box with the lines in it; Undo restores them';
+  rmAll.onclick = () => focusGameLine(g, gameBoxRemove(g, li, true) - 1);
+  tools.append(rm, rmAll);
+  return tools;
+}
+// The \Comment{…} at the top level of a line's suffix: where its text is
+function suffixComment(l) {
+  const m = /\\Comment\s*\{/.exec(l.suffix || '');
+  if (!m) return null;
+  const open = m.index + m[0].length - 1, e = L.groupEnd(l.suffix, open);
+  return e < 0 ? null : { start: open + 1, end: e - 1 };
+}
+// the comment of a line, edited in place
+function editableComment(g, l, row) {
+  const c = el('span', 'gcomment');
+  c.append('\u25b9 ');
+  const t = el('span', 'gcomment-edit'); t.contentEditable = 'true';
+  const at = suffixComment(l);
+  renderTokens(L.tokenize(l.suffix.slice(at.start, at.end)), t, {});
+  t.title = 'The comment of this line (\\Comment); Backspace when it is empty removes it';
+  t.addEventListener('input', () => {
+    gameCheckpoint(t);
+    const now = suffixComment(l);
+    l.suffix = l.suffix.slice(0, now.start) + ser(t) + l.suffix.slice(now.end);
+    row.classList.add('edited');
+  });
+  t.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey) { e.preventDefault(); return; }   // a comment is one line
+    if (e.key !== 'Backspace' || e.ctrlKey || e.altKey || e.metaKey || ser(t).trim()) return;
+    e.preventDefault(); e.stopPropagation();
+    gameCheckpoint();
+    const m = /\s*\\Comment\s*\{/.exec(l.suffix), now = suffixComment(l);
+    l.suffix = l.suffix.slice(0, m.index) + l.suffix.slice(now.end + 1);
+    const li = g.lines.indexOf(l);
+    showFigTab('games');
+    focusGameLine(g, li);
+  });
+  t.addEventListener('blur', () => { FV.lastEditor = null; });
+  c.append(t);
+  return c;
 }
 
 function procLine(g, l, li) {
@@ -5303,7 +7875,28 @@ document.addEventListener('keydown', (e) => {
   const game = FV.games[+row.dataset.game];
   if (!game) return;
   e.preventDefault(); e.stopPropagation();
-  gameMoveLine(game, +row.dataset.line, e.key === 'ArrowUp' ? -1 : 1);
+  const r = gameMoveLine(game, +row.dataset.line, e.key === 'ArrowUp' ? -1 : 1);
+  if (r) focusGameLine(game, r.to);
+}, true);
+// Line keys of the games: Enter starts a new statement, Backspace on an
+// empty line or Ctrl+Shift+K deletes the line; on the edge of a box, Delete
+// or Backspace removes the box
+document.addEventListener('keydown', (e) => {
+  if ($('#figview').hidden || FV.tab !== 'games' || e.altKey || !e.target.closest) return;
+  const row = e.target.closest('.gline');
+  if (!row || e.target.closest('.gtools, .gcomment-edit')) return;
+  const g = FV.games[+row.dataset.game], li = +row.dataset.line;
+  if (!g || g.kind !== 'algo' || !g.lines[li]) return;
+  const plain = !e.ctrlKey && !e.metaKey && !e.shiftKey;
+  const t = e.target.closest('.gtext[contenteditable=true]');
+  let to = null;
+  if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'k') to = gameDeleteLine(g, li);
+  else if (e.target === row && boxMarker(g.lines[li]) && plain && (e.key === 'Delete' || e.key === 'Backspace')) to = gameBoxRemove(g, li);
+  else if (t && plain && e.key === 'Backspace' && !ser(t).trim()) to = gameDeleteLine(g, li);
+  else if (t && plain && e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); focusGameLine(g, gameNewLine(g, li), false); return; }
+  else return;
+  e.preventDefault(); e.stopPropagation();
+  focusGameLine(g, to);
 }, true);
 
 $('#fv-apply').onclick = applyFigure;
@@ -5409,6 +8002,10 @@ const ACTION_DEFS = [
   ['bold', 'Bold (\\textbf)', 'text', ['C-b'], () => wrap('\\textbf{', 'strong')],
   ['emph', 'Emphasis (\\emph)', 'text', ['C-i'], () => wrap('\\emph{', 'em')],
   ['italic', 'Italic (\\textit)', 'text', ['C-I'], () => wrap('\\textit{', 'em')],
+  ['mono', 'Typewriter (\\texttt)', 'text', [], () => wrap('\\texttt{', 'code')],
+  ['footnote', 'Footnote', 'text', [], () => insertFootnote()],
+  ['itemize', 'Bulleted list', 'text', [], () => insertList('itemize')],
+  ['enumerate', 'Numbered list', 'text', [], () => insertList('enumerate')],
   ['math', 'Inline maths (the selection, or a new formula)', 'text', ['C-m'], () => mathAtSelection()],
   ['display', 'Displayed equation', 'text', ['C-M'], () => insertMath(true)],
   ['cite', 'Cite (search)', 'text', ['C-M-c'], () => citePalette()],
@@ -5427,13 +8024,18 @@ const ACTION_DEFS = [
     const s = headingSegAtCaret();
     if (s && confirm('Delete this heading?' + labelWarning(s))) structural(() => removeSeg(s));
   }],
+  ['nextheading', 'Next heading: the cursor goes to it', 'global', ['C-M-PageDown'], () => stepBlock(1, true)],
+  ['prevheading', 'Previous heading', 'global', ['C-M-PageUp'], () => stepBlock(-1, true)],
+  ['nextblock', 'Next block (paragraph, heading, figure…): the cursor goes to its start', 'global', ['M-ArrowDown'], () => stepBlock(1, false)],
+  ['prevblock', 'Previous block', 'global', ['M-ArrowUp'], () => stepBlock(-1, false)],
   ['moveup', 'Move the section at the cursor up', 'text', ['C-M-ArrowUp'], () => { const s = headingSegAtCaret(); if (s) moveSection(s, -1); }],
   ['movedown', 'Move the section at the cursor down', 'text', ['C-M-ArrowDown'], () => { const s = headingSegAtCaret(); if (s) moveSection(s, 1); }],
   ['combine', 'Combine the section at the cursor with the previous one', 'text', ['C-M-j'], () => {
     const s = headingSegAtCaret();
     if (s && confirm('Combine this section with the previous one?' + labelWarning(s))) structural(() => removeSeg(s));
   }],
-  ['revertblock', 'Revert the block at the cursor to the last save', 'text', ['C-M-Backspace'], () => {
+  ['revertblock', 'Revert the block at the cursor to the last save (in the diff: the current change)', 'text', ['C-M-Backspace'], () => {
+    if (DIFF.on) { const m = DIFF.marks[DIFF.cur]; if (m && m.diffRevert) m.diffRevert(); else toast('Step to a change first (Ctrl+Alt+] )'); return; }
     const s = caretSeg();
     if (!s) return toast('Put the cursor in the text first', 'error');
     if (!s.touched && segSource(s, []) === s.src) return toast('This block has no unsaved changes');
@@ -5454,12 +8056,40 @@ const ACTION_DEFS = [
   ['selend', 'Select to end of line', 'text', ['C-E'], () => getSelection().modify('extend', 'forward', 'lineboundary')],
   ['deleteline', 'Delete the line', 'text', ['C-d'], () => deleteLine()],
   ['cut', 'Cut the region, or the line', 'text', ['M-w'], () => cutRegionOrLine()],
+  ['copyline', 'Copy the region, or the line (the browser may keep Ctrl+W for itself)', 'text', ['C-w'], () => copyRegionOrLine()],
+  ['delback', 'Delete the character before the caret', 'text', ['C-q'], () => deleteBackwardChar()],
+  ['deltospace', 'Delete back to the previous space', 'text', ['C-Backspace'], () => deleteToSpace()],
+  // the source view's text: the same Emacs bindings, as in a code editor
+  ['src-linestart', 'Source: start of the code on the line, then of the line', 'source', ['C-a'], () => SOURCE_ACTIONS.lineStart(false)],
+  ['src-lineend', 'Source: end of the code on the line, then of the line', 'source', ['C-e'], () => SOURCE_ACTIONS.lineEnd(false)],
+  ['src-selstart', 'Source: select to the start of the line', 'source', ['C-A'], () => SOURCE_ACTIONS.lineStart(true)],
+  ['src-selend', 'Source: select to the end of the line', 'source', ['C-E'], () => SOURCE_ACTIONS.lineEnd(true)],
+  ['src-deleteline', 'Source: delete the line', 'source', ['C-d'], () => SOURCE_ACTIONS.deleteLine()],
+  ['src-duplicate', 'Source: duplicate the region, or the line', 'source', ['C-p'], () => SOURCE_ACTIONS.duplicate()],
+  ['src-copy', 'Source: copy the region, or the line', 'source', ['C-w'], () => SOURCE_ACTIONS.copy()],
+  ['src-cut', 'Source: cut the region, or the line', 'source', ['M-w'], () => SOURCE_ACTIONS.cut()],
+  ['src-delback', 'Source: delete the character before the caret', 'source', ['C-q'], () => SOURCE_ACTIONS.deleteBackward()],
+  ['src-deltospace', 'Source: delete back to the previous space', 'source', ['C-Backspace'], () => SOURCE_ACTIONS.deleteToSpace()],
+  ['src-indent', 'Source: indent the region (or type two spaces)', 'source', ['Tab'], () => SOURCE_ACTIONS.indent()],
+  ['src-unindent', 'Source: unindent the region, or the line', 'source', ['S-Tab'], () => SOURCE_ACTIONS.unindent()],
+  ['src-newline', 'Source: new line, indented as this one', 'source', ['Enter'], () => SOURCE_ACTIONS.newline()],
+  ['src-goto', 'Source: go to line', 'source', ['C-g'], () => SOURCE_ACTIONS.gotoLine()],
+  ['src-comment', 'Source: comment the region (or line) out with %, or back in', 'source', ['C-/'], () => SOURCE_ACTIONS.toggleComment()],
   ['duplicate', 'Duplicate the region, or the line', 'text', ['C-p'], () => duplicate()],
   ['expand', 'Expand the selection', 'text', ['C-+', 'C-='], () => expandRegion()],
   // the chrome: every button of the bars and the ☰ menu has a key too
   ['menu', 'Open or close the ☰ menu', 'global', ['C-M-m'], () => $('#menubtn').click()],
-  ['open', 'Open a paper directory…', 'global', ['C-M-o'], () => $('#openbtn').click()],
+  ['open', 'Open a paper directory…', 'global', ['C-o', 'C-M-o'], () => $('#openbtn').click()],
+  ['details', 'Show the structure: where environments start and end, labels', 'global', ['C-M-i'], () => $('#detailsbtn').click()],
+  ['source', 'Source view of the .tex and .bib files', 'global', ['C-M-e'], () => toggleSource()],
+  ['srcwrap', 'Source view: wrap long lines or not', 'global', [], () => { buildSourceView(); setSourceWrap(!SRC.wrap); }],
+  ['external', 'Open the file at the cursor\'s line in your own editor', 'global', ['C-M-z'], () => openExternalHere()],
+  ['srcpreview', 'Source view: preview only (edit in your own editor)', 'global', [], () => { buildSourceView(); setSourcePreview(!SRC.preview); }],
   ['history', 'Save history…', 'global', ['C-M-t'], () => $('#historybtn').click()],
+  ['files', 'Files: section files, images, rename, include…', 'global', ['C-M-n'], () => openFiles()],
+  ['tofile', 'Move the section at the cursor into a file of its own', 'text', ['C-M-y'], () => { const s = headingSegAtCaret(); if (s) splitToFile(s); }],
+  ['splitfiles', 'One file per section (every section into sections/)', 'global', [], () => splitAllSections()],
+  ['addimage', 'Add an image as a figure after the block at the cursor', 'global', [], () => pickImages(caretSeg())],
   ['reload', 'Reload the document from disk', 'global', ['C-M-l'], () => $('#reloadbtn').click()],
   ['build', 'Build the PDF now', 'global', ['C-M-b'], () => $('#rebuildbtn').click()],
   ['cleanbuild', 'Clean build (set the .aux, .bbl aside first)', 'global', ['C-M-B'], () => $('#cleanbtn').click()],
@@ -5467,16 +8097,59 @@ const ACTION_DEFS = [
   ['paper', 'Paper metadata and conversion…', 'global', ['C-M-p'], () => $('#paperbtn').click()],
   ['keys', 'Keyboard shortcuts…', 'global', ['C-M-,'], () => $('#keysbtn').click()],
   ['help', 'Help', 'global', ['C-M-h'], () => $('#help').click()],
+  ['report', 'Report a problem (keeps the last minutes of what happened)', 'global', ['C-M-q'], () => REC.report()],
   ['theme', 'Colour scheme: auto, light, dark', 'global', ['C-M-g'], () => $('#theme').click()],
   ['cols', 'One or two columns', 'global', ['C-M-w'], () => $('#cols').click()],
   ['textsmaller', 'Smaller paper text', 'global', ['C-M--'], () => $('#textsmaller').click()],
   ['textbigger', 'Larger paper text', 'global', ['C-M-='], () => $('#textbigger').click()],
   ['textreset', 'Reset the paper text size', 'global', ['C-M-0'], () => $('#textsize').click()],
+  ['narrower', 'Narrower paper (one column)', 'global', [], () => setDocWidth(+$('#docwidth').value - 4, true)],
+  ['wider', 'Wider paper (one column)', 'global', [], () => setDocWidth(+$('#docwidth').value + 4, true)],
   ['diff', 'Show or leave the diff of what changed', 'global', ['C-M-v'], () => ACTIONS.diff()],
   ['diffprev', 'Previous change in the diff', 'global', ['C-M-['], () => { if (DIFF.on) $('#diffprev').click(); }],
   ['diffnext', 'Next change in the diff', 'global', ['C-M-]'], () => { if (DIFF.on) $('#diffnext').click(); }],
   ['ttsopts', 'Reading speed and voice', 'global', ['C-M-u'], () => $('#ttsopts').click()],
 ];
+
+// From block to block (or heading to heading) without the mouse: the caret
+// goes to the start of the next one that can hold it, which is brought into
+// view and announced (its kind and first words) for screen readers.
+function stepBlock(dir, headings) {
+  if (SRC && SRC.on) return;
+  const blocks = ORDER.filter((s) => s.el && s.el.isConnected && !s.removed && (headings ? s.kind === 'heading' : s.kind !== 'gap' && s.kind !== 'hidden'));
+  if (!blocks.length) return;
+  const here = caretSeg();
+  let i = here ? ORDER.indexOf(here) : -1;
+  let next = null;
+  if (i < 0) {
+    // no caret: the first (or last) block below the bars
+    const top = chromeBottom();
+    next = dir > 0 ? blocks.find((s) => s.el.getBoundingClientRect().bottom > top + 4) : [...blocks].reverse().find((s) => s.el.getBoundingClientRect().top < top);
+  } else {
+    next = dir > 0 ? blocks.find((s) => ORDER.indexOf(s) > i) : [...blocks].reverse().find((s) => ORDER.indexOf(s) < i);
+  }
+  if (!next) { toast(dir > 0 ? 'This is the last one' : 'This is the first one'); return; }
+  navPush();
+  const target = next.edit && (next.edit.isContentEditable || next.edit.tagName === 'TEXTAREA') ? next.edit : null;
+  if (target) {
+    if (target.tagName === 'TEXTAREA') { target.focus({ preventScroll: true }); target.setSelectionRange(0, 0); }
+    else {
+      const r = document.createRange(); r.selectNodeContents(target); r.collapse(true);
+      target.focus({ preventScroll: true });
+      const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
+    }
+  } else { next.el.tabIndex = -1; next.el.focus({ preventScroll: true }); }
+  revealChanged(next.el.getBoundingClientRect(), next);
+  const kind = { heading: 'Heading', para: 'Paragraph', figure: 'Figure', table: 'Table', code: 'Code', quote: 'Quote' }[next.kind] || 'Block';
+  announce(`${kind}: ${(next.edit ? next.edit.textContent || next.edit.value || '' : next.el.textContent).trim().slice(0, 80)}`);
+}
+// A message for screen readers only (the polite live region).
+function announce(msg) {
+  let r = document.getElementById('sr-live');
+  if (!r) { r = el('div'); r.id = 'sr-live'; r.className = 'sr-only'; r.setAttribute('aria-live', 'polite'); document.body.append(r); }
+  r.textContent = '';
+  requestAnimationFrame(() => { r.textContent = msg; });
+}
 
 // the block the caret is in, for the block actions above
 function caretSeg() {
@@ -5496,8 +8169,9 @@ let USER_KEYS = {};
 function applyKeymap() {
   for (const k of Object.keys(GLOBAL_KEYS)) if (k !== 'Escape') delete GLOBAL_KEYS[k];
   for (const k of Object.keys(TEXT_KEYS)) delete TEXT_KEYS[k];
+  for (const k of Object.keys(SOURCE_KEYS)) delete SOURCE_KEYS[k];
   for (const [id, , scope, defaults, fn] of ACTION_DEFS) {
-    for (const key of USER_KEYS[id] || defaults) (scope === 'global' ? GLOBAL_KEYS : TEXT_KEYS)[key] = fn;
+    for (const key of USER_KEYS[id] || defaults) ({ global: GLOBAL_KEYS, text: TEXT_KEYS, source: SOURCE_KEYS }[scope])[key] = fn;
   }
 }
 fetch('/api/keys').then((r) => r.json()).then((k) => { USER_KEYS = k || {}; applyKeymap(); }).catch(applyKeymap);
@@ -5517,12 +8191,14 @@ function drawKeys() {
   const list = $('#keys-list');
   list.textContent = '';
   const current = (id, d) => KEYS_DRAFT[id] || d;
+  // a key clashes with another of the same place, or with a global one
   const used = {};
-  for (const [id, , , d] of ACTION_DEFS) for (const k of current(id, d)) (used[k] = used[k] || []).push(id);
-  for (const [id, label, , d] of ACTION_DEFS) {
+  for (const [id, , scope, d] of ACTION_DEFS) for (const k of current(id, d)) (used[k] = used[k] || []).push(scope);
+  const clash = (k, scope) => { const u = used[k] || []; return u.filter((x) => x === scope).length > 1 || (scope === 'global' ? u.length > 1 : u.includes('global')); };
+  for (const [id, label, scope, d] of ACTION_DEFS) {
     const keys = current(id, d);
     const row = el('div', 'keyrow');
-    if (keys.some((k) => used[k].length > 1)) row.classList.add('conflict');
+    if (keys.some((k) => clash(k, scope))) row.classList.add('conflict');
     if (RECORDING === id) row.classList.add('recording');
     row.append(el('span', '', label));
     const ks = el('span', 'keys');
@@ -5544,7 +8220,7 @@ document.addEventListener('keydown', (e) => {
 }, true);
 $('#keysbtn').onclick = openKeys;
 $('#keys-close').onclick = () => { RECORDING = null; $('#keysbox').hidden = true; };
-$('#keys-reset').onclick = () => { KEYS_DRAFT = {}; drawKeys(); };
+$('#keys-reset').onclick = () => { KEYS_DRAFT = {}; drawKeys(); try { localStorage.removeItem('mutedHouse'); } catch (e) { /* storage unavailable */ } };
 $('#keys-save').onclick = async () => {
   await fetch('/api/keys', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
     body: JSON.stringify(KEYS_DRAFT) });
@@ -5675,6 +8351,27 @@ async function deleteHistory(all) {
 }
 
 $('#historybtn').onclick = openHistory;
+$('#filesbtn').onclick = () => { closePopovers(); openFiles(); };
+$('#files-close').onclick = closeFiles;
+$('#files-newsec').onclick = () => {
+  const title = prompt('Title of the new section (it names the file too):', '');
+  if (title === null) return;
+  closeFiles();
+  newSectionFile(title, FILESUI.at);
+};
+$('#files-new').onclick = () => {
+  const name = (prompt('Name of the new file (a .tex path inside the paper\'s folder):', sectionsDir() + 'notes.tex') || '').trim();
+  if (!name) return;
+  const dest = /\.tex$/.test(name) ? name : name + '.tex';
+  if (dest.split('/').some((p) => !p || p === '..' || p.startsWith('.'))) { toast('That name is not inside the paper\'s folder', 'error'); return; }
+  if (knownFiles().has(dest)) { toast(`${dest} already exists: use Include for it`, 'error'); return; }
+  closeFiles();
+  const place = FILESUI.at ? { segs: FILES[FILESUI.at.file].segs, after: FILESUI.at } : newSectionPlace(null);
+  structural(() => { newFile(dest, PLACEHOLDER + '\n'); insertInputAfter(place, dest); return PLACEHOLDER; });
+  toast(`New file ${dest}; save to write it`, 'ok');
+};
+$('#files-image').onclick = () => { closeFiles(); pickImages(FILESUI.at); };
+$('#files-split').onclick = () => { closeFiles(); splitAllSections(); };
 $('#history-delete').onclick = () => deleteHistory(false);
 $('#history-clear').onclick = () => deleteHistory(true);
 $('#history-close').onclick = () => { $('#historybox').hidden = true; };
@@ -5683,20 +8380,141 @@ $('#history-close').onclick = () => { $('#historybox').hidden = true; };
 
 let OPEN_PROJECT = null;
 
+// ---- Open: recent papers, then the system's folder dialog or a new paper
+const OPEN = { path: null };
+const agoText = (t) => { const d = Date.now() / 1000 - t; return !t ? '' : d < 3600 ? Math.max(1, Math.round(d / 60)) + ' min ago' : d < 86400 ? Math.round(d / 3600) + ' h ago' : d < 86400 * 30 ? Math.round(d / 86400) + ' days ago' : new Date(t * 1000).toLocaleDateString(); };
 async function chooseProjectDirectory() {
-  const r = await fetch('/api/pick-directory', { method: 'POST', headers: { 'X-Token': TOKEN, 'Content-Type': 'application/json' }, body: '{}' });
-  if (r.status === 204) return;
-  if (!r.ok) { banner('Could not choose a paper directory.'); return; }
-  const picked = await r.json();
-  if (!picked.mains.length) { banner('That directory contains no main LaTeX documents.'); return; }
-  OPEN_PROJECT = picked;
-  $('#open-path').textContent = picked.path;
+  $('#openbox').hidden = false;
+  $('#open-mainrow').hidden = true;
+  let recent = await fetch('/api/recent', { headers: { 'X-Token': TOKEN } }).then((r) => r.json()).catch(() => []);
+  if (!Array.isArray(recent)) recent = [];
+  const list = $('#open-recent');
+  list.textContent = '';
+  for (const [i, p] of recent.entries()) {
+    const b = el('button', 'open-paper' + (p.current ? ' current' : ''));
+    b.setAttribute('role', 'listitem');
+    b.append(el('span', 'open-paper-no', i < 9 ? String(i + 1) : ''), el('span', 'open-paper-title', p.title || p.main), el('span', 'open-paper-where', p.path.replace(/^\/home\/[^/]+/, '~') + '/' + p.main),
+      el('span', 'open-paper-when', p.current ? 'open now' : agoText(p.t)));
+    b.title = 'Open ' + p.path + '/' + p.main;
+    b.onclick = () => { if (p.current) { $('#openbox').hidden = true; return; } openProject(p.path, p.main); };
+    list.append(b);
+  }
+  $('#open-recent-wrap').hidden = !recent.length;
+  $('#open-hint').hidden = !recent.length;
+  const first = list.querySelector('button') || $('#open-system');
+  if (first) first.focus({ preventScroll: true });
+}
+// The documents of a folder chosen with the system's dialog: one opens at
+// once, several are offered as buttons
+function offerMains(dir, mains) {
   const select = $('#open-main');
   select.textContent = '';
-  for (const main of picked.mains) select.append(new Option(main, main));
-  $('#openbox').hidden = false;
-  select.focus();
+  for (const m of mains) select.append(new Option(m, m));
+  OPEN_PROJECT = { path: dir, mains };
+  if (mains.length === 1) { openSelectedProject(); return; }
+  const row = $('#open-mains');
+  row.textContent = '';
+  for (const m of mains) {
+    const b = el('button', 'primary', 'Open ' + m);
+    b.title = 'Open ' + dir + '/' + m;
+    b.onclick = () => { select.value = m; openSelectedProject(); };
+    row.append(b);
+  }
+  $('#open-mainsay').textContent = 'This folder has ' + mains.length + ' documents:';
+  $('#open-mainrow').hidden = false;
+  row.querySelector('button').focus();
 }
+async function openProject(path, main) {
+  OPEN_PROJECT = { path, mains: [main] };
+  const select = $('#open-main');
+  select.textContent = '';
+  select.append(new Option(main, main));
+  await openSelectedProject();
+}
+async function pickDirectory(title) {
+  const r = await fetch('/api/pick-directory', { method: 'POST', headers: { 'X-Token': TOKEN, 'Content-Type': 'application/json' }, body: JSON.stringify({ title }) }).catch(() => null);
+  if (!r || r.status === 204) return null;
+  if (!r.ok) { banner('Could not show the system\'s folder dialog (it needs zenity or kdialog on Linux).'); return null; }
+  return r.json();
+}
+$('#open-system').onclick = async () => {
+  const picked = await pickDirectory('Open a paper folder');
+  if (!picked) return;
+  if (!picked.mains.length) { toast('That folder has no main LaTeX document: \\documentclass and \\begin{document}', 'error'); return; }
+  offerMains(picked.path, picked.mains);
+};
+
+// ---- New paper: a folder with main.tex for a venue, sections/, references.bib
+// and cryptobib, opened at once
+async function openNewPaper() {
+  $('#openbox').hidden = true;
+  const box = $('#newbox');
+  box.hidden = false;
+  $('#new-status').textContent = '';
+  $('#new-create').disabled = false;
+  const v = await fetch('/api/venues').then((r) => r.json()).catch(() => null);
+  if (v) {
+    const sel = $('#new-venue'), was = sel.value;
+    sel.textContent = '';
+    for (const x of v.venues) sel.append(new Option(x.label, x.id));
+    sel.value = was || 'ieee';
+    if (!$('#new-parent').value) $('#new-parent').value = v.parent.replace(v.home, '~');
+  }
+  if (!$('#new-authors').children.length) newAuthorRow();
+  newWhere();
+  $('#new-name').focus();
+}
+function newAuthorRow() {
+  const row = el('span', 'new-author');
+  for (const [k, ph] of [['name', 'Name'], ['email', 'Email'], ['affiliation', 'Affiliation'], ['country', 'Country']]) {
+    const i = el('input'); i.dataset.k = k; i.placeholder = ph; i.setAttribute('aria-label', 'Author ' + ph.toLowerCase());
+    row.append(i);
+  }
+  const x = el('button', '', '✕'); x.title = 'Remove this author'; x.onclick = () => row.remove();
+  row.append(x);
+  $('#new-authors').append(row);
+  return row;
+}
+function newWhere() {
+  const p = $('#new-parent').value.trim().replace(/\/+$/, ''), n = $('#new-name').value.trim();
+  $('#new-where').textContent = n ? '→ ' + p + '/' + n + '/main.tex' : '';
+}
+$('#new-name').addEventListener('input', newWhere);
+$('#new-parent').addEventListener('input', newWhere);
+$('#new-addauthor').onclick = () => newAuthorRow().querySelector('input').focus();
+$('#new-pick').onclick = async () => {
+  const picked = await pickDirectory('The folder to make the paper in');
+  if (picked) { $('#new-parent').value = picked.path; newWhere(); }
+};
+$('#new-cancel').onclick = () => { $('#newbox').hidden = true; };
+$('#open-new').onclick = openNewPaper;
+$('#new-create').onclick = async () => {
+  if (!$('#new-name').value.trim()) { $('#new-status').textContent = 'Give the new folder a name.'; $('#new-name').focus(); return; }
+  if (editedFiles().length && !confirm('You have unsaved edits; opening the new paper discards them. Continue?')) return;
+  const md = {
+    title: $('#new-ptitle').value.trim(),
+    abstract: $('#new-abstract').value.trim(),
+    keywords: $('#new-keywords').value.split(',').map((k) => k.trim()).filter(Boolean),
+    authors: [...document.querySelectorAll('#new-authors .new-author')].map((r) => Object.fromEntries([...r.querySelectorAll('input')].map((i) => [i.dataset.k, i.value.trim()]))).filter((a) => a.name),
+  };
+  const cryptobib = (document.querySelector('input[name=new-cb]:checked') || {}).value || 'none';
+  $('#new-create').disabled = true;
+  $('#new-status').textContent = cryptobib === 'none' ? 'Making the paper…' : 'Making the paper and fetching cryptobib (it is large: this can take a minute)…';
+  const r = await fetch('/api/new-project', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
+    body: JSON.stringify({ parent: $('#new-parent').value.trim(), name: $('#new-name').value.trim(), venue: $('#new-venue').value,
+      anonymous: $('#new-anon').checked, cryptobib, metadata: md }) }).catch(() => null);
+  const d = r ? await r.json().catch(() => ({})) : { error: 'no answer from the editor' };
+  $('#new-create').disabled = false;
+  if (!r || !r.ok) { $('#new-status').textContent = 'Could not make it: ' + (d.error || r.status); return; }
+  $('#newbox').hidden = true;
+  forgetDocument();
+  await load(false);
+  AUXVER = DOC.auxver;
+  for (const k of ['new-name', 'new-ptitle', 'new-abstract', 'new-keywords']) $('#' + k).value = '';
+  $('#new-authors').textContent = '';
+  toast('New paper ' + d.path + '/' + d.main, 'ok');
+  if (d.warnings && d.warnings.length) banner(d.warnings.join(' '));
+};
 
 async function openSelectedProject() {
   if (!OPEN_PROJECT) return;
@@ -5705,6 +8523,7 @@ async function openSelectedProject() {
     body: JSON.stringify({ path: OPEN_PROJECT.path, main: $('#open-main').value }) });
   if (!r.ok) { banner('Could not open it: ' + (await r.json()).error); return; }
   $('#openbox').hidden = true;
+  OPEN.path = null;
   OPEN_PROJECT = null;
   forgetDocument();
   await load(false);
@@ -5726,7 +8545,7 @@ function forgetDocument() {
 function fillMains() {
   const sel = $('#mainsel');
   const mains = DOC.mains || [];
-  sel.hidden = mains.length < 2;
+  $('#mainrow').hidden = mains.length < 2;
   sel.textContent = '';
   const here = DOC.main.split('/').pop();
   for (const m of mains) sel.append(new Option(m, m, false, m === here));
@@ -6011,3 +8830,804 @@ $('#md-close').onclick = () => {
   if (MD.dirty && !confirm('Discard unsaved metadata changes?')) return;
   $('#paperbox').hidden = true;
 };
+
+// ============================================================ source view
+//
+// The .tex and .bib files of the folder as text, with line numbers and light
+// syntax colouring, beside a small list of the files.  A file of the document
+// edited here is the same text as the paper view (the page is drawn again
+// from it); another .tex or a .bib file is kept apart and saved with Ctrl+S
+// like the rest.
+var SRC = { on: false,   // var: read by markEdited() before this line runs
+  name: null, files: [], extra: {}, timer: 0, snap: 0 };
+
+function srcDoc(name) { return !!FILES[name] && !!(DOC && Object.prototype.hasOwnProperty.call(DOC.files, name)); }
+function srcText(name) {
+  if (srcDoc(name)) { commit(); return FILES[name].text; }
+  return SRC.extra[name] ? SRC.extra[name].text : '';
+}
+function extraEdited() { return Object.keys(SRC.extra).filter((n) => SRC.extra[n].text !== SRC.extra[n].disk); }
+
+const escSrc = (t) => t.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+// colours for LaTeX: comments, \commands, \begin/\end{env}, maths, braces
+function highlightTex(text) {
+  const re = /(%[^\n]*)|(\\(?:begin|end)\s*\{[^}\n]*\})|(\\(?:[A-Za-z@]+\*?|.))|(\$\$?(?:[^$\\]|\\.)*?\$\$?)|([{}\[\]])/g;
+  let out = '', last = 0, m;
+  while ((m = re.exec(text))) {
+    out += escSrc(text.slice(last, m.index));
+    const t = escSrc(m[0]);
+    if (m[1]) out += `<span class="hc">${t}</span>`;
+    else if (m[2]) out += `<span class="he">${t}</span>`;
+    else if (m[3]) out += `<span class="hk">${t}</span>`;
+    else if (m[4]) out += `<span class="hm">${highlightMath(m[0])}</span>`;
+    else out += `<span class="hb">${t}</span>`;
+    last = m.index + m[0].length;
+  }
+  return out + escSrc(text.slice(last));
+}
+function highlightMath(t) { return escSrc(t).replace(/\\[A-Za-z]+/g, '<span class="hk">$&</span>'); }
+// colours for BibTeX: @type{key, field = …
+function highlightBib(text) {
+  return text.split('\n').map((line) => {
+    let m;
+    if ((m = /^(\s*)(@\w+)(\s*\{\s*)([^,\s]*)(.*)$/.exec(line))) return escSrc(m[1]) + `<span class="he">${escSrc(m[2])}</span>` + escSrc(m[3]) + `<span class="hk">${escSrc(m[4])}</span>` + escSrc(m[5]);
+    if ((m = /^(\s*)([A-Za-z][\w-]*)(\s*=)(.*)$/.exec(line))) return escSrc(m[1]) + `<span class="hf">${escSrc(m[2])}</span>` + escSrc(m[3]) + highlightTex(m[4]);
+    if (/^\s*%/.test(line)) return `<span class="hc">${escSrc(line)}</span>`;
+    return highlightTex(line);
+  }).join('\n');
+}
+
+function buildSourceView() {
+  if ($('#srcview')) return;
+  const v = el('div'); v.id = 'srcview'; v.hidden = true;
+  v.innerHTML = `<nav id="srcfiles" aria-label="Files"></nav>
+    <div id="srcmain">
+      <div id="srchead"><b id="srcname"></b><span id="srcstate" class="small"></span><span class="spacer"></span>
+        <select id="srcoutline" title="Go to a heading of this file" aria-label="Headings of this file"></select>
+        <span id="srcpos" class="small" title="Go to line (Ctrl+G)"></span>
+        <button id="srcrename" title="Rename this file (every \\input of it, or \\bibliography naming it, is updated)">Rename…</button>
+        <button id="srcdelete" title="Move this file to the editor's trash (.paper-editor/trash)">Delete…</button>
+        <button id="srcwrapbtn" title="Wrap long lines" aria-pressed="true">Wrap</button>
+        <button id="srcpreview" title="Show the files without editing them here: edit in your own editor, and this view follows the files on disk" aria-pressed="false">Preview only</button>
+        <button id="srcext" title="Open this file at the cursor's line in your editor (Ctrl+Alt+Z)">Open in your editor</button>
+        <button id="srcback" title="Back to the paper at this line (Ctrl+Alt+E or Esc)">Back to the paper</button>
+        <button id="srcx" class="xclose" aria-label="Close the source view" title="Close: back to the paper (Esc)"><svg class="ic" aria-hidden="true"><use href="#i-close"/></svg></button></div>
+      <div id="srcbox"><pre id="srcgutter" aria-hidden="true"></pre>
+        <div id="srcwrap"><pre id="srchl" aria-hidden="true"></pre><textarea id="srcta" spellcheck="false" wrap="soft" aria-label="Source"></textarea></div></div>
+    </div>`;
+  $('#doc').after(v);
+  const ta = $('#srcta');
+  const sync = () => { $('#srchl').style.transform = `translate(${-ta.scrollLeft}px, ${-ta.scrollTop}px)`; $('#srcgutter').scrollTop = ta.scrollTop; };
+  ta.addEventListener('scroll', sync);
+  ta.addEventListener('beforeinput', () => {
+    // one snapshot of the paper's undo history per burst of typing here
+    if (Date.now() - SRC.snap > 1500 && srcDoc(SRC.name)) snapshot();
+    SRC.snap = Date.now();
+  });
+  ta.addEventListener('input', () => {
+    paintSource();
+    const name = SRC.name;
+    if (srcDoc(name)) {
+      clearTimeout(SRC.timer);
+      SRC.timer = setTimeout(() => flushSource(), 400);
+    } else if (SRC.extra[name]) { SRC.extra[name].text = ta.value; markEdited(); drawSourceFiles(); }
+  });
+  const pos = () => {
+    const before = ta.value.slice(0, ta.selectionStart);
+    const line = before.split('\n').length, col = before.length - before.lastIndexOf('\n');
+    $('#srcpos').textContent = `line ${line}, column ${col}`;
+  };
+  ta.addEventListener('keyup', pos); ta.addEventListener('click', pos); ta.addEventListener('select', pos);
+  ta.addEventListener('keydown', (e) => {
+    const k = keyName(e);
+    if (SRC.preview && !e.ctrlKey && !e.altKey && !e.metaKey && (e.key.length === 1 || /^(Enter|Backspace|Delete|Tab)$/.test(e.key))) {
+      if (!(Date.now() - (SRC.saidPreview || 0) < 4000)) toast('Preview only: edit in your editor (Ctrl+Alt+Z), or turn Preview only off to edit here');
+      SRC.saidPreview = Date.now();
+      return;
+    }
+    if (SOURCE_KEYS[k] && !ta.readOnly) { e.preventDefault(); e.stopPropagation(); SOURCE_KEYS[k](); setTimeout(() => ta.dispatchEvent(new Event('keyup')), 0); return; }
+    // a bracket or $ typed over a selection wraps it, as in the page
+    const pair = { '{': '}', '(': ')', '[': ']', $: '$' }[e.key];
+    if (pair && !ta.readOnly && !e.ctrlKey && !e.altKey && !e.metaKey && ta.selectionStart !== ta.selectionEnd) {
+      e.preventDefault();
+      const a = ta.selectionStart, b = ta.selectionEnd, inner = ta.value.slice(a, b);
+      srcReplace(ta, a, b, e.key + inner + pair);
+      ta.setSelectionRange(a + 1, a + 1 + inner.length);
+    }
+  });
+  $('#srcpos').onclick = () => SOURCE_ACTIONS.gotoLine();
+  $('#srcoutline').onchange = () => {
+    const line = +$('#srcoutline').value;
+    if (line) SOURCE_ACTIONS.gotoLine(line);
+    $('#srcoutline').value = '';
+  };
+  $('#srcback').onclick = () => toggleSource(false);
+  $('#srcx').onclick = () => toggleSource(false);
+  $('#srcrename').onclick = () => srcRename();
+  $('#srcdelete').onclick = () => srcDelete();
+  $('#srcwrapbtn').onclick = () => setSourceWrap(!SRC.wrap);
+  $('#srcpreview').onclick = () => setSourcePreview(!SRC.preview);
+  $('#srcext').onclick = () => openExternalHere();
+  let previewOn = false;
+  try { previewOn = localStorage.getItem('srcpreview') === '1'; } catch (e) { /* storage unavailable */ }
+  setSourcePreview(previewOn, true);
+  let wrapOn = true;
+  try { wrapOn = localStorage.getItem('srcwrap') !== '0'; } catch (e) { /* storage unavailable */ }
+  setSourceWrap(wrapOn, true);
+  // a wider or narrower window wraps the lines anew: the line numbers follow
+  new ResizeObserver(() => { if (SRC.on && SRC.wrap) requestAnimationFrame(sizeGutter); }).observe($('#srcwrap'));
+}
+// Preview only: the source view shows the files and follows them on disk,
+// and they are edited in the user's own editor (Open in your editor).
+function setSourcePreview(on, quiet = false) {
+  SRC.preview = !!on;
+  $('#srcpreview').setAttribute('aria-pressed', String(SRC.preview));
+  $('#srcpreview').classList.toggle('pressed', SRC.preview);
+  try { localStorage.setItem('srcpreview', SRC.preview ? '1' : '0'); } catch (e) { /* storage unavailable */ }
+  const ta = $('#srcta');
+  if (SRC.on) {
+    flushSource();
+    ta.readOnly = SRC.preview || !!(SRC.extra[SRC.name] && SRC.extra[SRC.name].truncated);
+  }
+  if (!quiet) toast(SRC.preview ? 'Preview only: edit in your editor (Ctrl+Alt+Z)' : 'The source view edits again');
+}
+// The top of line `line` (from 1) in the source text, in pixels, wrapped
+// lines counted at their height
+function srcLineTop(line) {
+  const hl = $('#srchl'), row = hl && hl.children[line - 1];
+  if (row) return row.getBoundingClientRect().top - hl.getBoundingClientRect().top;
+  const lh = parseFloat(getComputedStyle($('#srcta')).lineHeight) || 18;
+  return (line - 1) * lh;
+}
+// The first line whose row shows at the top of the source view
+function srcTopLine() {
+  const ta = $('#srcta'), rows = $('#srchl').children;
+  if (!rows.length) return Math.floor(ta.scrollTop / (parseFloat(getComputedStyle(ta).lineHeight) || 18)) + 1;
+  const base = $('#srchl').getBoundingClientRect().top;
+  let lo = 0, hi = rows.length - 1;
+  while (lo < hi) {           // the first row whose bottom is below the top
+    const mid = (lo + hi) >> 1;
+    if (rows[mid].getBoundingClientRect().bottom - base > ta.scrollTop + 1) hi = mid; else lo = mid + 1;
+  }
+  return lo + 1;
+}
+
+// ---- your own editor: the file at a line, in the editor of the config's
+// "external_editor" (Emacs, else VS Code, else the system's opener).
+async function openExternal(name, line = 1, col = 1) {
+  if (!name) { toast('No file here to open', 'error'); return; }
+  if (editedFiles().includes(name)) toast(name + ' has unsaved edits here: your editor opens the file on disk (save first to give it them)');
+  const r = await fetch('/api/external-edit', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
+    body: JSON.stringify({ name, line, col }) }).catch(() => null);
+  const d = r ? await r.json().catch(() => ({})) : {};
+  if (!r || !r.ok) { toast('Could not open your editor: ' + (d.error || (r ? 'error ' + r.status : 'no answer from the editor')), 'error'); return; }
+  toast(`Opened ${name}:${line} in ${d.cmd}`, 'ok');
+}
+function openExternalHere() {
+  if (SRC.on) {
+    const ta = $('#srcta'), before = ta.value.slice(0, ta.selectionStart);
+    const line = before.split('\n').length, col = before.length - before.lastIndexOf('\n');
+    // the cursor's line, or the top line when the cursor is off screen
+    const caretOn = srcLineTop(line) >= ta.scrollTop && srcLineTop(line) < ta.scrollTop + ta.clientHeight;
+    return openExternal(SRC.name, caretOn ? line : srcTopLine(), caretOn ? col : 1);
+  }
+  const seg = caretSeg();
+  const at = seg && seg.file ? seg : (() => { const a = viewAnchor(); return a.list ? ORDER.filter((x) => x.el && x.el.isConnected)[a.i] : null; })();
+  if (!at || !at.file) return openExternal(DOC.main, 1);
+  return openExternal(at.file, at.line || 1);
+}
+
+// Long lines wrapped (the default) or scrolled sideways
+function setSourceWrap(on, quiet = false) {
+  SRC.wrap = !!on;
+  $('#srcview').classList.toggle('wrap', SRC.wrap);
+  $('#srcta').setAttribute('wrap', SRC.wrap ? 'soft' : 'off');
+  $('#srcwrapbtn').setAttribute('aria-pressed', String(SRC.wrap));
+  try { localStorage.setItem('srcwrap', SRC.wrap ? '1' : '0'); } catch (e) { /* storage unavailable */ }
+  if (SRC.on) { paintSource(); $('#srcta').dispatchEvent(new Event('scroll')); }
+  if (!quiet) toast(SRC.wrap ? 'Long lines wrapped' : 'Long lines not wrapped');
+}
+// Each line number as tall as its line once wrapped
+function sizeGutter() {
+  const g = $('#srcgutter'), hl = $('#srchl'), ta = $('#srcta');
+  hl.style.width = ta.clientWidth + 'px';
+  const rows = hl.children, nums = g.children;
+  if (!SRC.wrap || $('#srcwrap').classList.contains('plain')) { for (const n of nums) n.style.height = ''; return; }
+  const hs = [...rows].map((r) => r.getBoundingClientRect().height);
+  for (let i = 0; i < nums.length; i++) nums[i].style.height = hs[i] ? hs[i] + 'px' : '';
+  g.scrollTop = ta.scrollTop;
+}
+
+function paintSource() {
+  const ta = $('#srcta');
+  const text = ta.value;
+  // a very large file (cryptobib's crypto.bib) is shown without colours
+  const plain = text.length > 600000;
+  $('#srcwrap').classList.toggle('plain', plain);
+  const lines = text.split('\n');
+  const bib = /\.bib$/.test(SRC.name || '');
+  // one row per line, so that a wrapped line's number can be as tall as it
+  $('#srchl').innerHTML = plain ? '' : lines.map((l) => '<div>' + ((bib ? highlightBib(l) : highlightTex(l)) || '\u200b') + '</div>').join('');
+  const n = lines.length;
+  if ($('#srcgutter').dataset.n !== String(n)) {
+    $('#srcgutter').innerHTML = Array.from({ length: n }, (_, i) => `<div>${i + 1}</div>`).join('');
+    $('#srcgutter').dataset.n = String(n);
+  }
+  sizeGutter();
+  $('#srcgutter').scrollTop = ta.scrollTop;
+  const name = SRC.name;
+  const edited = srcDoc(name) ? ta.value !== FILES[name].disk : (SRC.extra[name] && SRC.extra[name].text !== SRC.extra[name].disk);
+  $('#srcstate').textContent = edited ? 'edited' : '';
+  clearTimeout(paintSource.t);
+  paintSource.t = setTimeout(() => { markSourceChanges(); fillSourceOutline(); }, 250);
+}
+
+// The lines changed since the last save, marked in the gutter as an editor's
+// change bar: added, changed, and where lines were taken out.
+function markSourceChanges() {
+  const g = $('#srcgutter');
+  const name = SRC.name;
+  const disk = srcDoc(name) ? FILES[name].disk : SRC.extra[name] && SRC.extra[name].disk;
+  for (const d of g.querySelectorAll('.chg-add, .chg-mod, .chg-del')) d.classList.remove('chg-add', 'chg-mod', 'chg-del');
+  const text = $('#srcta').value;
+  if (disk === undefined || text.length > 600000) return;
+  const a = disk === null ? [] : disk.split('\n'), b = text.split('\n');
+  let lo = 0;
+  while (lo < a.length && lo < b.length && a[lo] === b[lo]) lo++;
+  let ea = a.length, eb = b.length;
+  while (ea > lo && eb > lo && a[ea - 1] === b[eb - 1]) { ea--; eb--; }
+  const rows = g.children;
+  const mark = (i, cls) => { if (rows[i]) rows[i].classList.add(cls); };
+  const ops = lcs(a.slice(lo, ea), b.slice(lo, eb), (x, y) => x === y);
+  if (!ops) { for (let i = lo; i < eb; i++) mark(i, 'chg-mod'); return; }
+  let j = lo, pendingDel = 0;
+  for (let k = 0; k < ops.length; k++) {
+    const [op] = ops[k];
+    if (op === '=') { if (pendingDel) { mark(j, 'chg-del'); pendingDel = 0; } j++; continue; }
+    if (op === '-') { pendingDel++; continue; }
+    mark(j, pendingDel ? 'chg-mod' : 'chg-add');
+    if (pendingDel) pendingDel--;
+    j++;
+  }
+  if (pendingDel) mark(Math.min(j, rows.length - 1), 'chg-del');
+}
+
+// The headings of the file, to jump to.
+function fillSourceOutline() {
+  const sel = $('#srcoutline');
+  const lines = $('#srcta').value.split('\n');
+  const items = [];
+  const re = /^\s*\\(part|chapter|section|subsection|subsubsection|paragraph)\*?\s*(?:\[[^\]]*\])?\{(.*)/;
+  const indent = { part: '', chapter: '', section: '', subsection: '\u2003', subsubsection: '\u2003\u2003', paragraph: '\u2003\u2003\u2003' };
+  lines.forEach((l, i) => {
+    const m = re.exec(l);
+    if (m) items.push([i + 1, indent[m[1]] + plainOfLatex(m[2].replace(/\}[^}]*$/, '')).slice(0, 70)]);
+    else if (/^\s*@\w+\s*\{\s*([^,\s]+)/.test(l) && /\.bib$/.test(SRC.name || '')) items.push([i + 1, /\{\s*([^,\s]+)/.exec(l)[1]]);
+  });
+  const key = JSON.stringify(items);
+  if (sel.dataset.key === key) return;
+  sel.dataset.key = key;
+  sel.textContent = '';
+  sel.append(new Option(items.length ? `Go to… (${items.length})` : 'No headings', ''));
+  for (const [line, label] of items.slice(0, 2000)) sel.append(new Option(`${label}  ·  ${line}`, String(line)));
+  sel.hidden = !items.length;
+}
+
+// The text of the source view into the document (a file of the paper): the
+// page is drawn again from it.
+function flushSource() {
+  clearTimeout(SRC.timer);
+  const name = SRC.name;
+  if (!SRC.on || !name || !srcDoc(name)) return;
+  const v = $('#srcta').value;
+  commit();
+  if (FILES[name].text === v) return;
+  FILES[name].text = v;
+  render();
+  drawSourceFiles();
+}
+
+async function openSourceFile(name, line, screenY = null) {
+  flushSource();
+  if (!srcDoc(name) && !SRC.extra[name]) {
+    const r = await fetch('/api/srcfile?name=' + encodeURIComponent(name)).catch(() => null);
+    const d = r && r.ok ? await r.json() : null;
+    if (!d) { toast('Could not read ' + name, 'error'); return; }
+    SRC.extra[name] = { text: d.text, disk: d.text, base: d.hash, truncated: !!d.truncated };
+  }
+  SRC.name = name;
+  const ta = $('#srcta');
+  ta.value = srcText(name);
+  const part = !!(SRC.extra[name] && SRC.extra[name].truncated);
+  ta.readOnly = part || !!SRC.preview;
+  $('#srcname').textContent = name;
+  paintSource();
+  if (part) $('#srcstate').textContent = 'large file: its first 2 MB, read only';
+  drawSourceFiles();
+  const lh = parseFloat(getComputedStyle(ta).lineHeight) || 18;
+  // the line where the paper showed its block (screenY), else a few lines down
+  // (kept inside the text box: the paper's block may sit above its top)
+  const place = () => {
+    const want = screenY !== null ? Math.max(0, Math.min(ta.clientHeight - 2 * lh, screenY - ta.getBoundingClientRect().top)) : 3 * lh;
+    ta.scrollTop = Math.max(0, srcLineTop(line || 1) - want);
+    ta.dispatchEvent(new Event('scroll'));
+  };
+  place();
+  // again once the wrapped rows have their final heights (the gutter and the
+  // text box size themselves after this first paint)
+  requestAnimationFrame(() => { if (SRC.on && SRC.name === name) place(); });
+  if (line) {
+    const lines = ta.value.split('\n');
+    const at = lines.slice(0, line - 1).reduce((a, l) => a + l.length + 1, 0);
+    ta.setSelectionRange(at, at);
+  }
+  ta.focus({ preventScroll: true });
+  ta.dispatchEvent(new Event('scroll'));
+}
+
+function drawSourceFiles() {
+  const nav = $('#srcfiles');
+  if (!nav) return;
+  nav.textContent = '';
+  const add = el('button', 'srcnew', '+ New file…');
+  add.title = 'A new .tex or .bib file in the paper\'s folder (a .tex can be read by the document at once)';
+  add.onclick = () => srcNewFile();
+  nav.append(add);
+  if ($('#srcrename')) {
+    const main = SRC.name === DOC.main;
+    $('#srcrename').disabled = main || !SRC.name;
+    $('#srcdelete').disabled = main || !SRC.name;
+    $('#srcrename').title = main ? 'The main file is renamed outside the editor' : 'Rename this file (every \\input of it, or \\bibliography naming it, is updated)';
+    $('#srcdelete').title = main ? 'The main file cannot be deleted here' : 'Move this file to the editor\'s trash (.paper-editor/trash)';
+  }
+  const groups = [['Document', SRC.files.filter((f) => f.doc)], ['Other .tex', SRC.files.filter((f) => !f.doc && f.name.endsWith('.tex'))],
+    ['Bibliography', SRC.files.filter((f) => f.name.endsWith('.bib'))]];
+  for (const [title, files] of groups) {
+    if (!files.length) continue;
+    nav.append(el('div', 'srcgroup', title));
+    for (const f of files) {
+      const b = el('button', 'srcfile', f.name);
+      b.title = f.name;
+      const edited = srcDoc(f.name) ? (f.name === SRC.name ? $('#srcta').value : FILES[f.name].text) !== FILES[f.name].disk
+        : SRC.extra[f.name] && SRC.extra[f.name].text !== SRC.extra[f.name].disk;
+      if (edited) b.classList.add('edited');
+      if (f.name === SRC.name) { b.classList.add('current'); b.setAttribute('aria-current', 'true'); }
+      b.onclick = () => openSourceFile(f.name);
+      nav.append(b);
+    }
+  }
+}
+
+async function toggleSource(on = !SRC.on) {
+  if (on === SRC.on) return;
+  buildSourceView();
+  if (on) {
+    leaveDiff();
+    commit();
+    // where the caret is in the paper: that file and line
+    const caret = caretSeg();
+    SRC.paperAt = caret && caret.el ? caret : null;      // where a new file's \input goes
+    // the source shows the same place as the paper: the caret's block when
+    // it is on screen, otherwise the block at the top, each line where its
+    // block was on the screen
+    const onScreen = (x) => { if (!x || !x.el || !x.file) return false; const r = x.el.getBoundingClientRect(); return r.bottom > chromeBottom() && r.top < innerHeight; };
+    let seg = onScreen(caret) ? caret : null;
+    if (!seg) { const a = viewAnchor(); seg = a.list ? ORDER.filter((x) => x.el && x.el.isConnected)[a.i] : null; if (seg && !seg.file) seg = null; }
+    if (!seg && caret && caret.file) seg = caret;
+    const screenY = onScreen(seg) ? seg.el.getBoundingClientRect().top : null;
+    const name = seg && seg.file ? seg.file : (SRC.name && (srcDoc(SRC.name) || SRC.extra[SRC.name]) ? SRC.name : DOC.main);
+    const line = seg && seg.file ? seg.line : null;
+    SRC.on = true;
+    document.body.classList.add('sourcemode');
+    $('#srcview').hidden = false;
+    $('#sourcebtn').setAttribute('aria-pressed', 'true');
+    window.scrollTo(0, 0);
+    try { SRC.files = await (await fetch('/api/srcfiles')).json(); } catch (e) { SRC.files = []; }
+    if (!Array.isArray(SRC.files)) SRC.files = [];
+    for (const n of Object.keys(FILES)) if (!SRC.files.some((f) => f.name === n)) SRC.files.unshift({ name: n, doc: true });
+    await openSourceFile(name, line, screenY);
+    return;
+  }
+  flushSource();
+  const ta = $('#srcta');
+  const caretLine = ta.value.slice(0, ta.selectionStart).split('\n').length;
+  const name = SRC.name;
+  // the caret's line when it is on screen, otherwise the top line; its block
+  // goes where that block's first line was on the screen
+  const visible = (l) => srcLineTop(l) + 2 >= ta.scrollTop && srcLineTop(l) < ta.scrollTop + ta.clientHeight;
+  const useCaret = visible(caretLine) && document.activeElement === ta;
+  const line = useCaret ? caretLine : srcTopLine();
+  // (the block of that line, or the last one before it: a blank line or a comment)
+  const segOfLine = srcDoc(name) ? (ORDER.find((s) => s.file === name && s.el && s.line <= line && line <= (s.lastLine || s.line))
+    || ORDER.filter((s) => s.file === name && s.el && s.line && s.line <= line).pop()) : null;
+  const screenY = segOfLine ? ta.getBoundingClientRect().top + srcLineTop(segOfLine.line) - ta.scrollTop : null;
+  SRC.on = false;
+  document.body.classList.remove('sourcemode');
+  $('#srcview').hidden = true;
+  $('#sourcebtn').setAttribute('aria-pressed', 'false');
+  // back at the block of that line
+  const seg = segOfLine && segOfLine.el.isConnected ? segOfLine
+    : srcDoc(name) && ORDER.find((s) => s.file === name && s.el && s.line <= line && line <= (s.lastLine || s.line));
+  if (seg) {
+    const top = Math.max(chromeBottom(), Math.min(innerHeight - 40, screenY === null ? innerHeight / 3 : screenY));
+    window.scrollBy(0, seg.el.getBoundingClientRect().top - top);
+    restoreAnchor({ y: window.scrollY, i: ORDER.indexOf(seg), file: seg.file, src: seg.src, top, list: [{ file: seg.file, src: seg.src, top }] });
+    if (useCaret && seg.edit && seg.edit.isContentEditable) {
+      const r = document.createRange(); r.selectNodeContents(seg.edit); r.collapse(true);
+      seg.edit.focus({ preventScroll: true });
+      const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
+    }
+  }
+}
+$('#sourcebtn').onclick = () => toggleSource();
+
+// The document was read again (a save, an outside change): the source view
+// shows the new text unless it has edits of its own.
+function refreshSourceView() {
+  if (!SRC.on || !SRC.name || !srcDoc(SRC.name)) return;
+  const ta = $('#srcta');
+  commit();
+  let changedAt = null;
+  if (ta.value !== FILES[SRC.name].text && (SRC.preview || document.activeElement !== ta)) {
+    const top = ta.scrollTop, a = ta.selectionStart;
+    const was = ta.value.split('\n'), now = FILES[SRC.name].text.split('\n');
+    let k = 0;
+    while (k < was.length && k < now.length && was[k] === now[k]) k++;
+    changedAt = k + 1;
+    ta.value = FILES[SRC.name].text;
+    ta.scrollTop = top; ta.setSelectionRange(a, a);
+  }
+  paintSource();
+  // a change made in the user's editor: shown, if it is off screen
+  if (changedAt !== null && SRC.preview) {
+    const y = srcLineTop(changedAt);
+    if (y < ta.scrollTop || y > ta.scrollTop + ta.clientHeight - 20) ta.scrollTop = Math.max(0, y - ta.clientHeight / 3);
+    ta.dispatchEvent(new Event('scroll'));
+  }
+  drawSourceFiles();
+}
+
+// ---- editing keys of the source view (your Emacs bindings by default).
+// Every change goes through insertText, so the text's own undo (Ctrl+Z)
+// takes it back.
+const srcTa = () => $('#srcta');
+function srcLineBounds(ta, a = ta.selectionStart, b = ta.selectionEnd) {
+  const v = ta.value;
+  const start = v.lastIndexOf('\n', a - 1) + 1;
+  let end = v.indexOf('\n', b > a && v[b - 1] === '\n' ? b - 1 : b);
+  if (end < 0) end = v.length;
+  return [start, end];
+}
+function srcReplace(ta, a, b, text) {
+  ta.focus();
+  ta.setSelectionRange(a, b);
+  if (!document.execCommand('insertText', false, text)) { ta.setRangeText(text, a, b, 'end'); ta.dispatchEvent(new Event('input')); }
+}
+async function srcClip(text) { try { await navigator.clipboard.writeText(text); } catch (e) { /* clipboard refused */ } }
+const SOURCE_ACTIONS = {
+  gotoLine(line) {
+    const ta = srcTa();
+    const n = ta.value.split('\n').length;
+    if (!line) {
+      const cur = ta.value.slice(0, ta.selectionStart).split('\n').length;
+      const ans = prompt(`Go to line (1–${n}):`, String(cur));
+      line = parseInt(ans, 10);
+      if (!line) return;
+    }
+    line = Math.max(1, Math.min(n, line));
+    const at = ta.value.split('\n').slice(0, line - 1).reduce((s, l) => s + l.length + 1, 0);
+    ta.focus();
+    ta.setSelectionRange(at, at);
+    const lh = parseFloat(getComputedStyle(ta).lineHeight) || 18;
+    const row = $('#srcgutter').children[line - 1];
+    ta.scrollTop = Math.max(0, (row ? row.offsetTop : (line - 1) * lh) - ta.clientHeight / 3);
+    ta.dispatchEvent(new Event('scroll'));
+    ta.dispatchEvent(new Event('keyup'));
+  },
+  // % at the start of the lines of the region (or the line), or off again
+  toggleComment() {
+    const ta = srcTa();
+    const a0 = ta.value.lastIndexOf('\n', ta.selectionStart - 1) + 1;
+    let b0 = ta.value.indexOf('\n', Math.max(ta.selectionStart, ta.selectionEnd - (ta.selectionEnd > ta.selectionStart ? 1 : 0)));
+    if (b0 < 0) b0 = ta.value.length;
+    const block = ta.value.slice(a0, b0).split('\n');
+    const all = block.filter((l) => l.trim()).every((l) => /^\s*%/.test(l));
+    const out = block.map((l) => !l.trim() ? l : all ? l.replace(/^(\s*)% ?/, '$1') : l.replace(/^(\s*)/, '$1% ')).join('\n');
+    srcReplace(ta, a0, b0, out);
+    ta.setSelectionRange(a0, a0 + out.length);
+  },
+  deleteLine() {
+    const ta = srcTa(); const [a, b] = srcLineBounds(ta);
+    srcReplace(ta, a, Math.min(ta.value.length, b), '');
+  },
+  duplicate() {
+    const ta = srcTa();
+    if (ta.selectionStart !== ta.selectionEnd) {
+      const t = ta.value.slice(ta.selectionStart, ta.selectionEnd), e = ta.selectionEnd;
+      srcReplace(ta, e, e, t); ta.setSelectionRange(e, e + t.length); return;
+    }
+    const [a, b] = srcLineBounds(ta); const col = ta.selectionStart - a;
+    srcReplace(ta, b, b, '\n' + ta.value.slice(a, b));
+    ta.setSelectionRange(b + 1 + col, b + 1 + col);
+  },
+  copy() {
+    const ta = srcTa();
+    if (ta.selectionStart !== ta.selectionEnd) { srcClip(ta.value.slice(ta.selectionStart, ta.selectionEnd)); toast('Copied'); return; }
+    const [a, b] = srcLineBounds(ta); srcClip(ta.value.slice(a, b) + '\n'); toast('Line copied');
+  },
+  cut() {
+    const ta = srcTa();
+    if (ta.selectionStart !== ta.selectionEnd) { srcClip(ta.value.slice(ta.selectionStart, ta.selectionEnd)); srcReplace(ta, ta.selectionStart, ta.selectionEnd, ''); return; }
+    const [a, b] = srcLineBounds(ta); srcClip(ta.value.slice(a, b) + '\n');
+    srcReplace(ta, a, Math.min(ta.value.length, b + 1), '');
+  },
+  deleteBackward() {
+    const ta = srcTa();
+    if (ta.selectionStart !== ta.selectionEnd) srcReplace(ta, ta.selectionStart, ta.selectionEnd, '');
+    else if (ta.selectionStart > 0) srcReplace(ta, ta.selectionStart - 1, ta.selectionStart, '');
+  },
+  deleteToSpace() {
+    const ta = srcTa(); const v = ta.value; const o = ta.selectionStart;
+    if (ta.selectionEnd !== o) { srcReplace(ta, o, ta.selectionEnd, ''); return; }
+    let i = o;
+    while (i > 0 && v[i - 1] !== '\n' && /\s/.test(v[i - 1])) i--;
+    while (i > 0 && !/\s/.test(v[i - 1])) i--;
+    if (i === o && i > 0) i--;          // at a line start: join with the line before
+    srcReplace(ta, i, o, '');
+  },
+  // C-a: the first non-blank character of the line, then its very start
+  lineStart(extend) {
+    const ta = srcTa(); const [a] = srcLineBounds(ta, ta.selectionEnd, ta.selectionEnd);
+    let code = a; while (/[ \t]/.test(ta.value[code] || '')) code++;
+    const to = ta.selectionEnd === code ? a : code;
+    ta.setSelectionRange(extend ? Math.min(ta.selectionStart, to) : to, extend ? Math.max(ta.selectionStart, to) : to, extend && to < ta.selectionStart ? 'backward' : 'none');
+  },
+  lineEnd(extend) {
+    const ta = srcTa(); const [, b] = srcLineBounds(ta, ta.selectionEnd, ta.selectionEnd);
+    let code = b; while (code > 0 && /[ \t]/.test(ta.value[code - 1])) code--;
+    const to = ta.selectionEnd === code ? b : code;
+    ta.setSelectionRange(extend ? ta.selectionStart : to, to);
+  },
+  indent() {
+    const ta = srcTa();
+    if (ta.selectionStart === ta.selectionEnd) { srcReplace(ta, ta.selectionStart, ta.selectionStart, '  '); return; }
+    const [a, b] = srcLineBounds(ta); const t = ta.value.slice(a, b).replace(/^/gm, '  ');
+    srcReplace(ta, a, b, t); ta.setSelectionRange(a, a + t.length);
+  },
+  unindent() {
+    const ta = srcTa(); const [a, b] = srcLineBounds(ta); const t = ta.value.slice(a, b).replace(/^ {1,2}/gm, '');
+    const one = ta.selectionStart === ta.selectionEnd, at = ta.selectionStart;
+    srcReplace(ta, a, b, t);
+    if (one) { const p = Math.max(a, at - (b - a - t.length)); ta.setSelectionRange(p, p); } else ta.setSelectionRange(a, a + t.length);
+  },
+  // RET: a new line indented as the one it leaves
+  newline() {
+    const ta = srcTa(); const [a] = srcLineBounds(ta, ta.selectionStart, ta.selectionStart);
+    const ind = /^[ \t]*/.exec(ta.value.slice(a))[0];
+    srcReplace(ta, ta.selectionStart, ta.selectionEnd, '\n' + ind);
+  },
+};
+
+// Saving the files of the source view that are not part of the document.
+// ---- files from the source view: new, rename, delete
+async function srcReloadFiles() {
+  try { SRC.files = await (await fetch('/api/srcfiles')).json(); } catch (e) { SRC.files = []; }
+  if (!Array.isArray(SRC.files)) SRC.files = [];
+  for (const n of Object.keys(FILES)) if (srcDoc(n) && !SRC.files.some((f) => f.name === n)) SRC.files.unshift({ name: n, doc: true });
+  DOC.disk_files = SRC.files.map((f) => f.name);
+}
+function checkNewName(name, ext) {
+  name = (name || '').trim().replace(/^\.\//, '');
+  if (!name) return null;
+  if (!/\.(tex|bib)$/.test(name)) name += ext || '.tex';
+  if (name.split('/').some((p) => !p || p === '..' || p.startsWith('.'))) { toast('That name is not inside the paper\'s folder', 'error'); return null; }
+  if (ext && !name.endsWith(ext)) { toast(`Keep the ${ext} ending: a ${ext} file stays one`, 'error'); return null; }
+  if (knownFiles().has(name) || (SRC.files || []).some((f) => f.name === name)) { toast(`${name} already exists`, 'error'); return null; }
+  return name;
+}
+async function srcNewFile() {
+  const name = checkNewName(prompt('Name of the new file (.tex or .bib, inside the paper\'s folder):', sectionsDir() + 'new.tex'));
+  if (!name) return;
+  const text = name.endsWith('.bib') ? '' : '% ' + name.replace(/^.*\//, '') + '\n';
+  const r = await fetch('/api/save', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
+    body: JSON.stringify({ name, base: null, text, create: true }) });
+  const res = await r.json().catch(() => ({}));
+  if (!r.ok) { banner(`Could not make ${name}: ${res.error || r.status}`); return; }
+  await srcReloadFiles();
+  if (name.endsWith('.tex') && confirm(`Read ${name} in the document? Its \\input goes after the block the cursor was in (or at the end of the text); save to keep that.`)) {
+    flushSource();
+    FILES[name] = { text, disk: text, base: res.hash };
+    DOC.files[name] = { text, hash: res.hash };
+    const at = SRC.paperAt && SRC.paperAt.el && SRC.paperAt.el.isConnected ? SRC.paperAt : null;
+    structural(() => insertInputAfter(at ? { segs: FILES[at.file].segs, after: at } : newSectionPlace(null), name), true);
+    // the file shown in the source view may be the one that got the \input:
+    // it shows that now (flushing its old text would take the \input out)
+    if (SRC.on && srcDoc(SRC.name)) { commit(); $('#srcta').value = FILES[SRC.name].text; paintSource(); }
+    SRC.files = SRC.files.map((f) => (f.name === name ? { ...f, doc: true } : f));
+  }
+  await openSourceFile(name);
+  toast(`Made ${name}`, 'ok');
+}
+async function srcRename() {
+  const name = SRC.name;
+  if (!name || name === DOC.main) return;
+  flushSource();
+  if (SRC.extra[name] && SRC.extra[name].text !== SRC.extra[name].disk) {
+    if (!confirm(`${name} has unsaved edits: save them first, then rename?`)) return;
+    await save();
+  }
+  await renameFilePrompt(name);
+}
+async function srcDelete() {
+  const name = SRC.name;
+  if (!name || name === DOC.main) return;
+  flushSource();
+  const inp = inputSegOf(name);
+  if (inp) {
+    if (!confirm(`${name} is read by ${inp.file}. Take its \\input out of ${inp.file}, save, and move ${name} to the editor's trash?\n\nIts text leaves the paper; the trash (.paper-editor/trash) and History keep it.`)) return;
+    structural(() => {
+      const segs = FILES[inp.file].segs, i = segs.indexOf(inp);
+      inp.removed = true;
+      if (segs[i - 1] && segs[i - 1].kind === 'gap') segs[i - 1].removed = true;
+      else if (segs[i + 1] && segs[i + 1].kind === 'gap') segs[i + 1].removed = true;
+    });
+    await save();
+    if (inputSegOf(name)) { toast(`Not deleted: ${inp.file} could not be saved`, 'error'); return; }
+  } else if (!confirm(`Move ${name} to the editor's trash (.paper-editor/trash)?`)) return;
+  if (isNewFile(name)) { delete FILES[name]; toast(`${name} was never saved: it is gone`, 'ok'); }
+  else {
+    const r = await fetch('/api/file/trash', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN }, body: JSON.stringify({ name }) });
+    const res = await r.json().catch(() => ({}));
+    if (!r.ok) { banner(`Could not delete ${name}: ${res.error || r.status}`); return; }
+    delete FILES[name];
+    if (DOC.files) delete DOC.files[name];
+    delete SRC.extra[name];
+    toast(`${name} moved to ${res.trash}`, 'ok');
+  }
+  await srcReloadFiles();
+  if (SRC.on) await openSourceFile(DOC.main);
+}
+
+async function saveExtra(batch) {
+  let saved = 0;
+  const conflicts = [];
+  for (const name of extraEdited()) {
+    const f = SRC.extra[name];
+    const r = await fetch('/api/save', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
+      body: JSON.stringify({ name, base: f.base, text: f.text, batch }) });
+    const res = await r.json().catch(() => ({}));
+    if (r.status === 409) { conflicts.push(name); continue; }
+    if (!r.ok) { banner(`Saving ${name} failed: ${res.error || r.status}. Your edits are still here.`); continue; }
+    f.disk = f.text; f.base = res.hash;
+    saved++;
+  }
+  if (conflicts.length) banner(`${conflicts.join(', ')} changed on disk since it was opened in the source view; not saved. Copy your edits, then open the file again.`);
+  if (SRC.on) paintSource();
+  drawSourceFiles();
+  return saved;
+}
+
+// ================================================================= trace
+//
+// A flight recorder for problems: what was pressed and clicked, what the
+// editor did (draws, loads, saves, structure changes, messages) and every
+// scroll with what caused it.  A scroll nobody asked for (no wheel, key or
+// click just before, no scroll call of the editor) is marked as a jump, with
+// the layout shifts the browser saw.  Kept on this machine only, in
+// .paper-editor/debug/trace.jsonl; ☰ → Report a problem… copies the last
+// minutes aside with a note.  Typed text is not kept: only how much was typed.
+const REC = (() => {
+  const buf = [];
+  let sent = 0, lastInput = 0, lastCall = 0, lastY = scrollY, typed = 0, typedAt = 0;
+  const push = (k, data = {}) => {
+    buf.push({ t: Date.now(), k, y: Math.round(scrollY), ...data });
+    if (buf.length > 6000) { buf.splice(0, 1000); sent = Math.max(0, sent - 1000); }
+  };
+  const desc = (n) => {
+    if (!n || n.nodeType !== 1) return '';
+    const b = n.closest('button, a, input, select, textarea, [contenteditable="true"], .chip, .seg') || n;
+    const parts = [b.tagName.toLowerCase()];
+    if (b.id) parts.push('#' + b.id);
+    if (b.dataset && b.dataset.act) parts.push('[' + b.dataset.act + ']');
+    const label = b.getAttribute && (b.getAttribute('aria-label') || b.title);
+    if (label) parts.push('"' + label.slice(0, 40) + '"');
+    else if (b.tagName === 'BUTTON' || b.tagName === 'A') parts.push('"' + (b.textContent || '').trim().slice(0, 30) + '"');
+    if (b.classList && b.classList.contains('chip')) parts.push('chip ' + (b.dataset.src || '').slice(0, 30));
+    const seg = typeof segOf === 'function' ? segOf(b) : null;
+    if (seg) parts.push(`in ${seg.kind} ${seg.file}:${seg.line || '?'}`);
+    const box = b.closest('[role=dialog], #toolbar, #bar, #findbar, #banner, #srcview, #menu, .popover');
+    if (box && box.id) parts.push('(' + box.id + ')');
+    return parts.join(' ');
+  };
+  const flushTyped = () => { if (typed) { push('typed', { n: typed }); typed = 0; } };
+  const user = () => { lastInput = Date.now(); };
+  addEventListener('wheel', user, { capture: true, passive: true });
+  addEventListener('touchstart', user, { capture: true, passive: true });
+  addEventListener('pointerdown', (e) => { user(); flushTyped(); push('press', { on: desc(e.target), x: Math.round(e.clientX), yy: Math.round(e.clientY), b: e.button }); }, true);
+  addEventListener('keydown', (e) => {
+    user();
+    const k = typeof keyName === 'function' ? keyName(e) : e.key;
+    if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) return;   // counted as input below
+    if (['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) return;
+    flushTyped();
+    push('key', { key: k, on: desc(e.target) });
+  }, true);
+  // typing (keys, input methods, pastes) as a count of characters, not the text
+  addEventListener('beforeinput', (e) => {
+    if (/^insert(Text|CompositionText|ReplacementText)$/.test(e.inputType)) { typed += (e.data || '').length || 1; typedAt = Date.now(); }
+    else if (e.inputType !== 'insertText') { flushTyped(); push('input', { type: e.inputType, on: desc(e.target) }); }
+  }, true);
+  setInterval(() => { if (typed && Date.now() - typedAt > 1500) flushTyped(); }, 1000);
+  // scrolls: by the user, by the editor (which function), or by neither (a jump)
+  const wrapScroll = (o, name) => {
+    const f = o[name];
+    o[name] = function (...a) {
+      lastCall = Date.now();
+      const by = (new Error().stack.split('\n')[2] || '').trim().replace(/^at /, '').replace(/\(?https?:\/\/[^)]*\/static\//, '').slice(0, 70);
+      push('scrollcall', { fn: name, by, a: JSON.stringify(a).slice(0, 60) });
+      return f.apply(this, a);
+    };
+  };
+  wrapScroll(window, 'scrollBy'); wrapScroll(window, 'scrollTo'); wrapScroll(Element.prototype, 'scrollIntoView');
+  let scrollT = null, scrollFrom = scrollY;
+  addEventListener('scroll', () => {
+    const now = Date.now(), d = scrollY - lastY;
+    lastY = scrollY;
+    if (now - lastInput > 500 && now - lastCall > 150 && Math.abs(d) > 40) push('jump', { d: Math.round(d), note: 'no input or scroll call just before: layout or browser anchoring' });
+    clearTimeout(scrollT);
+    scrollT = setTimeout(() => { if (Math.abs(scrollY - scrollFrom) > 2) push('scrolled', { from: Math.round(scrollFrom), to: Math.round(scrollY) }); scrollFrom = scrollY; }, 300);
+  }, { passive: true });
+  try {
+    new PerformanceObserver((list) => {
+      for (const e of list.getEntries()) {
+        if (e.value < 0.02 || e.hadRecentInput) continue;
+        push('shift', { v: +e.value.toFixed(3), what: (e.sources || []).slice(0, 3).map((s) => desc(s.node) + ` ${Math.round(s.previousRect.top)}→${Math.round(s.currentRect.top)}`) });
+      }
+    }).observe({ type: 'layout-shift', buffered: false });
+  } catch (e) { /* not supported */ }
+  addEventListener('error', (e) => push('error', { msg: String(e.message).slice(0, 300), at: `${(e.filename || '').replace(/^.*\//, '')}:${e.lineno}` }));
+  addEventListener('unhandledrejection', (e) => push('error', { msg: String(e.reason && (e.reason.stack || e.reason)).slice(0, 400) }));
+  // the editor's own steps
+  const wrap = (name, info, onlyChanges = false) => {
+    const f = window[name];
+    if (typeof f !== 'function') return;
+    let last = '';
+    window[name] = function (...a) {
+      const data = { fn: name, ...(info ? info(...a) : {}) };
+      const key = JSON.stringify(data);
+      if (!onlyChanges || key !== last) { flushTyped(); push('do', data); }
+      last = key;
+      return f.apply(this, a);
+    };
+  };
+  for (const name of ['render', 'load', 'save', 'structural', 'restore', 'restoreAnchor', 'revealChanged', 'focusPlaceholder', 'toggleSource',
+    'openFigure', 'diffOn', 'diffOff', 'openFind', 'openFiles', 'splitToFile', 'splitAllSections', 'inlineFile', 'moveSection', 'requestBuild', 'checkDraft', 'restoreDraft']) wrap(name);
+  wrap('toast', (msg, kind) => ({ msg: String(msg).slice(0, 160), kind }));
+  wrap('banner', (msg) => ({ msg: String(msg).slice(0, 200) }));
+  wrap('setBuild', (b) => ({ state: b && b.state, msg: b && String(b.message || '').slice(0, 80) }), true);   // (polled every 2 s)
+  push('open', { ua: navigator.userAgent.replace(/^.*(Chrome\/[\d.]+).*$/, '$1'), w: innerWidth, h: innerHeight, dpr: devicePixelRatio });
+  const flush = async () => {
+    flushTyped();
+    if (sent >= buf.length) return;
+    const entries = buf.slice(sent);
+    const upTo = buf.length;
+    try {
+      const r = await fetch('/api/trace', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN }, body: JSON.stringify({ client: CLIENT_ID, entries }) });
+      if (r.ok) sent = upTo;
+    } catch (e) { /* the server is away: kept for the next try */ }
+  };
+  setInterval(flush, 4000);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); });
+  async function report() {
+    const note = prompt('What went wrong? (a line is enough; the last 10 minutes of what you pressed and what the editor did are kept with it, on this machine only)', '');
+    if (note === null) return;
+    push('report', { note: note.slice(0, 2000) });
+    await flush();
+    const r = await fetch('/api/trace/report', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN }, body: JSON.stringify({ note }) }).catch(() => null);
+    const res = r && r.ok ? await r.json() : null;
+    if (res) banner(`Problem report kept in ${res.file.replace(/^.*\/\.paper-editor\//, '.paper-editor/')} — tell Claude to read it.`);
+    else banner('Could not keep the report: the server did not answer.');
+  }
+  return { push, flush, report };
+})();
+$('#reportbtn').onclick = () => { closePopovers(); REC.report(); };

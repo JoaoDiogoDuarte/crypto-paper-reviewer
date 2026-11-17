@@ -194,8 +194,11 @@ def active_tex(text):
 
 
 def extract(text):
-    """Metadata from the front matter of a main file, whatever its class."""
+    """Metadata from the front matter of a main file, whatever its class.
+    A paper with an \\ifanon switch is read as its named version."""
     t = strip_comments(text)
+    if re.search(r'\\newif\s*\\ifanon\b', t):
+        t = active_tex(re.sub(r'\\anontrue\b', r'\\anonfalse', t))
     cls = doc_class(t)
     md = {'title': '', 'running_title': '', 'authors': [], 'affiliations': [], 'keywords': [],
           'abstract': '', 'acknowledgements': '', 'license': '', 'source_class': cls}
@@ -905,3 +908,125 @@ def convert(main_text, md, target, anonymous, theorems_used, resolve=None, all_t
     if not out.endswith('\n'):
         out += '\n'
     return out + ''.join(origin_record(source, out)), warnings + more
+
+
+# ---------------------------------------------------------------- new papers
+
+CRYPTOBIB_URL = os.environ.get('PE_CRYPTOBIB_URL') or 'https://github.com/cryptobib/export.git'
+NEW_THEOREMS = [('theorem', 'Theorem'), ('lemma', 'Lemma'), ('corollary', 'Corollary'), ('definition', 'Definition')]
+
+
+def blank_metadata(md=None):
+    """Metadata with every field present (what front_matter reads)."""
+    md = dict(md or {})
+    out = {'title': str(md.get('title') or '').strip(), 'running_title': str(md.get('running_title') or '').strip(),
+           'abstract': str(md.get('abstract') or '').strip(), 'license': str(md.get('license') or '').strip(),
+           'keywords': [str(k).strip() for k in (md.get('keywords') or []) if str(k).strip()],
+           'acknowledgements': '', 'authors': [], 'affiliations': []}
+    for a in md.get('authors') or []:
+        if not isinstance(a, dict) or not str(a.get('name') or '').strip():
+            continue
+        idx = []
+        aff = str(a.get('affiliation') or '').strip()
+        if aff:
+            key = (aff, str(a.get('country') or '').strip())
+            names = [(f['name'], f.get('country', '')) for f in out['affiliations']]
+            if key not in names:
+                out['affiliations'].append({'name': key[0], 'country': key[1], 'city': str(a.get('city') or '').strip()})
+                names.append(key)
+            idx = [names.index(key)]
+        out['authors'].append({'name': str(a['name']).strip(), 'email': str(a.get('email') or '').strip(),
+                               'orcid': str(a.get('orcid') or '').strip(), 'affiliations': idx})
+    return out
+
+
+def _balanced(lines):
+    t = re.sub(r'\\.', '', '\n'.join(lines))
+    depth = 0
+    for c in t:
+        depth += (c == '{') - (c == '}')
+        if depth < 0:
+            return False
+    return depth == 0
+
+
+def _either(named, anon):
+    """named, or the lines they share around \\ifanon anon \\else named \\fi."""
+    if named == anon:
+        return [named] if named else []
+    a, b = named.split('\n'), anon.split('\n')
+    i = 0
+    while i < min(len(a), len(b)) and a[i] == b[i]:
+        i += 1
+    j = 0
+    while j < min(len(a), len(b)) - i and a[len(a) - 1 - j] == b[len(b) - 1 - j]:
+        j += 1
+    mid_a, mid_b = a[i:len(a) - j], b[i:len(b) - j]
+    if not (_balanced(mid_a) and _balanced(mid_b)):
+        i, j, mid_a, mid_b = 0, 0, a, b
+    return a[:i] + ['\\ifanon'] + mid_b + ['\\else'] + mid_a + ['\\fi'] + a[len(a) - j:]
+
+
+def new_main(md, target, anonymous, bibs=('references',)):
+    """The main file of a new paper for the target class.  \\anontrue (or
+    \\anonfalse) near the top switches the whole paper between the
+    double-blind and the named version, as the class needs it."""
+    if target not in TARGETS:
+        raise ValueError(f'unknown venue {target}')
+    md = blank_metadata(md)
+    if not md['title']:
+        md['title'] = 'Untitled'
+    _, cls, cls_anon, style = TARGETS[target]
+    pre_n, post_n = front_matter(md, target, False)
+    pre_a, post_a = front_matter(md, target, True)
+    out = ['% The main file. \\anontrue gives the anonymous version for double-blind',
+           '% review, \\anonfalse the one with the authors.',
+           '\\newif\\ifanon', '\\anontrue' if anonymous else '\\anonfalse']
+    out += _either(cls, cls_anon)
+    out.append('')
+    if target != 'acmart':                 # acmart loads its own fonts, amssymb among them
+        out.append('\\usepackage[T1]{fontenc}')
+        out.append('\\usepackage{amsmath,amssymb,mathtools}')
+    else:
+        out.append('\\usepackage{mathtools}')
+    if target in ('ieee', 'article'):
+        out.append('\\usepackage{amsthm}')
+    out += ['\\usepackage{xcolor}', '\\usepackage{graphicx}']
+    if target not in CLASS_LOADS_HYPERREF:
+        out.append('\\usepackage[hidelinks]{hyperref}')
+    if target not in NO_CLEVEREF and target != 'lipics':   # lipics loads cleveref with its option
+        out.append('\\usepackage[capitalise,nameinlink]{cleveref}')
+    elif target in NO_CLEVEREF:
+        # (the class loads hyperref at \\begin{document}, after which cleveref cannot load)
+        out += ['% \\cref and \\Cref without cleveref (this class cannot load it)', CREF_FALLBACK]
+    have = PREDEFINED_THEOREMS.get(target, set())
+    thms = []
+    for env, name in NEW_THEOREMS:
+        if env in have:
+            continue
+        if env == 'definition' and target in ('ieee', 'article'):
+            thms.append('\\theoremstyle{definition}')
+        shared = '[theorem]' if env != 'theorem' else ''
+        thms.append(f'\\newtheorem{{{env}}}{shared}{{{name}}}')
+    if thms:
+        out += [''] + thms
+    pre = _either(pre_n, pre_a)
+    if pre:
+        out += [''] + pre
+    out += ['', '\\begin{document}', ''] + _either(post_n, post_a)
+    out += ['', '\\input{sections/01-introduction}', '\\input{sections/02-conclusion}', '']
+    # acknowledgments name people and grants: only in the named version
+    ack = ['\\begin{acks}', '% Thanks and funding.', '\\end{acks}'] if target == 'acmart' else \
+        ['\\section*{Acknowledgments}', '% Thanks and funding.']
+    out += ['\\ifanon\\else'] + ack + ['\\fi', '']
+    if style:
+        out.append(f'\\bibliographystyle{{{style}}}')
+    out.append('\\bibliography{' + ','.join(bibs) + '}')
+    out += ['', '\\end{document}', '']
+    return '\n'.join(out)
+
+
+NEW_SECTIONS = {
+    'sections/01-introduction.tex': '\\section{Introduction}\\label{sec:intro}\n\n',
+    'sections/02-conclusion.tex': '\\section{Conclusion}\\label{sec:conclusion}\n\n',
+}
