@@ -19,8 +19,8 @@ and the editor's keymap (`ACTION_DEFS`, `TEXT_KEYS`, `GLOBAL_KEYS`), find
 5. Multiple cursors: paper view, then source view.
 6. Kill ring, source-view completion and electric pairs, latexindent,
    spelling keys `C-,` and `C-.` (section 6b).
-7. One sentence per line on save (section 7). Independent of 1 to 6, so it
-   can go first.
+7. One sentence per line on save (section 7). Done 2026-11-19.
+8. Merging sections, subsections and subsubsections (section 8).
 
 Every step adds `tests/e2e.js` cases (headless Chrome only, no visible
 windows). They check the files on disk after the change, and that a single
@@ -34,8 +34,10 @@ undo reverses each batch.
 3. Sidebar on the left or the right? List figures, tables and equations from
    the start?
 4. Electric pairs in the paper view: on or off by default?
-5. One sentence per line: on by default for new papers, or only through
-   `house_rules.one_sentence_per_line`?
+5. Merging: default direction into the previous section (proposed, as
+   Combine does now), with "into the next" a second button or only a key?
+6. Merging files: the second file goes to the editor's trash (proposed) or
+   stays on disk unused?
 
 ---
 
@@ -510,7 +512,7 @@ The list lives in `static/latex.js` as data, and
 
 Misspellings: when the edited lines contain a misspelt form (`eg.`,
 `e.g` without its last period, `c.f.`, `e.t.c.`, `ect.`, `et. al.`,
-`et al` without a period, `ie.`, `wrt`, `iid`), the question before saving
+`et al` without a period, `ie.`, `wrt`, `iid`), the banner after saving
 lists them with the standard form (`e.g.`, `cf.`, `etc.`, `et al.`,
 `i.e.`, `w.r.t.`, `i.i.d.`). The editor never changes them by itself,
 since a form such as `eg` can be a name or a macro argument.
@@ -554,4 +556,103 @@ safety check: compare the token lists with whitespace normalised).
   left as typed; an untouched line with two sentences in the same
   block stays one line; declining the house rules keeps one line; one undo
   restores the text as typed.
+
+## 8. Merging sections, subsections and subsubsections
+
+### Now
+
+**Combine** (Ctrl+Alt+J, a button on a section heading) only deletes the
+heading: the text and subsections under it join the previous section. It is
+the same as **Delete** on the heading. It does not look at levels, labels or
+files, and nothing combines two subsections.
+
+### What a merge does
+
+Merging heading H (level *n*) into the previous heading P of the same level
+*n*:
+
+1. H's heading line goes. Its text and its children (levels below *n*)
+   follow the end of P's last child, so they read as part of P.
+2. **Children keep their level.** H's subsections become further
+   subsections of P, numbered after P's own.
+3. **Option: keep H's title as a sub-heading.** The question offers
+   "Keep '<H>' as a subsection of '<P>'". Then H becomes a heading of
+   level *n*+1 and every heading under it goes one level down
+   (`\section` to `\subsection`, `\subsection` to `\subsubsection`,
+   `\subsubsection` to `\paragraph`). A `\paragraph` under it stays a
+   `\paragraph`. If that would need a level below `\paragraph`, the option
+   is not offered and the question says why.
+4. **Labels.** H's `\label` (on the heading line or right after it) is moved
+   to P's heading line, so `\Cref{sec:h}` resolves to P's number and no
+   reference breaks. With option 3 the label stays on the demoted heading.
+   The question names the references that will now print P's number.
+5. The merge is one structural change: one Ctrl+Z restores the headings, the
+   levels, the labels and (below) the files.
+
+Allowed for `\section`, `\subsection`, `\subsubsection` and `\paragraph`
+(and `\chapter`, `\part` where the class has them), always within one level.
+Merging into the first heading of a file, or into a heading of another
+level, is refused with the reason. A starred heading can be merged, and the
+merged heading keeps P's star or lack of one.
+
+Where: a **Merge with the previous** button on every heading of these levels
+(it replaces Combine on sections), the key Ctrl+Alt+J (as now, for every
+level), and an entry in the heading's menu. Merging into the next heading
+(decision 5) is Ctrl+Alt+Shift+J.
+
+### Sections in their own files
+
+When H and P are in different files that the document reads with `\input`
+(`sections/related.tex` read right after `sections/intro.tex`), the
+question asks:
+
+> Merge "Related work" into "Introduction". The two are in different files.
+> [Also merge the files] [Keep the files] [Cancel]
+
+- **Also merge the files.** H's text (all of its file, when the file holds
+  only H and its children, which is how **Section in a new file** makes
+  them) is appended to P's file after one blank line. The `\input` of H's
+  file is removed with the blank line before it, and H's file goes to the
+  editor's trash on save (`/api/file/trash`, decision 6). This is
+  `inlineFile` and `trash_file`, run on the merged text.
+- **Keep the files.** Only the heading line (and label, as above) changes
+  in H's file. The `\input` stays, so the merged section continues in the
+  next file.
+- When H's file holds more than H (another section after it), only H's part
+  can move. The question then offers only "Keep the files".
+- When the two `\input`s are not next to each other (text, a `\clearpage`
+  or a comment between them), the question shows what lies between, and
+  "Also merge the files" puts that text before H's text in P's file.
+- `\include` (with its `\clearpage`) is treated like `\input`, and the
+  question notes that a page break goes away.
+
+The same question appears for subsections in separate files, since
+**Section in a new file** can also make them.
+
+### Undo and saving
+
+The merge is one `structural` change. With the files merged it also records
+the new P file text, the removed `\input`, and H's file marked for the trash.
+Undo before saving brings all of it back. After saving, the history can bring
+the files back (the trash keeps H's file). A save that fails on one file
+(changed on disk) saves none of the merge, so the files stay consistent.
+
+### Tests (`node tests/e2e.js merge`)
+
+- Two sections in one file. Merge: one heading left, the text of both in
+  order, the subsections numbered after P's, H's label on P's line, one
+  Ctrl+Z restores the file exactly.
+- Option "keep as a subsection": the levels go down by one under H, and
+  `\subsubsection` becomes `\paragraph`. The option is absent when it would
+  go below `\paragraph`.
+- Two subsections, and two subsubsections. Refused across levels and for
+  the first heading of the document.
+- Sections in `sections/a.tex` and `sections/b.tex`, read one after the
+  other. "Also merge the files": `a.tex` ends with B's text, main.tex has no
+  `\input{sections/b}`, and `b.tex` is in the trash after saving.
+  "Keep the files": both files stay and only B's heading line goes. Undo
+  restores all three files before saving.
+- A file with two sections: only "Keep the files" is offered.
+- References: `\Cref{sec:b}` prints P's number after the next build (checked
+  in the `.aux` of a real build in the intensive run).
 

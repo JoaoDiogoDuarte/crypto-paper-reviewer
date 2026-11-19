@@ -956,6 +956,41 @@ done.`));
     hasNot(await page.eval(`document.querySelector('#doc').innerText`), 'raggedright', 'the page');
   },
 
+  async 'a listing and a figure can be deleted, and undo brings them back'(env, page) {
+    page.dialogAnswer = true;
+    const before = env.read('main.tex');
+    // the listing: its ✕ button
+    await page.click(`js:ORDER.find((s) => s.kind === 'code').el.querySelector('.tools .deltool')`);
+    await page.waitFor(`!ORDER.some((s) => s.kind === 'code' && !s.removed)`, 4000, 'the listing gone');
+    // the figure: Ctrl+Alt+X with the cursor in its caption
+    await page.select('A caption here');
+    await page.key('x', { ctrl: true, alt: true });
+    await page.waitFor(`!ORDER.some((s) => s.kind === 'figure' && !s.removed)`, 4000, 'the figure gone');
+    await page.save();
+    let text = env.read('main.tex');
+    hasNot(text, 'code line', 'the listing');
+    hasNot(text, 'A caption here', 'the figure');
+    hasNot(text, '\n\n\n', 'a run of blank lines');
+    has(page.dialogs.join('\n'), 'Delete this listing?', 'the question for the listing');
+    has(page.dialogs.join('\n'), 'Delete this figure?', 'the question for the figure');
+    await page.key('z', { ctrl: true });
+    await page.key('z', { ctrl: true });
+    await page.save();
+    eq(env.read('main.tex'), before, 'the file after two undos');
+  },
+
+  async 'Ctrl+Alt+X in a listing deletes it; declining keeps it'(env, page) {
+    page.dialogAnswer = false;
+    await page.eval(`(() => { const ta = ORDER.find((s) => s.kind === 'code').edit; ta.focus(); ta.setSelectionRange(0, 0); })()`);
+    await page.key('x', { ctrl: true, alt: true });
+    has(page.dialogs.join('\n'), 'Delete this listing?', 'the question');
+    eq(await page.eval(`ORDER.some((s) => s.kind === 'code' && !s.removed)`), true, 'the listing kept');
+    page.dialogAnswer = true;
+    await page.key('x', { ctrl: true, alt: true });
+    await page.save();
+    hasNot(env.read('main.tex'), 'code line', 'the listing');
+  },
+
   async 'code block edits save'(env, page) {
     await page.eval(`(() => { const ta = ORDER.find((s) => s.kind === 'code').edit; ta.focus(); ta.setSelectionRange(ta.value.indexOf('line') + 4, ta.value.indexOf('line') + 4); })()`);
     await page.type(' two');

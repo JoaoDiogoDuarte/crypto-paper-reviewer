@@ -684,6 +684,8 @@ function wrapSeg(seg, inner, tools) {
   plus.onclick = (e) => { e.stopPropagation(); addMenu(box.seg, plus); };   // box.seg: a kept block gets the new segment
   t.append(plus);
   for (const b of tools || []) t.append(b);
+  // a heading has its own Delete; a block that shows no text has none
+  if (seg.kind !== 'heading' && BLOCK_NAMES[seg.kind] && !inner.classList.contains('quiet')) t.append(deleteButton(seg, box));
   box.append(t);
   box.seg = seg;
   return box;
@@ -809,6 +811,25 @@ function labelWarning(seg) {
   for (const f of Object.values(FILES)) for (const m of (f.text || '').matchAll(/\\(?:[cC]ref|v?ref|autoref|eqref|nameref|pageref)\*?\{([^}]*)\}/g))
     n += m[1].split(',').filter((k) => keys.includes(k.trim())).length;
   return n ? `\n\nIts label (${keys.join(', ')}) is referenced ${n} time${n === 1 ? '' : 's'}; those references will show ?? (Undo brings it back).` : '';
+}
+
+// Every block the Add menu makes can be deleted: a heading (the text under
+// it stays), a paragraph, a quotation, a listing, a figure or a table.
+const BLOCK_NAMES = { heading: 'heading', para: 'paragraph', quote: 'quotation', code: 'listing', figure: 'figure', table: 'table' };
+function deleteBlock(seg) {
+  const name = BLOCK_NAMES[seg.kind];
+  if (!name) { toast('This block cannot be deleted here; use the source view', 'error'); return; }
+  if (!confirm(`Delete this ${name}?` + labelWarning(seg))) return;
+  structural(() => removeSeg(seg));
+  toast(`Deleted the ${name}: Ctrl+Z restores it`);
+}
+function deleteButton(seg, box) {
+  const name = BLOCK_NAMES[seg.kind];
+  const del = el('button', 'deltool', '✕');
+  del.title = `Delete this ${name} (Ctrl+Alt+X); Undo restores it`;
+  del.setAttribute('aria-label', `Delete this ${name}`);
+  del.onclick = (e) => { e.stopPropagation(); deleteBlock(box.seg); };
+  return del;
 }
 
 function renderCode(seg) {
@@ -5528,6 +5549,7 @@ document.addEventListener('keydown', (e) => {
   // the figure viewer and the drawer keep their arrows (Alt+Up moves a game statement)
   if (GLOBAL_KEYS[k] && /Arrow|Page/.test(k) && e.target.closest && e.target.closest('#figview, #drawer, #palette')) return;
   if (GLOBAL_KEYS[k]) { e.preventDefault(); GLOBAL_KEYS[k](); return; }
+  if (e.target.tagName === 'TEXTAREA' && CODE_KEYS[k] && e.target.closest('#doc .seg')) { e.preventDefault(); CODE_KEYS[k](); return; }
   const inText = e.target.isContentEditable && segOf(e.target);
   if (!inText) return;
   const sel = getSelection();
@@ -8331,12 +8353,14 @@ const ACTION_DEFS = [
   ['splitsection', 'Split section at the cursor', 'text', ['C-M-s'], () => splitSectionAtCaret()],
   ['newpara', 'New paragraph at the cursor', 'text', [], () => insertBreak()],
   ['addblock', 'Add a block after the one at the cursor', 'text', ['C-M-a'], () => {
-    const s = caretSeg();
+    const a = document.activeElement;
+    const s = a && a.tagName === 'TEXTAREA' && a.closest('#doc') ? segOf(a) : caretSeg();
     if (s) addMenu(s, s.el || s.edit); else toast('Put the cursor in the text first', 'error');
   }],
-  ['delblock', 'Delete the heading at the cursor', 'text', ['C-M-x'], () => {
-    const s = headingSegAtCaret();
-    if (s && confirm('Delete this heading?' + labelWarning(s))) structural(() => removeSeg(s));
+  ['delblock', 'Delete the block at the cursor (a heading keeps the text under it)', 'text', ['C-M-x'], () => {
+    const a = document.activeElement;
+    const s = a && a.tagName === 'TEXTAREA' && a.closest('#doc') ? segOf(a) : caretSeg();
+    if (s) deleteBlock(s); else toast('Put the cursor in a block first', 'error');
   }],
   ['nextheading', 'Next heading: the cursor goes to it', 'global', ['C-M-PageDown'], () => stepBlock(1, true)],
   ['prevheading', 'Previous heading', 'global', ['C-M-PageUp'], () => stepBlock(-1, true)],
@@ -8484,10 +8508,15 @@ function applyKeymap() {
   for (const k of Object.keys(GLOBAL_KEYS)) if (k !== 'Escape') delete GLOBAL_KEYS[k];
   for (const k of Object.keys(TEXT_KEYS)) delete TEXT_KEYS[k];
   for (const k of Object.keys(SOURCE_KEYS)) delete SOURCE_KEYS[k];
+  for (const k of Object.keys(CODE_KEYS)) delete CODE_KEYS[k];
   for (const [id, , scope, defaults, fn] of ACTION_DEFS) {
     for (const key of USER_KEYS[id] || defaults) ({ global: GLOBAL_KEYS, text: TEXT_KEYS, source: SOURCE_KEYS }[scope])[key] = fn;
+    // a listing's text box keeps its own keys, but adding and deleting the
+    // block work there too
+    if (id === 'delblock' || id === 'addblock') for (const key of USER_KEYS[id] || defaults) CODE_KEYS[key] = fn;
   }
 }
+const CODE_KEYS = {};
 fetch('/api/keys').then((r) => r.json()).then((k) => { USER_KEYS = k || {}; applyKeymap(); }).catch(applyKeymap);
 
 // "C-M-r" -> "Ctrl+Alt+R"

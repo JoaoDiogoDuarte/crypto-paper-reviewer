@@ -312,7 +312,7 @@ under ⋯. In narrow windows both show icons only; hovering a button names it.
 | `Ctrl+Alt+A` | add a block after the one at the cursor |
 | `Ctrl+Alt+↑` / `Ctrl+Alt+↓` | move the section at the cursor up / down |
 | `Ctrl+Alt+J` | combine the section at the cursor with the previous one |
-| `Ctrl+Alt+X` | delete the heading at the cursor |
+| `Ctrl+Alt+X` | delete the block at the cursor: a heading (the text under it stays), a paragraph, a listing, a figure or a table; the ✕ beside a block does the same |
 | `Ctrl+Alt+Backspace` | revert the block at the cursor to the last save |
 | `Ctrl+Alt+F` | open the figure or table at the cursor in the viewer |
 | `Ctrl`+click a reference or citation, `Alt+←`, `Alt+→` | go to what it names, back, forward |
