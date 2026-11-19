@@ -904,6 +904,58 @@ done.`));
     has(text, '\\caption{One here.\nThree here.}', 'the caption keeps one line break');
   },
 
+  async 'a caption or heading never gets a blank line'(env, page) {
+    env.write('main.tex', [
+      '\\documentclass{article}', '\\begin{document}',
+      '\\section{A title}', '',
+      '\\begin{figure}[t]', '\\fbox{box}', '\\caption{One here.', 'Two here.}', '\\end{figure}',
+      '\\end{document}', ''].join('\n'));
+    await page.eval('load(true)');
+    await page.waitFor(`ORDER.some((s) => s.kind === 'figure' && s.edit)`, 8000, 'the figure');
+    // what Chrome may leave after deleting across a line break: a <br>
+    // beside the line break chip, a break typed into a heading
+    await page.eval(`(() => {
+      const fig = ORDER.find((s) => s.kind === 'figure').edit;
+      fig.insertBefore(document.createElement('br'), fig.querySelector('.nl'));
+      const h = ORDER.find((s) => s.kind === 'heading').edit;
+      h.append(document.createElement('br'), document.createTextNode('more'));
+      for (const s of ORDER) if (s.kind === 'figure' || s.kind === 'heading') s.touched = true;
+    })()`);
+    await page.save();
+    const text = env.read('main.tex');
+    has(text, '\\caption{One here.\nTwo here.}', 'the caption keeps one line break');
+    has(text, '\\section{A title\nmore}', 'the heading keeps one line break');
+  },
+
+  async 'heading numbers come from the .aux only while it matches'(env, page) {
+    env.write('main.tex', [
+      '\\documentclass{article}', '\\begin{document}',
+      '\\section{One}', '', '\\subsection{Gone}', '', '\\section{Two}', '', '\\subsection{Kept}', '',
+      '\\appendix', '', '\\section{App}', '', '\\end{document}', ''].join('\n'));
+    await page.eval('load(true)');
+    await page.waitFor(`ORDER.filter((s) => s.kind === 'heading').length === 5`, 8000, 'the headings');
+    const nums = () => page.eval(`ORDER.filter((s) => s.kind === 'heading').map((s) => (s.el.querySelector('.num') || {}).textContent || '').join(' ')`);
+    // the .aux of a build with a References entry and custom numbers
+    const aux = [['section', 'I'], ['subsection', 'I.a'], ['section', 'II'], ['subsection', 'II.a'], ['section', ''], ['section', 'Z']];
+    // set again until no reload after the first build replaces it
+    const heads = JSON.stringify(aux.map(([level, num]) => ({ level, num, title: '' })));
+    await page.waitFor(`(DOC.aux.heads = ${heads}, render(), ORDER.find((s) => s.kind === 'heading').el.querySelector('.num').textContent === 'I.')`, 8000, 'the .aux numbers');
+    eq(await nums(), 'I. I.a. II. II.a. Z.', 'the numbers of the .aux, References left out');
+    // the subsection deleted before the next build: counted on the page
+    await page.eval(`(() => { const t = FILES['main.tex']; t.text = t.text.replace('\\\\subsection{Gone}\\n\\n', ''); render(); })()`);
+    eq(await nums(), '1. 2. 2.1. A.', 'counted while the .aux is stale');
+  },
+
+  async 'layout declarations are not shown'(env, page) {
+    env.write('main.tex', [
+      '\\documentclass{article}', '\\begin{document}',
+      '{\\raggedright', '\\begin{itemize}', '  \\item An item.', '\\end{itemize}', '}', '',
+      '\\end{document}', ''].join('\n'));
+    await page.eval('load(true)');
+    await page.waitFor(`document.querySelector('#doc').innerText.includes('An item')`, 8000, 'the list');
+    hasNot(await page.eval(`document.querySelector('#doc').innerText`), 'raggedright', 'the page');
+  },
+
   async 'code block edits save'(env, page) {
     await page.eval(`(() => { const ta = ORDER.find((s) => s.kind === 'code').edit; ta.focus(); ta.setSelectionRange(ta.value.indexOf('line') + 4, ta.value.indexOf('line') + 4); })()`);
     await page.type(' two');

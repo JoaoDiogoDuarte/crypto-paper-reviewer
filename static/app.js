@@ -321,7 +321,30 @@ function configure() {
   for (const env of Object.keys(DOC.theorems || {})) L.THM_ENVS.add(env);
   L.setCodeEnvs((DOC.config || {}).code_envs);
   HEADS = {};
-  for (const h of DOC.aux.heads || []) (HEADS[h.level] = HEADS[h.level] || []).push(h.num);
+}
+// The heading numbers LaTeX printed, by level in document order.  They are
+// used only while the numbered headings of the source come in the same
+// levels and order as in the .aux: after a heading is added, deleted or
+// moved and before the next build, the k-th subsection of the source is not
+// the k-th of the .aux, and the numbers are counted on the page instead.
+// Entries without a number (References, \addcontentsline) are not headings
+// of the source and are left out.
+function auxHeads() {
+  const aux = (DOC.aux.heads || []).filter((h) => h.num);
+  const src = [];
+  const walk = (name) => {
+    for (const seg of FILES[name].segs || []) {
+      if (seg.kind === 'input') { if (FILES[seg.input]) walk(seg.input); continue; }
+      if (seg.kind !== 'heading') continue;
+      const h = L.headingParts(seg.src);
+      if (h && !h.star) src.push(h.level);
+    }
+  };
+  walk(DOC.main);
+  const heads = {};
+  if (src.length !== aux.length || aux.some((h, i) => h.level !== src[i])) return heads;
+  for (const h of aux) (heads[h.level] = heads[h.level] || []).push(h.num);
+  return heads;
 }
 let HEADS = {};
 
@@ -375,6 +398,7 @@ function render() {
   configure();
   const ctx = { sec: 0, sub: 0, subsub: 0, app: false, counters: {}, heads: {}, env: [] };
   for (const name of Object.keys(FILES)) FILES[name].segs = assignLines(parseFile(name));
+  HEADS = auxHeads();
   const title = documentTitle(FILES[DOC.main].text);
   let h1 = doc.querySelector(':scope > h1.doctitle');
   if (title) {
@@ -390,7 +414,8 @@ function render() {
       if (seg.kind === 'input') { if (FILES[seg.input]) walk(seg.input); continue; }
       ORDER.push(seg);
       if (seg.kind === 'gap' || seg.kind === 'hidden') continue;
-      const key = seg.kind + '\u0000' + seg.src + '\u0000' + JSON.stringify(ctx);
+      // a heading's number also depends on whether the .aux numbers apply
+      const key = seg.kind + '\u0000' + seg.src + '\u0000' + JSON.stringify(ctx) + (seg.kind === 'heading' ? '\u0000' + !!Object.keys(HEADS).length : '');
       const list = old.get(key);
       const k = list ? list.findIndex(reusable) : -1;
       let node, after;
@@ -736,7 +761,7 @@ function renderHeading(seg, ctx) {
     if (fromAux !== undefined) num = fromAux;
     else if (h.level === 'section') num = ctx.app ? String.fromCharCode(64 + ctx.sec) : String(ctx.sec);
     else if (h.level === 'subsection') num = `${ctx.app ? String.fromCharCode(64 + ctx.sec) : ctx.sec}.${ctx.sub}`;
-    else if (h.level === 'subsubsection') num = `${ctx.sec}.${ctx.sub}.${ctx.subsub}`;
+    else if (h.level === 'subsubsection') num = `${ctx.app ? String.fromCharCode(64 + ctx.sec) : ctx.sec}.${ctx.sub}.${ctx.subsub}`;
     if (num && !/[.:]$/.test(num)) num += '.';
   }
   if (num) node.append(el('span', 'num', num));
@@ -1068,7 +1093,7 @@ function chip(cls, src, text) {
 }
 
 const HIDDEN = new Set(['label', 'crefalias', 'crefname', 'Crefname', 'urlstyle', 'addlinespace', 'morecmidrules', 'pagebreak', 'linebreak', 'newline', 'clearpage', 'newpage', 'maketitle', 'bibliographystyle', 'FloatBarrier',
-  'vspace', 'noindent', 'centering', 'setlength', 'addtolength', 'setcounter', 'addtocounter', 'title', 'author', 'nonumber', 'medskip', 'smallskip', 'bigskip',
+  'vspace', 'noindent', 'centering', 'raggedright', 'raggedleft', 'RaggedRight', 'RaggedLeft', 'setlength', 'addtolength', 'setcounter', 'addtocounter', 'title', 'author', 'nonumber', 'medskip', 'smallskip', 'bigskip',
   'Needspace', 'raggedbottom', 'balance', 'IEEEauthorblockN', 'IEEEauthorblockA', 'leavevmode',
   'protect', 'institute', 'inst', 'orcidID', 'email', 'date', 'titlerunning', 'authorrunning', 'thanks',
   'affiliation', 'address', 'addauthor', 'authorrunning', 'keywords', 'IEEEoverridecommandlockouts',
@@ -1711,6 +1736,14 @@ function ser(node) {
   return out;
 }
 
+// A heading's title or a caption is the argument of a command, where a
+// blank line stops LaTeX ("Paragraph ended before \addcontentsline was
+// complete").  Whatever the browser left after a deletion (a <br>, a line
+// break chip beside another), the lines are joined with one line break.
+function oneParagraph(text) {
+  return text.replace(/[ \t]*\n(?:[ \t]*\n)+[ \t]*/g, '\n');
+}
+
 // The current source of one segment, from its DOM; edited paragraphs get
 // the house rules.
 function segSource(seg, warnings, changes, applyRules = true) {
@@ -1737,12 +1770,12 @@ function segSource(seg, warnings, changes, applyRules = true) {
     }
     case 'heading': {
       if (!seg.edit || !seg.parts) return seg.src;
-      return seg.parts.prefix + fix(ser(seg.edit), seg.parts.title) + seg.parts.suffix;
+      return seg.parts.prefix + fix(oneParagraph(ser(seg.edit)), seg.parts.title) + seg.parts.suffix;
     }
     case 'code': return seg.edit && seg.touched ? seg.parts.pre + seg.edit.value + seg.parts.post : seg.src;
     case 'figure': case 'table':
       if (!seg.edit || !seg.parts) return seg.figSrc || seg.src;
-      return seg.parts.prefix + fix(ser(seg.edit), seg.parts.caption) + seg.parts.suffix;
+      return seg.parts.prefix + fix(oneParagraph(ser(seg.edit)), seg.parts.caption) + seg.parts.suffix;
     case 'hidden': return seg.patched !== undefined ? seg.patched : seg.src;
     default: return seg.src;
   }

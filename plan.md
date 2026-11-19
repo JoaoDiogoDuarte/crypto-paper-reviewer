@@ -19,6 +19,8 @@ and the editor's keymap (`ACTION_DEFS`, `TEXT_KEYS`, `GLOBAL_KEYS`), find
 5. Multiple cursors: paper view, then source view.
 6. Kill ring, source-view completion and electric pairs, latexindent,
    spelling keys `C-,` and `C-.` (section 6b).
+7. One sentence per line on save (section 7). Independent of 1 to 6, so it
+   can go first.
 
 Every step adds `tests/e2e.js` cases (headless Chrome only, no visible
 windows). They check the files on disk after the change, and that a single
@@ -32,6 +34,11 @@ undo reverses each batch.
 3. Sidebar on the left or the right? List figures, tables and equations from
    the start?
 4. Electric pairs in the paper view: on or off by default?
+5. One sentence per line: on by default for new papers, or only through
+   `house_rules.one_sentence_per_line`? Split only the lines an edit
+   changed (proposed), or every line of an edited block?
+6. A capital after `etc.` or `et al.`: split (it usually ends the sentence)
+   or never split (proposed, since a name often follows `et al.`)?
 
 ---
 
@@ -422,3 +429,88 @@ them. Tests: e2e cases on a paragraph with a known misspelling ("recieve"):
 `C-.` gives "receive" on disk after a save, a second `C-.` cycles, `C-z`
 restores the word, `C-,` lists suggestions and Enter applies the chosen one,
 a word inside maths is never offered.
+
+## 7. One sentence per line on save
+
+### Now
+
+`houseRules` in `static/latex.js` has `one_sentence_per_line` (off by
+default). It replaces `([.!?])\s+(?=[A-Z\\])` with a line break, on the
+whole serialised block. That splits inside maths (`$x. Y$`), after
+abbreviations (`e.g. \cite`, `Fig. \ref`, `et al. Smith`, `J. Smith`),
+inside `\verb`, `\url`, comments and code, and it rewrites lines of the
+original that the author did not touch.
+
+### Rule
+
+Work on the token list of `L.tokenize`, not on the string, and split only in
+`text` tokens that sit where a line break is a space to TeX:
+
+- the top level of a paragraph, quote, caption or `\item`;
+- inside `fmt` (`\emph`, `\textbf`) and the argument of `\footnote`.
+
+Never inside `math`, `comment`, `\verb`, `\url`, `\texttt`, `\path`,
+code environments, games, tabulars, or any `group` or `cmd` argument not
+listed above. Those tokens are copied unchanged.
+
+A sentence ends at `.`, `!` or `?`, followed by any closers `)`, `]`, `'`,
+`''`, `’`, `”`, `}`, then by plain spaces (not `~`, `\ `, `\,`), and the
+next token starts a sentence: a capital letter, an opening quote or
+bracket followed by a capital, or a command that starts text
+(`\Cref`, `\emph`, `\textbf`, a macro whose expansion starts with a
+capital). The spaces become one line break.
+
+Not a sentence end:
+
+- an abbreviation before the period: `e.g.`, `i.e.`, `cf.`, `vs.`,
+  `resp.`, `et al.`, `etc.` (decision 6), `Fig.`, `Sec.`, `Eq.`, `Thm.`,
+  `Def.`, `Lem.`, `Prop.`, `Cor.`, `App.`, `Ch.`, `No.`, `Vol.`, `pp.`,
+  `Dr.`, `Prof.`, `Mr.`, `Mrs.`, `Ms.`, `St.`; the list is extended by
+  `house_rules.abbreviations`;
+- a single capital before the period (an initial, `J. Smith`), unless
+  written `X\@.`;
+- a period inside a number or a name (`3.2`, `v1.0`, `ePrint 2024/123.`
+  then lowercase), since no space follows or no capital comes next;
+- an ellipsis (`...`, `…`, `\dots`, `\ldots`) with no period after it;
+  `\dots.` followed by a capital does end a sentence;
+- a period followed by `~` or `\ ` (the author has said it is not an end).
+
+A period right after maths (`$x$. Then`) is in a `text` token, so it does
+split. A display (`\[ ... \]`, `equation`) is its own token: the text after
+it starts on a new line only if it already did.
+
+### Scope
+
+- Only blocks edited on the page (the house rules already run only on
+  `touched` blocks), and only the lines of that block that differ from the
+  original source (decision 5): an untouched line keeps the author's
+  layout, even with two sentences on it.
+- Lines are never joined. A line break the author typed stays.
+- The question before saving names the change (it already says "one sentence
+  per line" when the rule is on), and declining saves the text as typed.
+- Headings are left alone. Captions use the same rule (a line break in a
+  caption is a space).
+
+### Place in the code
+
+A function `splitSentences(text, original, rules)` in `static/latex.js`,
+called from `houseRules` in place of the regular expression. It tokenises,
+walks the tokens with the allowed contexts, rewrites the spaces in place,
+and serialises with `serializeTokens`, so the result round-trips. A change
+that would alter the token stream other than in whitespace is dropped (a
+safety check: compare the token lists with whitespace normalised).
+
+### Tests
+
+- `tests/torture.js` or a new `tests/sentences.js`: a table of inputs and
+  expected outputs, among them `$x. Y$`, `e.g.\ Smith`, `e.g. \cite{a}`,
+  `Fig.~\ref{f}`, `et al. Smith`, `J. Smith`, `X\@. Then`, `3.2 Then`,
+  `\dots and`, `\dots. Then`, ```Done.'' Then`, `(see X.) Then`,
+  `\emph{One. Two.} Three.`, `\footnote{One. Two.}`, `% A. B` in a
+  comment, `\verb|a. B|`, `\url{a. B}`, a game line, a tabular cell; the
+  fuzzer checks that the output differs from the input only in whitespace.
+- e2e: type two sentences in one line of a paragraph and save: the file
+  has them on two lines; an untouched line with two sentences in the same
+  block stays one line; declining the house rules keeps one line; one undo
+  restores the text as typed.
+
