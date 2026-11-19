@@ -355,7 +355,8 @@ Each paper keeps its settings, save history and caches in its own
 `.paper-editor/` folder (add `.paper-editor/` to the paper's `.gitignore`,
 except perhaps `config.json`). The configuration is optional; it is read
 from `.paper-editor.json` next to the main file, then
-`.paper-editor/config.json`, and these are the defaults:
+`.paper-editor/config.json` (a file that sets some house rules keeps the
+defaults of the others), and these are the defaults:
 
     {
       "house_rules": {"tie_before": ["cite", "ref"], "flag_bracketed_cref": true, "one_sentence_per_line": false},
@@ -370,7 +371,8 @@ from `.paper-editor.json` next to the main file, then
 | --- | --- |
 | `house_rules.tie_before` | commands that get a `~` before them in edited text |
 | `house_rules.flag_bracketed_cref` | warn about `(\cref{…})`: refer in prose instead |
-| `house_rules.one_sentence_per_line` | break edited paragraphs after each sentence |
+| `house_rules.one_sentence_per_line` | put each sentence of a changed line on a line of its own (on in papers made with **New paper…**, which write it to `.paper-editor.json`); lines you did not change keep their layout, and maths, comments, `\verb`, `\url`, `\footnote`, tables and pictures are never split |
+| `house_rules.abbreviations` | abbreviations of the paper whose period never ends a sentence, such as `["Constr."]`, besides the built-in list (`e.g.`, `i.e.`, `cf.`, `et al.`, `Fig.`, `Thm.` and many more, with misspelt forms such as `c.f.` and `et. al.`, which the editor names after saving and never changes) |
 | `key_style` | key style for entries added from Crossref or arXiv |
 | `bib_add_to` | the `.bib` file that receives them (default: the smallest one the paper uses) |
 | `build` | the build command, run in the main file's directory (default: `make` if there is a `Makefile`, otherwise `latexmk -pdf -synctex=1`) |

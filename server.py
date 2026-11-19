@@ -3132,6 +3132,10 @@ def create_project(req):
         if not ok:
             warnings.append('Could not add cryptobib as a submodule: ' + out[-300:])
     bibs = (['cryptobib/abbrev3', 'cryptobib/crypto'] if have_bib else []) + ['references']
+    # a new paper keeps one sentence per line from the start
+    with open(os.path.join(folder, '.paper-editor.json'), 'w') as f:
+        json.dump({'house_rules': {'one_sentence_per_line': True}}, f, indent=2)
+        f.write('\n')
     main = os.path.join(folder, 'main.tex')
     with open(main, 'w') as f:
         f.write(convert.new_main(md, target, bool(req.get('anonymous')), bibs))
@@ -3187,7 +3191,12 @@ def open_paper(path, cwd=None, state=None):
     CONFIG = json.loads(json.dumps(DEFAULT_CONFIG))
     for cfg in (os.path.join(os.path.dirname(path), '.paper-editor.json'), os.path.join(STATE, 'config.json')):
         if os.path.exists(cfg):
-            CONFIG.update(json.load(open(cfg)))
+            for k, v in json.load(open(cfg)).items():
+                # a file that sets one house rule keeps the defaults of the others
+                if k == 'house_rules' and isinstance(v, dict):
+                    CONFIG[k] = {**CONFIG[k], **v}
+                else:
+                    CONFIG[k] = v
     _bib.update(entries=None, stamp=None)
     remember_paper(path)
 

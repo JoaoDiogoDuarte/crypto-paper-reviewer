@@ -33,6 +33,7 @@ Quick:
 
     python3 -m unittest tests.backend_test tests.test_convert_contract tests.torture_conversion
     node tests/roundtrip.js tests/fixtures
+    node tests/sentences.js
     node tests/torture.js --seeds=1,7,42,99 --cases=700
     E2E_SEEDS=17 E2E_OPS=18 node tests/e2e.js 'save torture:'
 

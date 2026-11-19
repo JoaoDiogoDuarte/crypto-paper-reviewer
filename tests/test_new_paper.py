@@ -51,5 +51,21 @@ class NewPaper(unittest.TestCase):
                             self.assertEqual(r.returncode, 0, '\n'.join(l for l in log.split('\n') if l.startswith('!'))[:500])
 
 
+class NewPaperHouseRules(unittest.TestCase):
+    def test_one_sentence_per_line_on(self):
+        import json
+        import server
+        with tempfile.TemporaryDirectory() as d:
+            main, _ = server.create_project({'parent': d, 'name': 'p', 'venue': 'article'})
+            with open(os.path.join(d, 'p', '.paper-editor.json')) as f:
+                self.assertEqual(json.load(f), {'house_rules': {'one_sentence_per_line': True}})
+            # the other house rules keep their defaults
+            server.open_paper(main, state=os.path.join(d, 'state'))
+            rules = server.CONFIG['house_rules']
+            self.assertTrue(rules['one_sentence_per_line'])
+            self.assertEqual(rules['tie_before'], ['cite', 'ref'])
+            self.assertTrue(rules['flag_bracketed_cref'])
+
+
 if __name__ == '__main__':
     unittest.main()

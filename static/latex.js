@@ -354,6 +354,147 @@
     return pieces;
   }
 
+  // ---------------------------------------------------------- one sentence per line
+
+  // Abbreviations whose period never ends a sentence, with the misspelt
+  // forms that occur in papers.  Matched without regard to case (except
+  // CASED), with any spaces between the parts.  A misspelt form maps to the
+  // standard one, which the question before saving names.
+  const ABBREVIATIONS = [
+    'e.g.', 'i.e.', 'cf.', 'etc.', 'et al.', 'vs.', 'v.', 'resp.', 'viz.', 'sc.', 'N.B.', 'ca.', 'approx.', 'appr.',
+    'ibid.', 'op. cit.', 'loc. cit.', 'w.r.t.', 'w.l.o.g.', 'w.h.p.', 'w.o.p.', 'iff.', 'i.i.d.', 'u.a.r.', 'poly.', 'p.p.t.',
+    'Fig.', 'Figs.', 'Sec.', 'Sect.', 'Secs.', 'Eq.', 'Eqs.', 'Thm.', 'Thms.', 'Def.', 'Defn.', 'Lem.', 'Prop.', 'Cor.',
+    'Rem.', 'Ex.', 'Alg.', 'App.', 'Apx.', 'Ch.', 'Chap.', 'Tab.', 'Fn.', 'Prob.', 'Conj.', 'Obs.', 'Clm.', 'Hyb.', 'Exp.',
+    'Vol.', 'pp.', 'p.', 'ed.', 'eds.', 'Proc.', 'Conf.', 'Symp.', 'Trans.', 'Univ.', 'Inst.', 'Dept.', 'Tech.', 'Rep.',
+    'Dr.', 'Prof.', 'Mr.', 'Mrs.', 'Ms.', 'St.', 'Jr.', 'Sr.',
+    'Jan.', 'Feb.', 'Mar.', 'Apr.', 'Jun.', 'Jul.', 'Aug.', 'Sep.', 'Sept.', 'Oct.', 'Nov.', 'Dec.',
+    'a.k.a.', 'a.s.', 'max.', 'min.', 'avg.', 'est.', 'incl.', 'excl.', 'esp.', 'cont.', 'orig.', 'rev.', 'ver.', 'Nos.',
+  ];
+  const CASED = ['No.'];
+  const MISSPELT = {
+    'eg.': 'e.g.', 'e. g.': 'e.g.', 'ie.': 'i.e.', 'i. e.': 'i.e.', 'c.f.': 'cf.',
+    'e.t.c.': 'etc.', 'ect.': 'etc.', 'et. al.': 'et al.', 'et.al.': 'et al.', 'etal.': 'et al.', 'et alii.': 'et al.',
+    'v.s.': 'vs.', 'n.b.': 'N.B.', 'NB.': 'N.B.', 'wrt.': 'w.r.t.', 'wlog.': 'w.l.o.g.', 'whp.': 'w.h.p.',
+    'iid.': 'i.i.d.', 'aka.': 'a.k.a.',
+  };
+  // forms without their last period: not abbreviations to the splitter (no
+  // period to split at), but misspelt
+  const MISSPELT_BARE = { 'e.g': 'e.g.', 'i.e': 'i.e.', 'et al': 'et al.', 'e.t.c': 'etc.', 'w.r.t': 'w.r.t.',
+    'w.l.o.g': 'w.l.o.g.', 'i.i.d': 'i.i.d.', 'u.a.r': 'u.a.r.' };
+  const formRe = (f) => f.replace(/\.$/, '').split(/\s+/).map((w) => w.replace(/[.]/g, '\\.\\s*')).join('\\s*');
+  // the text before a period ends with an abbreviation
+  const abbrevRe = (extra) => new RegExp('(?:^|[^A-Za-z])(?:' +
+    [...ABBREVIATIONS, ...Object.keys(MISSPELT), ...(extra || [])].map(formRe).join('|') + ')\\.$', 'i');
+  const CASED_RE = new RegExp('(?:^|[^A-Za-z])(?:' + CASED.map(formRe).join('|') + ')\\.$');
+  const MISSPELT_RE = new RegExp('(?:^|(?<=[^A-Za-z]))(' +
+    [...Object.keys(MISSPELT), ...Object.keys(MISSPELT_BARE)].sort((a, b) => b.length - a.length)
+      .map((f) => f.replace(/\./g, '\\.').replace(/ /g, '\\s+')).join('|') + ')(?![A-Za-z.])', 'gi');
+  // environments whose text is prose: anything else (tabulars, pictures,
+  // algorithms) is left as it is
+  const PROSE_ENVS = new Set(['itemize', 'enumerate', 'description', 'quote', 'quotation', 'center', 'flushleft',
+    'flushright', 'proof', 'abstract', 'remark', 'example', 'claim', 'note', 'notation', 'observation', 'conjecture',
+    'fact', 'assumption', 'construction', 'minipage']);
+
+  // The text with everything that is not prose masked: N for a command,
+  // formula, comment or anything inside a non-prose environment (no split
+  // there), S at the start of a command that can start a sentence (\Cref,
+  // \emph, \TSUF), braces kept.  Same length as the text.
+  function proseMask(text) {
+    const N = '\u0001', S = '\u0002';
+    let out = '';
+    const fill = (str, first) => first + N.repeat(Math.max(0, str.length - 1));
+    const walk = (tokens, envs) => {
+      for (const tok of tokens) {
+        const prose = envs.every((e) => PROSE_ENVS.has(e) || THM_ENVS.has(e));
+        if (tok.t === 'fmt') {
+          if (!prose) { out += N.repeat(tok.prefix.length + serializeTokens(tok.children).length + 1); continue; }
+          out += fill(tok.prefix, S); walk(tok.children, envs); out += '}';
+        } else if (tok.t === 'group') {
+          if (!prose) { out += N.repeat(serializeTokens(tok.children).length + 2); continue; }
+          out += '{'; walk(tok.children, envs); out += '}';
+        } else if (tok.t === 'env') {
+          out += N.repeat(tok.s.length);
+          if (tok.mode === 'begin') envs = [...envs, tok.env];
+          else if (envs.length && envs[envs.length - 1] === tok.env) envs = envs.slice(0, -1);
+        } else if (tok.t === 'text' && prose) {
+          // an escaped character (\%, \&) is a character, never a period
+          out += tok.s.replace(/\\./g, 'xx');
+        } else if (tok.t === 'cmd' && prose && /^[A-Z]/.test(tok.name)) out += fill(tok.s, S);
+        else out += N.repeat(serializeTokens([tok]).length);
+      }
+    };
+    walk(tokenize(text), []);
+    return out;
+  }
+
+  // The lines of text that are not lines of original (each line of the
+  // original matches one line of the text at most), as [start, end) spans.
+  function changedLines(text, original) {
+    const left = new Map();
+    for (const l of (original || '').split('\n')) left.set(l, (left.get(l) || 0) + 1);
+    const spans = [];
+    let at = 0;
+    for (const l of text.split('\n')) {
+      const n = original === undefined ? 0 : left.get(l) || 0;
+      if (n) left.set(l, n - 1); else spans.push([at, at + l.length]);
+      at += l.length + 1;
+    }
+    return spans;
+  }
+
+  // Each sentence of the changed lines on a line of its own.  A sentence ends
+  // at . ! or ?, then closing brackets or quotes, then plain spaces, before a
+  // capital (or a command that starts with one, or \emph), and not after an
+  // abbreviation, an initial (J. Smith) or a bare ellipsis.
+  function splitSentences(text, original, rules) {
+    const mask = proseMask(text);
+    if (mask.length !== text.length) return text;     // never guess
+    const abbrev = abbrevRe((rules && rules.abbreviations) || []);
+    const spans = changedLines(text, original);
+    const inChanged = (i) => spans.some(([a, b]) => i >= a && i < b);
+    const cuts = [];
+    const re = /([.!?]+)((?:[)\]'"’”}]|'')*)([ \t]+)(?=[(\[`'"‘“]*[A-Z\u0002])/g;
+    for (let m; (m = re.exec(mask));) {
+      const sp = m.index + m[1].length + m[2].length;
+      if (!inChanged(sp)) continue;
+      const marks = m[1];
+      // a bare ellipsis (.. or ...) goes on; a period after it ends
+      if (/^\.{2,3}$/.test(marks)) continue;
+      const before = mask.slice(Math.max(0, m.index - 40), m.index + 1);
+      if (marks === '.') {
+        if (abbrev.test(before) || CASED_RE.test(before)) continue;
+        // an initial: one capital after a space or a bracket
+        if (/(?:^|[ \t\n(~{])[A-Z]\.$/.test(before)) continue;
+      }
+      cuts.push([sp, sp + m[3].length]);
+    }
+    if (!cuts.length) return text;
+    let out = '', at = 0;
+    for (const [a, b] of cuts) {
+      const lineStart = text.lastIndexOf('\n', a - 1) + 1;
+      const indent = /^[ \t]*/.exec(text.slice(lineStart))[0];
+      out += text.slice(at, a) + '\n' + indent;
+      at = b;
+    }
+    return out + text.slice(at);
+  }
+
+  // Misspelt abbreviations (c.f., eg., et. al.) in the changed lines.
+  function misspeltAbbreviations(text, original) {
+    const mask = proseMask(text);
+    const spans = changedLines(text, original);
+    const found = new Set();
+    for (const [a, b] of spans) {
+      const line = mask.slice(a, b);
+      for (const m of line.matchAll(MISSPELT_RE)) {
+        const key = m[1].toLowerCase().replace(/\s+/g, ' ');
+        const std = Object.entries({ ...MISSPELT, ...MISSPELT_BARE }).find(([k]) => k.toLowerCase() === key);
+        if (std) found.add(`${m[1]} (${std[1]})`);
+      }
+    }
+    return [...found];
+  }
+
   // House formatting for an edited paragraph: a tie before \cite and \ref,
   // as everywhere in the paper.  Returns [text, warnings].
   // House rules for edited text.  With the block's original source given,
@@ -368,7 +509,9 @@
     }
     if (rules.flag_bracketed_cref && /\(\s*\\[cC]ref\{/.test(text)) warnings.push('bracketed \\cref: refer in prose instead');
     if (rules.one_sentence_per_line) {
-      text = text.replace(/([.!?])\s+(?=[A-Z\\])/g, '$1\n');
+      text = splitSentences(text, original, rules);
+      const bad = misspeltAbbreviations(text, original);
+      if (bad.length) warnings.push('check ' + bad.join(', '));
     }
     if (/  +/.test(text.replace(/\n[ \t]*/g, '\n'))) {
       text = text.replace(/([^\n ]) {2,}/g, '$1 ');
@@ -762,7 +905,7 @@
   }
 
   const api = { tokenize, serializeTokens, segment, serializeSegments, splitCode, documentPieces,
-    decodeText, encodeText, houseRules, headingParts, captionParts, typeset, setCodeEnvs, parseGames, parseGameLine, gameLineSrc, gameLayout, writeGameLayout, parseTabulars, tabularBody, groupEnd, envEnd, inComment, THM_ENVS, MATH_ENVS };
+    decodeText, encodeText, houseRules, splitSentences, misspeltAbbreviations, proseMask, headingParts, captionParts, typeset, setCodeEnvs, parseGames, parseGameLine, gameLineSrc, gameLayout, writeGameLayout, parseTabulars, tabularBody, groupEnd, envEnd, inComment, THM_ENVS, MATH_ENVS };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.LatexDoc = api;
 })(this);

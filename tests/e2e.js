@@ -1014,6 +1014,36 @@ done.`));
     eq(await dirty(page), 0, 'edited files after saving');
   },
 
+  async 'house rules: one sentence per line splits the changed line only'(env, page) {
+    env.write('main.tex', [
+      '\\documentclass{article}', '\\begin{document}',
+      'Old one. Old two.', 'The lazy dog.', '',
+      '\\end{document}', ''].join('\n'));
+    await page.eval('load(true)');
+    await page.waitFor(`document.querySelector('#doc').innerText.includes('lazy dog')`, 8000, 'the paragraph');
+    await page.eval(`DOC.config.house_rules = { ...(DOC.config.house_rules || {}), one_sentence_per_line: true }`);
+    page.dialogAnswer = true;
+    await page.select('lazy dog', 'end');
+    await page.type(' sleeps. Then e.g. Smith reads. And c.f. this');
+    await page.save();
+    const text = env.read('main.tex');
+    has(text, 'Old one. Old two.\nThe lazy dog sleeps.\nThen e.g. Smith reads.\nAnd c.f. this.\n', 'the split');
+    has(page.dialogs.join('\n'), 'one sentence per line', 'the question');
+    has(await page.eval(`document.querySelector('#banner') ? document.querySelector('#banner').innerText : ''`), 'c.f. (cf.)', 'the misspelling named');
+  },
+
+  async 'house rules: declining one sentence per line keeps the line'(env, page) {
+    env.write('main.tex', ['\\documentclass{article}', '\\begin{document}', 'The lazy dog.', '', '\\end{document}', ''].join('\n'));
+    await page.eval('load(true)');
+    await page.waitFor(`document.querySelector('#doc').innerText.includes('lazy dog')`, 8000, 'the paragraph');
+    await page.eval(`DOC.config.house_rules = { ...(DOC.config.house_rules || {}), one_sentence_per_line: true }`);
+    page.dialogAnswer = false;
+    await page.select('lazy dog', 'end');
+    await page.type(' sleeps. Then it wakes');
+    await page.save();
+    has(env.read('main.tex'), 'The lazy dog sleeps. Then it wakes.\n', 'the line as typed');
+  },
+
   async 'move a section down and up keeps blank lines'(env, page) {
     const click = (title, button) => page.click(headBtn(title, button));
     await click('Introduction', 'Move this section down');
