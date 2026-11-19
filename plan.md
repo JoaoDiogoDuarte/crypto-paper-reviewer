@@ -35,10 +35,7 @@ undo reverses each batch.
    the start?
 4. Electric pairs in the paper view: on or off by default?
 5. One sentence per line: on by default for new papers, or only through
-   `house_rules.one_sentence_per_line`? Split only the lines an edit
-   changed (proposed), or every line of an edited block?
-6. A capital after `etc.` or `et al.`: split (it usually ends the sentence)
-   or never split (proposed, since a name often follows `et al.`)?
+   `house_rules.one_sentence_per_line`?
 
 ---
 
@@ -462,11 +459,7 @@ capital). The spaces become one line break.
 
 Not a sentence end:
 
-- an abbreviation before the period: `e.g.`, `i.e.`, `cf.`, `vs.`,
-  `resp.`, `et al.`, `etc.` (decision 6), `Fig.`, `Sec.`, `Eq.`, `Thm.`,
-  `Def.`, `Lem.`, `Prop.`, `Cor.`, `App.`, `Ch.`, `No.`, `Vol.`, `pp.`,
-  `Dr.`, `Prof.`, `Mr.`, `Mrs.`, `Ms.`, `St.`; the list is extended by
-  `house_rules.abbreviations`;
+- a period that belongs to an abbreviation in the list below;
 - a single capital before the period (an initial, `J. Smith`), unless
   written `X\@.`;
 - a period inside a number or a name (`3.2`, `v1.0`, `ePrint 2024/123.`
@@ -479,12 +472,57 @@ A period right after maths (`$x$. Then`) is in a `text` token, so it does
 split. A display (`\[ ... \]`, `equation`) is its own token: the text after
 it starts on a new line only if it already did.
 
+### Abbreviations: never a sentence end
+
+A period that ends one of these is never split after, whatever follows it.
+Matching ignores case and accepts the misspelt forms that occur in papers
+(missing, extra or misplaced periods, a space inside). The splitter does
+not correct them; a misspelling is a separate warning (below).
+
+| Meaning | Forms matched |
+| --- | --- |
+| for example | `e.g.`, `eg.`, `e.g`, `e. g.`, `ex.` |
+| that is | `i.e.`, `ie.`, `i.e`, `ie`, `i. e.` |
+| compare | `cf.`, `c.f.`, `cf`, `conf.` |
+| and so on | `etc.`, `e.t.c.`, `etc`, `ect.`, `e.t.c` |
+| and others | `et al.`, `et. al.`, `et al`, `et.al.`, `etal.`, `et alii.` |
+| versus | `vs.`, `v.s.`, `vs`, `v.` (between two names, as in case titles) |
+| respectively | `resp.`, `resp` |
+| namely, viz. | `viz.`, `viz`, `sc.` |
+| note well | `N.B.`, `n.b.`, `NB.` |
+| about | `ca.`, `approx.`, `appr.`, `approx` |
+| idem, ibidem | `ibid.`, `id.`, `op. cit.`, `loc. cit.` |
+| with respect to | `w.r.t.`, `wrt.`, `w.r.t`, `wrt` |
+| without loss of generality | `w.l.o.g.`, `wlog.`, `w.l.o.g`, `W.l.o.g.` |
+| with high, overwhelming probability | `w.h.p.`, `whp.`, `w.o.p.` |
+| if and only if | `iff.` (rare, but seen) |
+| independent and identically distributed | `i.i.d.`, `iid.`, `i.i.d` |
+| uniformly at random | `u.a.r.`, `u.a.r` |
+| polynomial time, probabilistic polynomial time | `poly.`, `p.p.t.` |
+| references in the text | `Fig.`, `Figs.`, `Sec.`, `Sect.`, `Secs.`, `Eq.`, `Eqs.`, `Thm.`, `Thms.`, `Def.`, `Defn.`, `Lem.`, `Prop.`, `Cor.`, `Rem.`, `Ex.`, `Alg.`, `App.`, `Apx.`, `Ch.`, `Chap.`, `Tab.`, `Fn.`, `Prob.`, `Conj.`, `Obs.`, `Clm.`, `Hyb.`, `Exp.` |
+| bibliographic | `No.`, `no.`, `Nos.`, `Vol.`, `vol.`, `pp.`, `p.`, `ed.`, `eds.`, `Ed.`, `Eds.`, `Proc.`, `Conf.`, `Symp.`, `Trans.`, `Univ.`, `Inst.`, `Dept.`, `Tech.`, `Rep.` |
+| titles of people | `Dr.`, `Prof.`, `Mr.`, `Mrs.`, `Ms.`, `St.`, `Jr.`, `Sr.` |
+| months | `Jan.`, `Feb.`, `Mar.`, `Apr.`, `Jun.`, `Jul.`, `Aug.`, `Sep.`, `Sept.`, `Oct.`, `Nov.`, `Dec.` |
+| Latin and others | `a.k.a.`, `aka.`, `a.s.` (almost surely), `max.`, `min.`, `avg.`, `est.`, `incl.`, `excl.`, `esp.`, `cont.`, `orig.`, `rev.`, `ver.` |
+
+The list lives in `static/latex.js` as data, and
+`house_rules.abbreviations` adds to it (a paper's own, such as `Constr.`).
+
+Misspellings: when the edited lines contain a misspelt form (`eg.`,
+`e.g` without its last period, `c.f.`, `e.t.c.`, `ect.`, `et. al.`,
+`et al` without a period, `ie.`, `wrt`, `iid`), the question before saving
+lists them with the standard form (`e.g.`, `cf.`, `etc.`, `et al.`,
+`i.e.`, `w.r.t.`, `i.i.d.`). The editor never changes them by itself,
+since a form such as `eg` can be a name or a macro argument.
+
 ### Scope
 
 - Only blocks edited on the page (the house rules already run only on
-  `touched` blocks), and only the lines of that block that differ from the
-  original source (decision 5): an untouched line keeps the author's
-  layout, even with two sentences on it.
+  `touched` blocks), and only the lines of that block that the edit
+  changed. A line that is in the original source unchanged keeps the
+  author's layout, even with two sentences on it. Lines are matched by a
+  line diff of the block against its original source, and a changed line
+  is split as a whole.
 - Lines are never joined. A line break the author typed stays.
 - The question before saving names the change (it already says "one sentence
   per line" when the rule is on), and declining saves the text as typed.
@@ -507,10 +545,13 @@ safety check: compare the token lists with whitespace normalised).
   `Fig.~\ref{f}`, `et al. Smith`, `J. Smith`, `X\@. Then`, `3.2 Then`,
   `\dots and`, `\dots. Then`, ```Done.'' Then`, `(see X.) Then`,
   `\emph{One. Two.} Three.`, `\footnote{One. Two.}`, `% A. B` in a
-  comment, `\verb|a. B|`, `\url{a. B}`, a game line, a tabular cell; the
+  comment, `\verb|a. B|`, `\url{a. B}`, a game line, a tabular cell,
+  and every form of the abbreviation table followed by a capital
+  (`eg. Smith`, `c.f. Lemma`, `e.t.c. The`, `et. al. Show`); the
   fuzzer checks that the output differs from the input only in whitespace.
 - e2e: type two sentences in one line of a paragraph and save: the file
-  has them on two lines; an untouched line with two sentences in the same
+  has them on two lines; a misspelt `c.f.` is listed in the question and
+  left as typed; an untouched line with two sentences in the same
   block stays one line; declining the house rules keeps one line; one undo
   restores the text as typed.
 
