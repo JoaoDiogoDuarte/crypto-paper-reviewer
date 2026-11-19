@@ -3455,6 +3455,7 @@ def open_browser(url, browser):
         if found:
             app_url = url.replace('://127.0.0.1:', '://' + APP_HOST + ':', 1)
             zoom = chrome_zoom_level()
+            refresh_desktop_entry()
             subprocess.Popen([found, os.path.join(HERE, 'shell'), app_url]
                              + ([f'--chrome-zoom={zoom}'] if zoom is not None else []),
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -3508,14 +3509,15 @@ def desktop_entry_text(run):
             'Comment=Read, listen to and edit a LaTeX paper\n'
             f'Exec="{run}" %f\nIcon=crypto-paper-reviewer\nTerminal=false\n'
             'Categories=Office;\nMimeType=text/x-tex;\n'
-            f'StartupWMClass={APP_WAYLAND_ID}\nStartupNotify=false\n')
+            'StartupWMClass=crypto-paper-reviewer\nStartupNotify=false\n')
 
 
 def x11_alias_text(run):
-    # X11 windows carry --class; a hidden entry gives them the same icon
+    # The Electron window (its desktopName, and --class on X11) matches the
+    # main entry; a hidden entry gives the Chrome app window the same icon.
     return ('[Desktop Entry]\nType=Application\nName=Crypto Paper Reviewer\n'
             f'Exec="{run}" %f\nIcon=crypto-paper-reviewer\nTerminal=false\nNoDisplay=true\n'
-            'StartupWMClass=crypto-paper-reviewer\n')
+            f'StartupWMClass={APP_WAYLAND_ID}\n')
 
 
 def refresh_desktop_entry():

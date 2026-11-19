@@ -634,18 +634,18 @@ class BackendTest(unittest.TestCase):
         self.assertIn('title = "A \\& B",', bib)
         self.assertIn('journal = {J \\& K},', bib)
 
-    def test_desktop_entry_matches_the_wayland_window_and_is_refreshed(self):
+    def test_desktop_entry_matches_the_electron_window_and_is_refreshed(self):
         data = os.path.join(self.tmp, 'data')
         with mock.patch.dict(os.environ, {'XDG_DATA_HOME': data}):
             entry = os.path.join(data, 'applications', 'crypto-paper-reviewer.desktop')
             os.makedirs(os.path.dirname(entry))
             with open(entry, 'w') as f:
-                f.write('[Desktop Entry]\nStartupWMClass=crypto-paper-reviewer\n')   # an older version's
+                f.write('[Desktop Entry]\nStartupWMClass=chrome-paper-reviewer.localhost__-Default\n')   # an older version's
             server.refresh_desktop_entry()
             text = open(entry).read()
-            self.assertIn('StartupWMClass=chrome-paper-reviewer.localhost__-Default', text)
+            self.assertIn('StartupWMClass=crypto-paper-reviewer\n', text)
             alias = open(os.path.join(data, 'applications', 'crypto-paper-reviewer-x11.desktop')).read()
-            self.assertIn('StartupWMClass=crypto-paper-reviewer', alias)
+            self.assertIn('StartupWMClass=chrome-paper-reviewer.localhost__-Default', alias)
             self.assertIn('NoDisplay=true', alias)
 
     def test_app_window_takes_the_zoom_the_editor_had_once(self):
