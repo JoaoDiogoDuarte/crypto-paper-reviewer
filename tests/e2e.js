@@ -904,6 +904,46 @@ done.`));
     has(text, '\\caption{One here.\nThree here.}', 'the caption keeps one line break');
   },
 
+  async 'frontmatter: no deletion takes \\begin{abstract} or \\end{abstract} alone'(env, page) {
+    const src = ['\\documentclass{article}', '\\begin{document}', '', '\\maketitle', '',
+      'A visible paragraph before.', '', '\\keywords{K}', '', '\\begin{abstract}', 'First abstract sentence.', 'Second abstract sentence.', '\\end{abstract}', '',
+      'After the abstract.', '', '\\end{document}', ''].join('\n');
+    const fresh = async () => { env.write('main.tex', src); await page.eval('load(true)'); await page.waitFor(`document.querySelector('#doc .chip.runin')`, 8000, 'the abstract'); };
+    const nodeOf = (t) => `(() => { for (const ed of document.querySelectorAll('#doc [contenteditable=true]')) { const w = document.createTreeWalker(ed, 4); let n; while ((n = w.nextNode())) if (n.data.includes(${JSON.stringify(t)})) return n; } })()`;
+    // Backspace at the start of the abstract: the hidden line break and \begin stay
+    await fresh();
+    await page.select('First abstract', 'start');
+    for (let i = 0; i < 3; i++) await page.key('Backspace');
+    await page.save();
+    eq(env.read('main.tex'), src, 'Backspace at the start of the abstract');
+    // Delete at its end: \end stays
+    await page.select('Second abstract sentence.', 'end');
+    for (let i = 0; i < 3; i++) await page.key('Delete');
+    await page.save();
+    eq(env.read('main.tex'), src, 'Delete at the end of the abstract');
+    // a selection from the paragraph above into the abstract: the paragraph
+    // goes, \keywords (not shown) and \begin{abstract} stay
+    await page.eval(`(() => { const r = document.createRange(); r.setStart(${nodeOf('A visible')}, 0); r.setEnd(${nodeOf('First abstract')}, 0); getSelection().removeAllRanges(); getSelection().addRange(r); })()`);
+    await page.key('Backspace');
+    await page.save();
+    eq(env.read('main.tex'), src.replace('A visible paragraph before.\n\n', ''), 'selection into the abstract');
+    // typing over "Abstract. First": the text goes inside the abstract
+    await fresh();
+    await page.eval(`(() => { const c = document.querySelector('#doc .chip.runin'); const r = document.createRange(); r.setStartBefore(c); r.setEnd(${nodeOf('First abstract')}, 5); c.parentElement.focus(); getSelection().removeAllRanges(); getSelection().addRange(r); })()`);
+    await page.key('x');
+    await page.save();
+    eq(env.read('main.tex'), src.replace('\\begin{abstract}\nFirst', '\\begin{abstract}\nx'), 'typing over the start of the abstract');
+    // a selection from the abstract into the next paragraph keeps \end
+    await fresh();
+    await page.eval(`(() => { const r = document.createRange(); r.setStart(${nodeOf('Second abstract')}, 0); r.setEnd(${nodeOf('After the')}, 5); getSelection().removeAllRanges(); getSelection().addRange(r); })()`);
+    await page.key('Backspace');
+    await page.save();
+    const text = env.read('main.tex');
+    has(text, '\\begin{abstract}\nFirst abstract sentence.\n', 'the abstract keeps its first sentence');
+    has(text, '\\end{abstract}', 'the abstract keeps its end');
+    hasNot(text, 'Second abstract', 'the selected text goes');
+  },
+
   async 'a caption or heading never gets a blank line'(env, page) {
     env.write('main.tex', [
       '\\documentclass{article}', '\\begin{document}',

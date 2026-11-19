@@ -2656,7 +2656,7 @@ function insertSource(src, title) {
   const host = range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement;
   if (!host || !host.closest('[contenteditable=true]')) return;
   const c = chip('src', src, src);
-  range.deleteContents();
+  deleteKeepingEnvs(range);
   range.insertNode(c);
   range.setStartAfter(c); range.collapse(true);
   sel.removeAllRanges(); sel.addRange(range);
@@ -2991,7 +2991,7 @@ function copySelection(e, cut) {
   e.preventDefault();
   if (cut) {
     snapshot();
-    r.deleteContents();
+    deleteKeepingEnvs(r);
     markEditedSoon();
   }
 }
@@ -3088,17 +3088,38 @@ function deleteAcross() {
   const p = acrossParts();
   if (!p || !p.ok) { banner('Only text between paragraphs of one file can be deleted at once.'); return false; }
   snapshot();
-  p.head.deleteContents();
-  p.tail.deleteContents();
+  // blocks that show nothing (\maketitle, \keywords{...}) were not seen, so
+  // they stay, and then the first and the last block are not joined
+  const quiet = (x) => x.edit && x.edit.classList && x.edit.classList.contains('quiet');
+  const gone = p.middle.filter((x) => !quiet(x) && x.kind !== 'gap');
+  const keep = unpairedEnvChips([...envChipsIn(p.head), ...gone.flatMap((x) => x.edit ? [...x.edit.querySelectorAll('.chip')] : []), ...envChipsIn(p.tail)]);
+  const keepSet = new Set(keep);
+  deleteKeeping(p.head, keepSet);
+  deleteKeeping(p.tail, keepSet);
   const caretAt = p.sa.edit.childNodes.length;
-  for (const x of p.middle) { x.removed = true; if (x.el) x.el.remove(); }
-  while (p.sb.edit.firstChild) p.sa.edit.append(p.sb.edit.firstChild);
-  p.sb.removed = true;
-  if (p.sb.el) p.sb.el.remove();
-  p.sa.touched = true;
+  for (const x of gone) for (const c of x.edit ? x.edit.querySelectorAll('.chip') : []) if (keepSet.has(c)) p.sa.edit.append(c);
+  const blank = (e) => !e.textContent.trim() && !e.querySelector('.chip:not(.nl):not(.parbreak)');
+  let at = p.sa;
+  if (!p.middle.some(quiet)) {
+    for (const x of p.middle) { x.removed = true; if (x.el) x.el.remove(); }
+    while (p.sb.edit.firstChild) p.sa.edit.append(p.sb.edit.firstChild);
+    p.sb.removed = true;
+    if (p.sb.el) p.sb.el.remove();
+  } else {
+    for (const x of gone) { x.removed = true; if (x.el) x.el.remove(); }
+    p.sb.touched = true;
+    if (blank(p.sa.edit)) {
+      // the first block went whole: it goes with the blank line after it
+      const gap = p.middle.find((x) => x.kind === 'gap');
+      for (const x of gap ? [p.sa, gap] : [p.sa]) { x.removed = true; if (x.el) x.el.remove(); }
+      at = p.sb;
+    }
+  }
+  at.touched = true;
   const r = document.createRange();
-  r.setStart(p.sa.edit, Math.min(caretAt, p.sa.edit.childNodes.length)); r.collapse(true);
-  p.sa.edit.focus({ preventScroll: true });
+  r.setStart(at.edit, at === p.sa ? Math.min(caretAt, at.edit.childNodes.length) : 0); r.collapse(true);
+  at.edit.focus({ preventScroll: true });
+  keptToast(keep);
   const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
   markEdited();
   return true;
@@ -5105,6 +5126,32 @@ document.addEventListener('beforeinput', (e) => {
     banner(ACROSS);
   }
 }, true);
+// A deletion in one block (Backspace, Delete, typing over a selection) that
+// would take a \begin or an \end without its partner keeps it.
+document.addEventListener('beforeinput', (e) => {
+  const t = e.inputType || '';
+  if (e.defaultPrevented || !(e.target.closest && e.target.closest('#doc') && e.target.isContentEditable)) return;
+  if (!/^delete/.test(t) && t !== 'insertText' && t !== 'insertReplacementText' && t !== 'insertParagraph' && t !== 'insertLineBreak') return;
+  const sel = getSelection();
+  if (!sel.rangeCount || spansEditables()) return;
+  const ranges = sel.isCollapsed ? e.getTargetRanges().map((s) => { const r = document.createRange(); r.setStart(s.startContainer, s.startOffset); r.setEnd(s.endContainer, s.endOffset); return r; })
+    : [sel.getRangeAt(0)];
+  const lone = ranges.flatMap((r) => unpairedEnvChips(envChipsIn(r)));
+  if (!lone.length) return;
+  e.preventDefault();
+  if (sel.isCollapsed) {
+    const m = envOf(lone[0]);
+    toast(`${/Backward/.test(t) ? 'Backspace' : 'Delete'} stops at the ${m[1] === 'begin' ? 'start' : 'end'} of ${envName(lone[0])}`);
+    return;
+  }
+  snapshot();
+  const r = sel.getRangeAt(0);
+  deleteKeepingEnvs(r);
+  sel.removeAllRanges(); sel.addRange(r);
+  if (/^insert/.test(t) && t !== 'insertText' && t !== 'insertReplacementText') insertBreak();
+  else if (e.data) document.execCommand('insertText', false, e.data);
+  markEditedSoon();
+}, true);
 
 // Keys that wrap a selection instead of replacing it; both the opening and
 // the closing key wrap.  Quotes become TeX quotes (`` '' and ` ') on saving.
@@ -5242,7 +5289,7 @@ function insertNodes(nodes) {
   const r = selRange();
   if (!editableAt(r)) return false;
   snapshot();
-  r.deleteContents();
+  deleteKeepingEnvs(r);
   const frag = document.createDocumentFragment();
   nodes.forEach((n) => frag.append(n));
   const last = nodes[nodes.length - 1];
@@ -5329,6 +5376,68 @@ function insertMath(display) {
 }
 
 // The nodes just before and after a collapsed range (empty text skipped).
+// ------------------------------------------------- environment marks
+//
+// \begin{...} and \end{...} show as marks ("Abstract.", "Theorem 1.") or as
+// nothing at all.  A deletion that takes one without its partner leaves
+// LaTeX that does not build, often with nothing on screen to show it, so a
+// deletion keeps such a mark and says so.
+const envOf = (n) => n && n.nodeType === 1 && n.classList.contains('chip') && /^\s*\\(begin|end)\s*\{([^}]*)\}/.exec(n.dataset.src || '');
+const envName = (n) => { const m = envOf(n); return m && (m[2] === 'abstract' ? 'the abstract' : '\\' + m[1] + '{' + m[2] + '}'); };
+// The marks of a range (whole chips only), in order.
+function envChipsIn(r) {
+  const root = r.commonAncestorContainer.nodeType === 1 ? r.commonAncestorContainer : r.commonAncestorContainer.parentElement;
+  const all = root.classList && root.classList.contains('chip') ? [root] : [...root.querySelectorAll('.chip')];
+  return all.filter((c) => envOf(c) && r.intersectsNode(c));
+}
+// The marks among `nodes` (in order) whose partner is not among them.
+function unpairedEnvChips(nodes) {
+  const open = [], lone = [];
+  for (const n of nodes) {
+    const m = envOf(n);
+    if (!m) continue;
+    if (m[1] === 'begin') { open.push({ env: m[2], n }); continue; }
+    let k = open.length - 1;
+    while (k >= 0 && open[k].env !== m[2]) k--;
+    if (k >= 0) open.splice(k, 1); else lone.push(n);
+  }
+  const keep = new Set([...lone, ...open.map((o) => o.n)]);
+  return nodes.filter((n) => keep.has(n));
+}
+// Delete a range but keep the marks of `keep` that are in it, where the
+// range was (with the line break after a \begin); the range ends collapsed
+// after the last kept \begin, so that typed text goes inside it.
+function deleteKeeping(r, keep) {
+  const mine = [];
+  for (const c of envChipsIn(r).filter((x) => keep.has(x))) {
+    mine.push(c);
+    let n = c.nextSibling;
+    while (n && n.nodeType === 3 && !n.data) n = n.nextSibling;
+    if (envOf(c)[1] === 'begin' && n && n.nodeType === 1 && n.classList.contains('nl') && r.intersectsNode(n)) mine.push(n);
+  }
+  mine.forEach((c) => c.remove());
+  r.deleteContents();
+  if (!mine.length) return;
+  const f = document.createDocumentFragment();
+  f.append(...mine);
+  r.insertNode(f);
+  const begins = mine.filter((c) => envOf(c) && envOf(c)[1] === 'begin');
+  const last = begins.length ? begins[begins.length - 1] : null;
+  if (last) { const n = last.nextSibling; r.setStartAfter(n && n.classList && n.classList.contains('nl') ? n : last); }
+  else r.setStartBefore(mine[0]);
+  r.collapse(true);
+}
+function keptToast(keep) {
+  if (keep.length) toast(`Kept the start or end of ${[...new Set(keep.map(envName))].join(', ')}: the source view removes a whole environment`);
+}
+// Delete a range in one block, keeping unpaired marks; true if it kept one.
+function deleteKeepingEnvs(r) {
+  const keep = unpairedEnvChips(envChipsIn(r));
+  deleteKeeping(r, new Set(keep));
+  keptToast(keep);
+  return keep.length > 0;
+}
+
 function neighbours(r) {
   const skip = (n, dir) => { while (n && n.nodeType === 3 && !n.data) n = n[dir]; return n; };
   const c = r.startContainer, o = r.startOffset;
@@ -5396,7 +5505,7 @@ async function cutRegionOrLine() {
   if (document.execCommand('cut')) return;
   snapshot();
   try { await navigator.clipboard.writeText(s.toString()); } catch (e) { /* clipboard refused */ }
-  selRange().deleteContents();
+  deleteKeepingEnvs(selRange());
   markEditedSoon();
 }
 // C-w: copy the region, or the line
@@ -5424,7 +5533,7 @@ function deleteToSpace() {
   s.removeAllRanges(); s.addRange(r);
   document.execCommand('delete');
 }
-function deleteLine() { snapshot(); selectLine(); selRange().deleteContents(); markEditedSoon(); }
+function deleteLine() { snapshot(); selectLine(); deleteKeepingEnvs(selRange()); markEditedSoon(); }
 function duplicate() {
   const s = getSelection();
   if (s.isCollapsed) selectLine();
@@ -5609,6 +5718,12 @@ document.addEventListener('keydown', (e) => {
     if (!nb.inText && n && n.nodeType === 1 && n.classList.contains('chip') &&
         (n.classList.contains('parbreak') || n.classList.contains('nl') || n.classList.contains('tie'))) {
       e.preventDefault();
+      // the line break after \begin{abstract} (or before an \end) shows
+      // nothing: taking it would change nothing on screen, and the next
+      // Backspace would take the \begin itself
+      let m = e.key === 'Backspace' ? n.previousSibling : n.nextSibling;
+      while (m && m.nodeType === 3 && !m.data) m = e.key === 'Backspace' ? m.previousSibling : m.nextSibling;
+      if (envOf(m)) { toast(`${e.key} stops at the ${envOf(m)[1] === 'begin' ? 'start' : 'end'} of ${envName(m)}`); return; }
       snapshot();
       const r = document.createRange(); r.setStartBefore(n); r.collapse(true);
       n.remove();

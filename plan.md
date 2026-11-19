@@ -21,6 +21,8 @@ and the editor's keymap (`ACTION_DEFS`, `TEXT_KEYS`, `GLOBAL_KEYS`), find
    spelling keys `C-,` and `C-.` (section 6b).
 7. One sentence per line on save (section 7). Done 2026-11-19.
 8. Merging sections, subsections and subsubsections (section 8).
+9. Deleting text before the abstract must not break the PDF (section 9).
+   Steps 1 and 2 done 2026-11-19; step 3 (the general check) open.
 
 Every step adds `tests/e2e.js` cases (headless Chrome only, no visible
 windows). They check the files on disk after the change, and that a single
@@ -34,10 +36,10 @@ undo reverses each batch.
 3. Sidebar on the left or the right? List figures, tables and equations from
    the start?
 4. Electric pairs in the paper view: on or off by default?
-5. Merging: default direction into the previous section (proposed, as
-   Combine does now), with "into the next" a second button or only a key?
-6. Merging files: the second file goes to the editor's trash (proposed) or
-   stays on disk unused?
+5. Merging: into the previous section by default, as Combine does now, with
+   "into the next" only on a key. Decided 2026-11-19.
+6. Merging files: the second file goes to the editor's trash. Decided
+   2026-11-19 (a file left unused is a stale copy someone may edit later).
 
 ---
 
@@ -655,4 +657,89 @@ the files back (the trash keeps H's file). A save that fails on one file
 - A file with two sections: only "Keep the files" is offered.
 - References: `\Cref{sec:b}` prints P's number after the next build (checked
   in the `.aux` of a real build in the intensive run).
+
+## 9. Deleting before the abstract breaks the PDF
+
+### Report (2026-11-19)
+
+Deleting a line or a paragraph just before the abstract often breaks the
+build, and nothing on screen shows what went. The fix so far is the source
+view. Seen in `threshold/note` (iacrcc), whose main file has, after
+`\begin{document}`:
+
+```
+\maketitle
+
+\keywords{...}
+
+\begin{abstract}
+Bellare et al. ...
+```
+
+The editor's history of that paper shows no edit that removed `\maketitle`,
+`\keywords`, `\begin{abstract}` or `\begin{document}`, so the break is
+something else (a lost blank line, a `}`, an `\end{...}` of the block
+before, or text joined into a hidden command's argument). Reproduce first.
+
+### What is on screen there
+
+- `\maketitle` and `\keywords{...}` are in `HIDDEN`, so their paragraphs
+  have only hidden chips and render as `quiet`, non-editable blocks
+  (`renderPara`). They take no visible room, so the block above the
+  abstract on screen is not the block above it in the source.
+- `\begin{abstract}` is a `runin` chip ("Abstract. ") at the start of the
+  abstract's paragraph.
+- Backspace at the start of a paragraph calls `joinWithPrevious`, which
+  joins with the previous `para` even when that one is quiet, so the
+  abstract (or text typed there) can land after `\keywords{...}` in one
+  paragraph, or inside what the user believes is the paragraph above.
+- Backspace or Delete next to a chip lets the browser delete a hidden chip
+  the user cannot see.
+
+### Found (2026-11-19, headless probe)
+
+- Backspace at the start of the abstract's first sentence: the first press
+  deleted the line break after `\begin{abstract}` (nothing changes on
+  screen), the second deleted `\begin{abstract}` itself.
+- A selection from the paragraph above into the abstract deleted
+  `\begin{abstract}` with the text.
+- Fixed: Backspace and Delete stop at a `\begin`/`\end` mark or at the
+  line break next to one, with a toast. Every deletion of a selection (in
+  one block, across blocks, cut, Enter, typing over it, delete line) keeps
+  a `\begin` or `\end` whose partner is not deleted too. A selection
+  across blocks keeps blocks that show nothing (`\keywords`), and then does
+  not join the first and last block. Test:
+  `node tests/e2e.js frontmatter`.
+
+### Steps
+
+1. Reproduce in a copy of `threshold/note` and in the iacrcc, llncs and
+   IEEEtran templates: select the paragraph above the abstract and delete
+   it, Ctrl+Shift+K on it, Backspace at the start of the abstract, Delete
+   at the end of the paragraph above. Record the source diff and the build
+   error of each. Ask the user for Ctrl+Alt+Q the next time it happens.
+2. Fix the causes found. Expected:
+   - `joinWithPrevious` and Delete at a paragraph's end skip quiet blocks:
+     they never join into one, and never delete one.
+   - A keyboard deletion never removes a hidden chip it does not show.
+     A selection that covers hidden chips keeps them (the deleted text goes,
+     the commands stay), except when the whole block is selected and
+     deleted on purpose, which then says in a toast what went.
+   - `\begin{abstract}` and other `runin` chips are not deleted by a
+     Backspace from the text after them.
+3. Safety net for every edit, not only near the abstract: on each change,
+   compare the paragraph's balance of `{`/`}` and `\begin`/`\end` (and the
+   count of commands that may appear once, `\maketitle`,
+   `\begin{document}`) before and after. If the change breaks it, undo it
+   and say what it would have removed.
+
+### Tests (`node tests/e2e.js frontmatter`)
+
+- The iacrcc front matter above. Each deletion of step 1 leaves
+  `\maketitle`, `\keywords{...}`, `\begin{abstract}` and the blank lines
+  between them as they were, and the paper builds.
+- Deleting a visible paragraph between two quiet blocks removes only that
+  paragraph.
+- Backspace at the start of the abstract's first sentence does not remove
+  `\begin{abstract}`.
 
