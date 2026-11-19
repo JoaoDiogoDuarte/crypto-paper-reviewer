@@ -861,6 +861,21 @@ def expand_listing(src, pre=None):
     return out
 
 
+def inline_lst_languages():
+    """Highlighting for listings written in the paper (lstlisting, a wrapper
+    such as ecblock around one): the global \\lstset ('base'), and each
+    \\lstdefinelanguage and \\lstdefinestyle on top of it, by lower-case name,
+    for a listing that picks one with language= or style=."""
+    try:
+        langs, styles, sets = lst_definitions(strip_comments(preamble_text()))
+    except Exception:
+        return {'base': lst_language([]), 'languages': {}, 'styles': {}}
+    base = [kv for s in sets for kv in s]
+    return {'base': lst_language(lst_effective(base, langs, styles)),
+            'languages': {n: lst_language(lst_effective(base + [('language', n)], langs, styles)) for n in langs},
+            'styles': {n: lst_language(lst_effective(base + [('style', n)], langs, styles)) for n in styles}}
+
+
 def all_listings():
     """The listings of every listing command of the paper, by source text."""
     pre = strip_comments(preamble_text())
@@ -1267,7 +1282,7 @@ def doc_payload():
     pages = synctex_pages()
     return {'pages': pages, 'pdftext': [] if pages else pdf_page_texts(), 'docclass': docclass(),
             'main': MAIN, 'path': os.path.join(PAPER, MAIN), 'root': source_root(), 'mains': find_mains(PAPER), 'resolve': input_map(), 'files': files, 'aux': BUILDER.aux, 'auxver': BUILDER.auxver,
-            'macros': load_macros(), 'theorems': load_theorems(), 'cref': cref_config(), 'listings': all_listings(), 'listing_macros': sorted(listing_macros()), 'disk_files': source_files(), 'colors': paper_colors(), 'graphicx': uses_graphicx(), 'config': CONFIG,
+            'macros': load_macros(), 'theorems': load_theorems(), 'cref': cref_config(), 'listings': all_listings(), 'listing_macros': sorted(listing_macros()), 'lst_languages': inline_lst_languages(), 'disk_files': source_files(), 'colors': paper_colors(), 'graphicx': uses_graphicx(), 'config': CONFIG,
             'bib': load_bib(), 'figs': figs, 'build': BUILDER.state,
             'tts': {}}
 
@@ -2505,6 +2520,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             with open(KEYS_FILE, 'w') as f:
                 json.dump(keys, f, indent=2, sort_keys=True)
             return self.send(200, {})
+        if urllib.parse.urlparse(self.path).path == '/api/recent/forget':
+            req = self.json_body()
+            if not isinstance(req, dict) or not isinstance(req.get('path'), str) or not isinstance(req.get('main'), str):
+                return self.send(400, {'error': 'expected {path, main}'})
+            target = os.path.join(req['path'], req['main'])
+            if os.path.normpath(target) == os.path.normpath(os.path.join(PAPER, MAIN)):
+                return self.send(400, {'error': 'the paper open now stays on the list'})
+            try:
+                forget_paper(target)
+            except OSError as e:
+                return self.send(500, {'error': f'could not write the list of recent papers: {e}'})
+            return self.send(200, {})
         if urllib.parse.urlparse(self.path).path == '/api/open':
             req = self.json_body()
             if not isinstance(req, dict):
@@ -2946,18 +2973,33 @@ def recent_papers():
     return out
 
 
+def write_recent(last, recent):
+    os.makedirs(os.path.dirname(RECENT_FILE), exist_ok=True)
+    tmp = RECENT_FILE + '.tmp'
+    with open(tmp, 'w') as out:
+        json.dump({'last': last, 'recent': recent}, out)
+    os.replace(tmp, RECENT_FILE)
+
+
 def remember_paper(path):
     """The paper just opened goes first in the list of recent papers (ten)."""
     try:
         entry = {'path': path, 't': time.time(), 'title': paper_title(path)}
         rest = [e for e in recent_papers() if os.path.normpath(e['path']) != os.path.normpath(path)]
-        os.makedirs(os.path.dirname(RECENT_FILE), exist_ok=True)
-        tmp = RECENT_FILE + '.tmp'
-        with open(tmp, 'w') as out:
-            json.dump({'last': path, 'recent': [entry] + rest[:9]}, out)
-        os.replace(tmp, RECENT_FILE)
+        write_recent(path, [entry] + rest[:9])
     except OSError:
         pass
+
+
+def forget_paper(path):
+    """Take a paper off the list of recent papers (its files stay).  When it
+    was the last one opened, the next one on the list becomes the last."""
+    norm = os.path.normpath(path)
+    rest = [e for e in recent_papers() if os.path.normpath(e['path']) != norm]
+    last = last_paper()
+    if last and os.path.normpath(last) == norm:
+        last = rest[0]['path'] if rest else None
+    write_recent(last, rest)
 
 
 def browse_dir(path):
@@ -3367,7 +3409,50 @@ def carry_zoom(profile=None, sources=None):
     return None
 
 
+def chrome_zoom_level():
+    """The zoom the editor has in the Chrome app window (else in the user's
+    own Chrome, for 127.0.0.1), as a Chrome zoom level (0 is 100%), or None."""
+    base = os.environ.get('XDG_CONFIG_HOME', os.path.expanduser('~/.config'))
+    sources = [(os.path.join(app_profile(), 'Default', 'Preferences'), (APP_HOST,))]
+    sources += [(os.path.join(base, d, 'Default', 'Preferences'), ('127.0.0.1', 'localhost'))
+                for d in ('google-chrome', 'chromium', 'google-chrome-beta')]
+    for prefs, hosts in sources:
+        try:
+            data = json.load(open(prefs, encoding='utf-8'))
+        except (OSError, ValueError):
+            continue
+        for zooms in ((data.get('partition') or {}).get('per_host_zoom_levels') or {}).values():
+            for host in hosts:
+                entry = zooms.get(host)
+                if isinstance(entry, dict) and isinstance(entry.get('zoom_level'), (int, float)):
+                    return entry['zoom_level']
+    return None
+
+
+def electron_binary():
+    """The Electron of shell/ (npm install there), or None."""
+    dist = os.path.join(HERE, 'shell', 'node_modules', 'electron', 'dist')
+    for name in ('electron', 'electron.exe', os.path.join('Electron.app', 'Contents', 'MacOS', 'Electron')):
+        if os.path.isfile(os.path.join(dist, name)):
+            return os.path.join(dist, name)
+    return None
+
+
 def open_browser(url, browser):
+    if browser == 'electron':
+        # the default: a window in which every key reaches the page (Chrome
+        # keeps Ctrl+W, Ctrl+Tab and others for itself)
+        found = electron_binary()
+        if found:
+            app_url = url.replace('://127.0.0.1:', '://' + APP_HOST + ':', 1)
+            zoom = chrome_zoom_level()
+            subprocess.Popen([found, os.path.join(HERE, 'shell'), app_url]
+                             + ([f'--chrome-zoom={zoom}'] if zoom is not None else []),
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        print('Electron is not installed (run: npm install --prefix shell, then node shell/node_modules/electron/install.js '
+              'if npm skipped the download); opening the Chrome app window.', flush=True)
+        browser = 'chrome-app'
     if browser in ('chrome', 'chrome-app'):
         executables = ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser']
         if sys.platform == 'darwin':
@@ -3491,8 +3576,9 @@ def main():
     ap.add_argument('--cwd', help='the directory LaTeX runs in (default: the main file\'s directory)')
     ap.add_argument('--state', help='where to keep settings and caches (default: <project>/.paper-editor)')
     ap.add_argument('--port', type=int, help='port (default: 8765, or a free one when it is taken)')
-    ap.add_argument('--browser', choices=('chrome-app', 'chrome', 'system'), default='chrome-app',
-                    help='browser to open (default: standalone Chrome app window)')
+    ap.add_argument('--browser', choices=('electron', 'chrome-app', 'chrome', 'system'), default='electron',
+                    help='browser to open (default: the Electron window in shell/, after npm install --prefix shell, '
+                    'else the standalone Chrome app window)')
     ap.add_argument('--no-open', action='store_true', help='do not open a browser')
     ap.add_argument('--keep-running', action='store_true',
                     help='keep the server running when its window is closed (the default with --no-open)')

@@ -20,6 +20,8 @@ text editor for writing the preamble, macros or new figures from scratch.
    With no folder given it starts on the list of recent papers (the last
    one is loaded behind it, so `Esc` goes on with it). **Open…** (`Ctrl+O`)
    shows the same list (a click or the paper's number, `1`–`9`, opens one).
+   The × beside a paper, or `Delete` on it, takes it off the list. Its files
+   stay where they are.
    **Open a folder…** chooses a paper's folder with the desktop's own
    dialog (zenity or kdialog on Linux); a folder with several documents
    shows an **Open …** button for each.
@@ -230,8 +232,10 @@ under ⋯. In narrow windows both show icons only; hovering a button names it.
   the change and **Revert** that block alone.
 - **Diff** shows every change since the last save, since the editor opened,
   since the last Git commit, or since **any earlier commit** of the paper's
-  folder (read-only while it is on), with previous/next buttons and a map of
-  the changes beside the scroll bar. **Revert** on a change (or
+  folder, with previous/next buttons and a map of the changes beside the
+  scroll bar. A click on a block edits it there: that block is drawn as
+  usual, and its changes are drawn again when you leave it (`Esc`, or a
+  click outside the text). Saving and undo keep the diff open. **Revert** on a change (or
   `Ctrl+Alt+Backspace` on the current one) puts that block back as it was
   in the version compared with; Undo brings the change back. After a commit
   made outside the editor, the reload button beside **Next** reads the

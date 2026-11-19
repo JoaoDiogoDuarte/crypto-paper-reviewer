@@ -39,7 +39,13 @@ You need Python 3, a TeX installation with `latexmk` (and `pdfcrop`,
     git clone https://github.com/JoaoDiogoDuarte/paper-editor.git
     cd paper-editor
 
-That is enough to start. Reading aloud with offline voices is optional:
+That is enough to start. The editor opens in its own Electron window when
+Electron is installed in `shell/` (every key then reaches the editor, Ctrl+W
+and Ctrl+Tab among them), and in a Chrome app window otherwise:
+
+    npm install --prefix shell
+
+Reading aloud with offline voices is optional:
 
     python3 -m venv .venv
     .venv/bin/pip install edge-tts piper-tts kokoro-onnx soundfile
@@ -63,7 +69,8 @@ it always keeps running). `Ctrl+C` in the terminal stops it too. When port
 | Option | Meaning |
 | --- | --- |
 | `--main other.tex` | the main file, when the folder has several documents |
-| `--browser chrome-app` | Chrome or Chromium as an app window (the default) |
+| `--browser electron` | the Electron window of `shell/` (the default; a Chrome app window when Electron is not installed) |
+| `--browser chrome-app` | Chrome or Chromium as an app window |
 | `--browser chrome` | Chrome or Chromium as a normal window |
 | `--browser system` | your default browser (Firefox works) |
 | `--no-open` | open nothing; visit `http://127.0.0.1:8765/` yourself |

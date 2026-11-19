@@ -85,6 +85,27 @@ class BackendTest(unittest.TestCase):
             finally:
                 error.close()
 
+    def test_forget_a_recent_paper(self):
+        """A paper comes off the recent list and its files stay; the open one cannot."""
+        server.remember_paper(self.other)
+        server.remember_paper(self.main)
+        self.assertEqual(server.last_paper(), self.main)
+        status, _ = self.post('/api/recent/forget', {'path': self.tmp, 'main': 'main.tex'})
+        self.assertEqual(status, 400)
+        status, _ = self.post('/api/recent/forget', {'path': self.tmp, 'main': 'other.tex'})
+        self.assertEqual(status, 200)
+        self.assertEqual([e['path'] for e in server.recent_papers()], [self.main])
+        self.assertTrue(os.path.isfile(self.other))
+        status, _ = self.post('/api/recent/forget', {'path': self.tmp})
+        self.assertEqual(status, 400)
+        # the last paper opened leaves too: the next one on the list takes its place
+        server.remember_paper(self.other)
+        server.forget_paper(self.other)
+        self.assertEqual(server.last_paper(), self.main)
+        server.forget_paper(self.main)
+        self.assertIsNone(server.last_paper())
+        self.assertEqual(server.recent_papers(), [])
+
     def test_requests_for_another_host_are_refused(self):
         """DNS rebinding: a page on evil.example resolved to 127.0.0.1 gets nothing."""
         import http.client

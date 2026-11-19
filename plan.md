@@ -1,0 +1,424 @@
+# Plan: Emacs alignment, contents sidebar, label rename, literal search, multiple cursors
+
+Status: planned, nothing implemented yet. Line numbers refer to `static/app.js`
+at commit 2325645 and will drift.
+
+Sources read for this plan: `~/.config/emacs.default/configs/*.el`
+(keybindings, editing, completion, LaTeX), `~/.config/emacs.default/.mc-lists.el`,
+and the editor's keymap (`ACTION_DEFS`, `TEXT_KEYS`, `GLOBAL_KEYS`), find
+(`FIND`, `searchMaps`), labels (`collectLabels`) and undo (`HISTORY`, `snapshot`).
+
+## Order of work
+
+0. Electron shell, evaluated before any new feature (section 0).
+1. Prefix keys, which-key hint, `C-g`/`M-g` swap, `en-GB` spell checking.
+   Small, and later steps need prefix keys.
+2. Contents sidebar (Contents and Results tabs, filter, current section).
+3. Label rename from the Results tab.
+4. Literal maths search, plus a consult-style result list for `C-f` and `C-S-f`.
+5. Multiple cursors: paper view, then source view.
+6. Kill ring, source-view completion and electric pairs, latexindent,
+   spelling keys `C-,` and `C-.` (section 6b).
+
+Every step adds `tests/e2e.js` cases (headless Chrome only, no visible
+windows). They check the files on disk after the change, and that a single
+undo reverses each batch.
+
+## Open decisions
+
+1. Maths search: does `$x$` find formulas that contain `x` as a token
+   (proposed), or only formulas equal to `x`?
+2. Move go to line to `M-g` and make `C-g` cancel?
+3. Sidebar on the left or the right? List figures, tables and equations from
+   the start?
+4. Electric pairs in the paper view: on or off by default?
+
+---
+
+## 0. Electron shell (in evaluation)
+
+Chrome keeps some keys for itself even in the app window, `C-w` (copy, in
+your bindings) among them. `shell/` holds an optional Electron window
+(Electron 45.3.4, Chromium 156). Since 2026-11-18 it is the default
+`--browser` (and so the desktop entry's), with the Chrome app window as the
+fallback when Electron is not installed and as `--browser chrome-app`.
+
+What the shell does: no application menu (so no reserved accelerators), F12
+and `C-S-i` for the developer tools, a profile of its own, a confirmation
+before closing with unsaved edits (Electron would close silently), a context
+menu with en-GB spelling suggestions, the PDF in a window of its own, other
+sites in the system browser. Without Electron installed it falls back to the
+Chrome app window.
+
+Checked so far (hidden windows only):
+
+- `--probe`: all 17 keys tried reach the page, and the window stays open
+  after `C-w`: `C-w`, `C-S-w`, `C-t`, `C-n`, `C-S-n`, `C-S-t`, `C-Tab`,
+  `C-S-Tab`, `C-PageDown`, `C-PageUp`, `C-S-c`, `C-S-j`, `C-q`, `C-r`, `C-l`,
+  `M-g`, `C->`. These are synthetic events, so a check with real key presses
+  is still needed.
+- `--smoke`: the editor loads a fixture paper with no console errors.
+- Backend tests pass after the `server.py` change.
+
+To check by hand in a real window before deciding:
+
+- [ ] Real key presses: `C-w`, `C-Tab`, `C-S-c`, `C-q` reach the editor.
+- [x] `prompt()`: Electron throws "prompt() is not supported", which broke
+      Report a problem and the other eight places that ask for text (rename
+      file, replace, add a bib entry, new section, new file, go to line).
+      `shell/preload.js` now gives the page a `prompt()` that opens a small
+      modal window and blocks like the browser's. Later, when `app.js` is
+      free, replace all `prompt()` calls with an in-page dialog for both
+      windows, and drop the shim.
+- [ ] Typing, paste, undo, save, the save conflict dialog.
+- [ ] Closing with unsaved edits asks first. Closing stops the server.
+- [ ] The PDF window opens (`C-M-d`).
+- [ ] Reading aloud: the browser voices (speechSynthesis on Linux may have
+      none in Electron) and the server voices.
+- [ ] Spell checking in en-GB, with suggestions on right click.
+- [ ] Self-reload after a change to `server.py` or `static/`.
+- [x] Zoom: the window was smaller than the Chrome app window, which is at
+      125% (Chrome zoom level 1.22). The window now starts at the Chrome app
+      window's zoom (`server.py` passes `--chrome-zoom`). Ctrl+wheel changes
+      it in half steps and saves it in `electron-profile/zoom.json`, which
+      wins from then on. Chrome's `C-+`/`C--` page zoom stays off, since the
+      page uses `C-+` for expand region.
+- [ ] Dock icon and window name on Wayland.
+- [ ] Downloads and file choosers (conversion, images).
+
+### Found in the hunt for small problems (2026-11-18)
+
+Fixed in `shell/`, checked in hidden windows where possible:
+
+- `C-S-i` opened the developer tools, which took the editor's italic. Only
+  F12 opens them now.
+- Ctrl+F in the source view: the editor leaves it to the browser's find bar,
+  which Electron does not have. The window now asks for the text and uses
+  Chromium's find in page. The same text again goes to the next match, and
+  an empty one ends the search. Checked by `--smoke`.
+- No window icon: Electron reads no SVG. `shell/icon.png` is made from
+  `static/icon.svg` (`rsvg-convert -w 256 static/icon.svg -o shell/icon.png`).
+- Two `./run --browser electron` at once would share one profile between two
+  processes, which Chromium does not support. A second launch now opens its
+  window in the first process.
+- A file dropped outside the text navigated away from the editor, and the
+  shell sent it to the system's viewer. The editor now stays where it is.
+- F11 (full screen) and Ctrl+0 (zoom back to the Chrome app window's) did
+  not exist without the menu. Both are now the window's own keys. The editor
+  uses neither.
+
+Not fixable in the shell:
+
+- Reading aloud: the Chrome app window uses "Google UK English Male". Google
+  voices exist only in Google Chrome, and Electron has no browser voices at
+  all (0 found). The Electron window falls back to the server's Edge voices.
+- `prompt()` shim and Ctrl+F fallback are stopgaps until `app.js` has its own
+  dialog and source-view find, which would also serve Chrome.
+
+Still to confirm in a visible window:
+
+- [ ] The dock shows the editor's icon and name (`desktopName` in
+      `shell/package.json` points at the hidden `crypto-paper-reviewer-x11`
+      entry; not visible in a hidden window).
+- [ ] `C-w` copies to the system clipboard (the hidden test wrote it, but the
+      Wayland clipboard did not show it, which may only be because the window
+      had no focus).
+- [ ] Second launch opens a second window in the same Electron.
+- [ ] The PDF window (`C-M-d`) shows the PDF (the test paper had no build).
+- [ ] The Edge voice is acceptable for reading aloud.
+
+### Electron tests
+
+Worth adding, and small, because they cover what the browser tests cannot:
+the window's own code in `shell/main.js` and the keys Chrome reserves.
+`tests/electron_test.js` runs only when `shell/node_modules` has Electron,
+and otherwise prints that it skipped. All windows are hidden. It checks:
+
+- Reserved keys (`--probe`): every key in the list reaches the page, and
+  `C-w` does not close the window.
+- `prompt()` returns the typed text, and Report a problem writes its file
+  (both in `--smoke` already).
+- Loading (`--smoke`): a copy of a fixture paper loads with no console errors,
+  at the zoom passed in `--chrome-zoom`, and a saved `zoom.json` wins over it.
+- Editor actions on reserved keys: `C-w` in a paragraph copies the line
+  (clipboard text), `C-q` deletes back, `C-Tab` and `C-S-c` reach the keymap
+  once those bindings exist.
+- Unsaved edits: closing triggers `will-prevent-unload` (the dialog is
+  answered by the test), and "Stay" keeps the window open.
+- Links: a non-local `window.open` is denied (sent to the system browser),
+  and the `/pdf` window opens.
+- Spelling (after section 6b): the preload API returns suggestions for a
+  misspelled word.
+
+These keep using synthetic input events, so the hand check with real key
+presses above is still done once before switching the default.
+
+If it passes, make `electron` the default when it is installed, point the
+desktop entry at it, and keep `chrome-app` as the fallback. The cost is npm and
+about 100 MB of Electron for anyone who chooses it, so it stays optional for
+the "Python 3 only" install.
+
+---
+
+## 1. Emacs alignment
+
+### Already the same
+
+`C-s` save, `C-z`/`C-S-z` undo/redo, `C-p` duplicate, `C-d` delete line,
+`C-w` copy region or line, `M-w` cut region or line, `C-q` delete back,
+`C-Backspace` delete to the previous space, `C-+` expand region, `C-a`/`C-e`
+(start of code, then of line, in the source view, as mwim), `Tab`/`S-Tab`
+indent, `Enter` indenting like the line above, `C-S-r` replace.
+
+### Gaps
+
+| Emacs | Editor now | Plan |
+|---|---|---|
+| multiple-cursors (`C->`, `C-<`, `C-M->`, `C-M-<`, `C-S-c C-S-a`, `C-S-c C-S-c`, `C-S-c C-S-d`, `C-S-c C-S-n`) | none | Section 5, with these keys |
+| Prefix keys (`C-c …`, `C-S-c …`), which-key | single keys only | Prefix keys in `keyName` and the keydown dispatch, and in `keys.json` (`"C-S-c C-S-a"`). After a prefix, a which-key-style hint lists the possible next keys |
+| `C-g` cancels | `C-g` is go to line (source view) | `C-g` acts as Escape everywhere: close menus, drop extra cursors, collapse the selection. Go to line moves to `M-g`, as in consult |
+| `C-f` consult-line | find bar | Keep the bar and add a result list: one row per match with its context, the page follows the selected row, Enter stays there |
+| `C-S-f` consult-line-multi | none | Search the raw source of every `.tex` and `.bib` file, with results listed by file and line |
+| `C-S-v` consult-yank-pop | none | Kill ring of the last 30 copies and cuts (`C-w`, `M-w`, browser copy), picked in the existing palette |
+| `C-l` consult-find, `C-x C-r` recent files | `C-M-n` Files, recent papers in the menu | `C-l` opens the file picker and jumps to the file's first block. `C-x C-r` opens recent papers in a palette |
+| corfu on `\`, `\begin{env}` adds `\end` | none in the source view | Completion popup in the source view: macros from the document and preamble, environments, labels after `\cref{`, cite keys after `\cite{` |
+| `electric-pair-mode` | wraps a selection only | `(`, `[`, `{` at the caret insert the pair. On by default in the source view, a setting in the paper view |
+| `C-c f` latexindent | none | The server runs `latexindent` on the current file (source view). Empty output leaves the file untouched |
+| flyspell en_GB | `<html lang="en">` | `lang="en-GB"` on `#doc`, configurable |
+| `whitespace-cleanup` on save | none | Opt-in only, since it changes bytes the round-trip tests rely on |
+
+Left out: `C-r` windresize, `C-S-b` buffer moves, `C-x f` bookmarks,
+tempel and Easycrypt snippets, `C-<tab>` (Chrome keeps Ctrl+Tab).
+
+### Risk
+
+Chrome may keep `Ctrl+Shift+C` for DevTools even in the app window. Test
+whether `preventDefault` takes it before relying on the `C-S-c` prefix. The
+fallback is `C-c C-a`, `C-c C-c` and so on.
+
+---
+
+## 2. Contents sidebar
+
+- Toggle with a toolbar button and a key (proposed `C-c o`). The state is
+  remembered per viewer. On narrow windows the sidebar overlays the page
+  instead of shrinking it.
+- Tabs:
+  - Contents: sections, subsections and `\paragraph`, numbered as on the
+    page and indented by level.
+  - Results: every environment in `L.THM_ENVS` (lemma, theorem, definition
+    and so on) with type, number, optional title and label, for example
+    `Lemma 4 (Hybrid 2) lem:h2`.
+  - Later, possibly: figures, tables, equations.
+- Data: walk `ORDER` (heading segments, and `thmhead` tokens with their
+  `\label`). Numbers come from `DOC.aux.labels`, as in `collectLabels()`
+  (around line 5708).
+- Click or Enter jumps there and puts the caret at the start, through the
+  code of `stepBlock`/`followRef`, so `Alt+←` goes back.
+- An IntersectionObserver highlights the section in view.
+- A filter box at the top matches words in any order, like orderless (the
+  matcher of `refPalette`).
+- Rebuilt after `render()` and, debounced, after `markEdited`.
+- In the source view the same sidebar replaces the `#srcoutline` dropdown
+  and jumps to the source line.
+
+---
+
+## 3. Label rename
+
+From the Results tab, F2 or a double-click on a label opens an inline field.
+On Enter:
+
+1. Check the new key: no spaces, `{`, `}`, `,`, `%`, `\` or `#`, and not
+   already a label.
+2. `snapshot()`, then `commit()`.
+3. Replace the key in every file text:
+   - `\label{k}`;
+   - `\ref`, `\cref`, `\Cref`, `\eqref`, `\autoref`, `\nameref`, `\pageref`,
+     `\cpageref`, `\labelcref`, including keys inside lists such as
+     `\cref{a,k,b}`;
+   - `\crefrange{k}{…}` and `\hyperref[k]`.
+
+   Working on the raw text also covers hidden segments and game sources.
+4. `render()`. One `C-z` undoes the whole rename.
+5. A toast reports the counts, for example
+   "Renamed lem:h2 → lem:hybrid2: 1 label, 7 references".
+
+Optional: a command that finds labels whose prefix does not match their
+environment (a lemma labelled `thm:…`) and fixes them in one step.
+
+---
+
+## 4. Literal search with maths (`hello $x$`)
+
+`searchMaps()` (around line 5770) walks each block, but turns every maths
+chip into a `\u0000` barrier, so maths cannot be searched.
+
+- Index: a maths chip contributes `\u0001`, its normalised LaTeX body, and
+  `\u0002`. Normalising removes spaces and writes `{x}` as `x`. The body is in
+  `chip.dataset.src`.
+- Query: the latex.js tokenizer splits it into text parts and maths parts.
+  - Text outside `$…$` matches only text, as now.
+  - `$…$` matches only inside a formula.
+  - A space between parts matches any spacing.
+- Matching inside maths (proposed):
+  - `$x$` matches a formula that contains `x` as a whole token, so it finds
+    `$x_1+y$` but not `\max` or `\exp`.
+  - `$=x$` matches a formula equal to `x`.
+  - `$$` matches any formula, so `hello $$` finds "hello" followed by a
+    formula.
+- A match is widened to the whole chip, as `snapOutOfChips` does. Replacing a
+  maths match rewrites the chip's source.
+- A "Literal (text + $maths$)" toggle next to the regex, case and word
+  toggles. It is on by default when the query contains `$`.
+
+---
+
+## 5. Multiple cursors
+
+### Constraint
+
+A page has one real selection, and contenteditable edits act on it only.
+Extra cursors are virtual: stored, drawn and applied by the editor. The real
+caret is the primary cursor.
+
+### Model
+
+- `MC = { cursors: [Range…], primary }`. Each cursor is a live DOM `Range`,
+  collapsed for a caret, or spanning text for a selection.
+- Live Ranges follow DOM changes, so an edit at one cursor moves the others
+  without offset bookkeeping.
+- A cursor must lie in one `#doc [contenteditable=true]` text block.
+  Positions in chips, figures, games or quiet blocks are refused, and so is a
+  selection that crosses blocks (`spansEditables`).
+
+### Applying an edit at every cursor
+
+Each edit runs through the real selection, once per cursor, so the existing
+behaviour is reused:
+
+```js
+function eachCursor(fn) {
+  snapshot();                       // one undo step for the whole batch
+  MC.replaying = true;
+  for (const r of sortedReverseDocOrder(MC.cursors)) {
+    setSel(r); fn(); r.setStart(...selStart()); r.setEnd(...selEnd());
+  }
+  MC.replaying = false;
+  setSel(MC.primary); redrawCursors(); markEditedSoon();
+}
+```
+
+- In keydown, before the `TEXT_KEYS` and `WRAP_PAIRS` handling: with more
+  than one cursor and a supported key, `preventDefault()` and `eachCursor`.
+  - Printable characters: `execCommand('insertText', key)`.
+  - Backspace and Delete: `execCommand('delete')` and
+    `execCommand('forwardDelete')`.
+  - Arrows, Home, End: `getSelection().modify(...)`, with Shift extending.
+  - `TEXT_KEYS` actions (`wrap`, `$` maths, bracket wrapping): the existing
+    function per cursor.
+  - Paste: the same text at every cursor, or one line per cursor when the
+    number of lines equals the number of cursors.
+- Cursors are processed from last to first, so each edit leaves the earlier
+  cursors in place.
+- While `MC.replaying` is set, the `beforeinput` handlers (around lines 4701
+  and 4893) skip the typing snapshot and the cross-block banner.
+- Version 1 refuses, with a banner, edits that change the page structure:
+  Enter (splitting a block), Backspace at the start of a block (merging),
+  heading commands, section move and merge.
+
+As in `.mc-lists.el`, each action has a flag for whether it runs at every
+cursor or once. At every cursor: line start and end, copy region or lines,
+indent and unindent, wrapping (bold, emph, `$`). Once: save, undo, find,
+build, sidebar jumps.
+
+### Keys (multiple-cursors.el)
+
+| Key | Action |
+|---|---|
+| `C->` / `C-M->` | Mark next / previous like this (the selection's text, or the word at the caret) |
+| `C-<` / `C-M-<` | Unmark the last next / previous |
+| `C-S-c C-S-a` | Mark all like this (also from the find bar, using `FIND.matches`, so literal maths search can feed it) |
+| `C-S-c C-S-c` | Edit lines: one cursor per line of the region (mainly the source view) |
+| `C-S-c C-S-d` | Mark all dwim: the selection's text in the current block, then the whole paper on repeat |
+| `C-S-c C-S-n` | Insert numbers 0, 1, 2, … at the cursors |
+| `C-S-click` | Add a cursor |
+| `C-g` / `Esc` | Back to one cursor |
+
+All are `ACTION_DEFS` entries, so `keys.json` can rebind them.
+
+### Drawing
+
+- Selected text: the CSS Custom Highlight API,
+  `CSS.highlights.set('mc', new Highlight(...ranges))`. Its ranges are live.
+- Carets: absolutely positioned 1px divs in an overlay, placed from each
+  Range's client rect, blinking with CSS.
+- Redraw after each batch, and on scroll, resize, two-column toggle, text
+  size and page width changes.
+
+### Clearing
+
+All cursors are cleared on `render()` (undo, redo, save, build, outside
+change, conversion), on entering the diff view, when the figure viewer or a
+dialog opens, and on a plain click. A render replaces the DOM nodes the
+Ranges point to, so keeping cursors across it would need offset mapping.
+
+### Source view
+
+The `#srcta` textarea uses plain string offsets. Edits rewrite `value`
+through `insertText` to keep native undo. A mirror div draws the carets.
+"Edit lines" belongs here, so this follows right after the paper view.
+
+### Tests (`node tests/e2e.js multi`)
+
+- Cursors in two paragraphs, type, save: both `.tex` files get the text.
+- `C->` three times, type: three replacements, one `C-z` restores them all.
+- Backspace with a cursor at a block start: no merge, a banner is shown.
+- A cursor inside a maths chip is refused.
+- Two cursors in one text node, edited last to first: offsets stay correct.
+- After a save or build: one cursor left, no overlay elements remain.
+- A `ui_torture.js` case mixing cursor edits with random operations,
+  checked against the round trip.
+
+---
+
+## 6b. Spelling keys: `C-,` and `C-.`
+
+These follow flyspell, where `C-.` is `flyspell-auto-correct-word` and `C-,`
+moves to the next error.
+
+- `C-,` opens the spelling suggestions for the misspelled word at the caret,
+  or else the nearest misspelled word before it in the same block. The list
+  appears at the word, in the style of the palette. Up/Down and Enter, or
+  1 to 9, replace the word. "Add to dictionary" is the last entry. Escape
+  closes it. Pressed again with the list open, it moves to the next
+  misspelled word.
+- `C-.` replaces the misspelled word at or before the caret with the first
+  suggestion, with no list. Pressed again at once, it cycles through the next
+  suggestions in place, as flyspell does. A toast names the word and the
+  replacement, and one `C-z` undoes it.
+- Words are taken from the block's text nodes only. Maths chips, references,
+  citations, labels and `\verb` are skipped, as in the find index of
+  section 4. Words in the paper's own dictionary (below) are never flagged.
+
+Where the suggestions come from:
+
+- In the Electron window, a preload script exposes the window's spell checker
+  to the page with `contextBridge`. It calls `webFrame.isWordMisspelled(word)`
+  and `webFrame.getWordSuggestions(word)`, using the en-GB dictionary already
+  set on the session. "Add to dictionary" calls
+  `session.addWordToSpellCheckerDictionary`.
+- In the Chrome app window, a page cannot ask Chrome's spell checker. There,
+  `server.py` answers `/api/spell` with `hunspell -d en_GB` (installed, and
+  the dictionary your flyspell uses). Without hunspell, the keys show a
+  banner saying spelling suggestions need hunspell or the Electron window.
+- A paper dictionary in `.paper-editor/words.txt` (one word per line) holds
+  words added from either path, so names such as "Fiat" or "IND-CCA" are
+  added once per paper.
+
+Keys: both are `ACTION_DEFS` entries in the text scope (`C-,` and `C-.` are
+unused now, and Chrome does not reserve them), so `keys.json` can rebind
+them. Tests: e2e cases on a paragraph with a known misspelling ("recieve"):
+`C-.` gives "receive" on disk after a save, a second `C-.` cycles, `C-z`
+restores the word, `C-,` lists suggestions and Enter applies the chosen one,
+a word inside maths is never offered.

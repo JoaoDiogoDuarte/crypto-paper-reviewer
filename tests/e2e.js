@@ -516,6 +516,18 @@ const TESTS = {
     await page.waitFor(`DOC.auxver === AUXVER`, 8000, 'the page to reload after the build');
   },
 
+  async 'maths: \\displaylimits puts the limits below in a display and beside inline'(env, page) {
+    env.write('sections/body.tex', BODY.replace('Detail text lives here.', String.raw`Inline $\mathop{\Pr}\displaylimits_{x}[a]$ and
+\[
+  \mathop{\Pr}\displaylimits_{y}[b]
+\]
+done.`));
+    await page.waitFor(`document.querySelector('#doc').innerText.includes('done.')`, 8000, 'the page to reload');
+    const r = await page.eval(`[...document.querySelectorAll('#doc .math')].filter((m) => /displaylimits/.test(m.dataset.src || ''))
+      .map((m) => ({ under: !!m.querySelector('munder'), sub: !!m.querySelector('msub') }))`);
+    eq(JSON.stringify(r), JSON.stringify([{ under: false, sub: true }, { under: true, sub: false }]), 'inline, then display');
+  },
+
   async 'external change to an unedited file reloads silently'(env, page) {
     env.write('sections/body.tex', BODY.replace('Detail text', 'Changed outside'));
     await page.waitFor(`document.querySelector('#doc').innerText.includes('Changed outside')`, 8000, 'the page to reload');
@@ -872,6 +884,24 @@ const TESTS = {
     await page.type(' and more');
     await page.save();
     onlyChange(env, 'main.tex', 'A caption here.', 'A caption here and more.');
+  },
+
+  async 'deleting a whole middle sentence leaves no blank line'(env, page) {
+    env.write('main.tex', [
+      '\\documentclass{article}', '\\begin{document}',
+      'First line.', 'Middle line.', 'Last line.', '',
+      '\\begin{figure}[t]', '\\fbox{box}', '\\caption{One here.', 'Two here.', 'Three here.}', '\\end{figure}',
+      '\\end{document}', ''].join('\n'));
+    await page.eval('load(true)');
+    await page.waitFor(`ORDER.some((s) => s.kind === 'figure' && s.edit)`, 8000, 'the figure');
+    for (const s of ['Middle line.', 'Two here.']) {
+      await page.select(s);
+      await page.key('Backspace');
+    }
+    await page.save();
+    const text = env.read('main.tex');
+    has(text, 'First line.\nLast line.', 'the paragraph keeps one line break');
+    has(text, '\\caption{One here.\nThree here.}', 'the caption keeps one line break');
   },
 
   async 'code block edits save'(env, page) {
@@ -1306,6 +1336,38 @@ const TESTS = {
     await page.waitFor(`DOC && DOC.main === 'main.tex'`, 8000, 'back to main.tex with its number');
   },
 
+  async 'Open: Delete takes a recent paper off the list, and its files stay'(env, page) {
+    // other.tex on the list, then main.tex open again
+    await page.key('o', { ctrl: true });
+    await page.waitFor(`!$('#openbox').hidden && document.querySelector('#open-recent .open-paper')`, 4000, 'the Open window');
+    await page.eval(`offerMains(${JSON.stringify(env.paper)}, ['main.tex', 'other.tex'])`);
+    await page.click(`js:[...document.querySelectorAll('#open-mains button')].find((b) => b.textContent === 'Open other.tex')`);
+    await page.waitFor(`DOC && DOC.main === 'other.tex' && $('#openbox').hidden`, 8000, 'other.tex open');
+    await page.key('o', { ctrl: true });
+    await page.waitFor(`document.querySelectorAll('#open-recent .open-paper').length >= 2`, 4000, 'two recent papers');
+    await page.key('2');
+    await page.waitFor(`DOC && DOC.main === 'main.tex'`, 8000, 'main.tex open again');
+    await page.key('o', { ctrl: true });
+    await page.waitFor(`!$('#openbox').hidden && document.querySelectorAll('#open-recent .open-paper').length >= 2`, 4000, 'the list again');
+    const before = await page.eval(`document.querySelectorAll('#open-recent .open-paper').length`);
+    eq(await page.eval(`!!document.querySelector('#open-recent .open-paper.current').parentNode.querySelector('.open-forget')`), false, 'no × on the paper open now');
+    // Delete on the paper open now does nothing
+    await page.eval(`document.querySelector('#open-recent .open-paper.current').focus()`);
+    await page.key('Delete');
+    await new Promise((r) => setTimeout(r, 300));
+    eq(await page.eval(`document.querySelectorAll('#open-recent .open-paper').length`), before, 'the open paper stays');
+    // Delete on other.tex takes it off, and the focus stays in the list
+    await page.eval(`[...document.querySelectorAll('#open-recent .open-paper')].find((b) => /other\.tex/.test(b.title)).focus()`);
+    await page.key('Delete');
+    await page.waitFor(`document.querySelectorAll('#open-recent .open-paper').length === ${before - 1}`, 4000, 'one fewer recent paper');
+    hasNot(await page.eval(`$('#open-recent').textContent`), 'other.tex', 'other.tex is off the list');
+    eq(await page.eval(`!!document.activeElement.closest('#open-recent')`), true, 'the focus stays in the list');
+    const saved = JSON.parse(fs.readFileSync(path.join(env.dir, 'config', 'paper-editor', 'recent.json'), 'utf8'));
+    eq(saved.recent.some((e) => e.path.endsWith('other.tex')), false, 'off the list on disk');
+    eq(fs.existsSync(path.join(env.paper, 'other.tex')), true, 'its file stays');
+    await page.key('Escape');
+  },
+
   async 'New paper: a venue, anonymous, metadata, sections and cryptobib as a submodule'(env, page) {
     // a local stand-in for cryptobib (PE_CRYPTOBIB_URL): a repository with the two files
     const cb = path.join(env.dir, 'cryptobib-src');
@@ -1720,6 +1782,25 @@ Object.assign(TESTS, {
     eq(spoken.length, n + 1, 'spoke one phrase');
     has(spoken[n], 'Introduction', 'started at the first heading');
     await page.click('#stop');
+  },
+
+  async 'reader: the phrase is one bar per line, as tall as the text, over its formulas'(env, page) {
+    await fakeSpeech(page);
+    await page.select('We study', 'start');
+    await page.click('#play');
+    await page.waitFor(`$('#ttsmark') && $('#ttsmark').children.length > 0`, 5000, 'the phrase bar');
+    const g = await page.eval(`(() => {
+      const bars = [...$('#ttsmark').children].map((d) => d.getBoundingClientRect());
+      const m = [...document.querySelectorAll('.math')].find((e) => /x\\^2/.test(e.dataset.src || ''));
+      const r = m.getBoundingClientRect();
+      const lh = parseFloat(getComputedStyle(m.closest('.seg')).fontSize);
+      return { n: bars.length, h: bars[0].height, lh, covers: bars[0].left <= r.left + 1 && bars[0].right >= r.right - 1 };
+    })()`);
+    eq(g.n, 1, 'one bar for a phrase on one line');
+    eq(g.h < g.lh * 1.6, true, `bar as tall as a line of text (${g.h} for a ${g.lh}px font)`);
+    eq(g.covers, true, 'the bar spans the formula');
+    await page.click('#stop');
+    eq(await page.eval(`$('#ttsmark').children.length`), 0, 'stop removes the bar');
   },
 
   async 'reader: an utterance whose end is lost does not wedge the reader'(env, page) {
@@ -2240,6 +2321,9 @@ Object.assign(TESTS, {
     await page.waitFor('!SAVING');
     onlyChange(env, 'main.tex', 'quick brown fox', 'quick red fox');
     eq(await page.eval(`document.querySelectorAll('#doc .d-del, #doc .d-ins, #doc .diff-ghost').length`), 0, 'no diff marks left');
+    await page.waitFor(`DIFF.on && DIFF_SHOWN && /no changes/.test($('#diffcount').textContent)`, 8000, 'still in the diff, with nothing changed since the save');
+    await page.click('#diffbtn');
+    await page.waitFor(`!DIFF.on`);
     await page.select('red', 'end');
     await page.type('dish');
     await page.save();
@@ -2277,7 +2361,7 @@ Object.assign(TESTS, {
     onlyChange(env, 'main.tex', 'lazy dog.', 'lazy dog one two.');
   },
 
-  async 'Diff: undo or a structure button leaves it without corrupting'(env, page) {
+  async 'Diff: a structure button leaves it, undo stays in it, neither corrupts'(env, page) {
     await page.select('brown');
     await page.type('red');
     await page.click('#diffbtn');
@@ -2289,14 +2373,17 @@ Object.assign(TESTS, {
     onlyChange(env, 'main.tex', 'quick brown fox', 'quick red fox');
     await page.click('#diffbtn');
     await page.waitFor(`/change/.test($('#diffcount').textContent)`, 8000, 'the diff');
-    await page.key('z', { ctrl: true });            // leaves the diff, and undoes
-    await page.waitFor(`!DIFF.on`, 3000, 'leaving the diff');
-    eq(await page.eval(`document.querySelectorAll('#doc .d-del, #doc .d-ins').length`), 0, 'no diff marks');
+    await page.key('z', { ctrl: true });            // undoes, and draws the diff again
+    await page.waitFor(`DIFF.on && DIFF_SHOWN && !DIFF.busy && DIFF.marks.length === 1`, 8000, 'the undone edit, as a change since the save');
+    // the caret is at the undone change, so that block is the one being edited
+    has(await page.eval(`diffEditSeg() ? diffEditSeg().edit.textContent : ''`), 'quick brown fox', 'the fox is brown again, in the edited block');
+    await page.click('#diffbtn');
+    await page.waitFor(`!DIFF.on`);
     await page.save();
     untouched(env, 'main.tex');
   },
 
-  async 'Diff: typing is blocked while it is shown'(env, page) {
+  async 'Diff: typing is blocked outside the block being edited'(env, page) {
     await page.click('#diffbtn');
     await page.waitFor(`!$('#diffnav').hidden`, 8000);
     await page.eval(`(() => { const seg = ORDER.find((s) => s.kind === 'para' && s.src.includes('lazy dog')); const r = document.createRange();
@@ -2307,6 +2394,58 @@ Object.assign(TESTS, {
     await page.click('#diffbtn');
     await page.save();
     untouched(env, 'main.tex');
+  },
+
+  async 'Diff: a click edits a block, and leaving it draws its changes'(env, page) {
+    await page.select('brown');
+    await page.type('red');
+    await page.click('#diffbtn');
+    await waitDiffMarks(page, 1, 'one change since the save');
+    // an unchanged block: the click puts the caret in it, and typing works
+    await page.click(`js:ORDER.find((s) => s.kind === 'para' && s.src.includes('encryption schemes')).edit`);
+    await page.waitFor(`!DIFF.busy && diffEditSeg() && diffEditSeg().src.includes('encryption schemes') && document.activeElement === diffEditSeg().edit`, 8000, 'the block being edited');
+    await page.eval(`(() => { const e = diffEditSeg().edit, r = document.createRange(); r.selectNodeContents(e); r.collapse(false); getSelection().removeAllRanges(); getSelection().addRange(r); })()`);
+    await page.type(' Again');
+    has(await page.eval(`diffEditSeg().edit.textContent`), 'Again', 'typed into the block');
+    eq(await page.eval(`document.querySelectorAll('#doc .d-ins').length > 0`), true, 'the other change keeps its marks');
+    // Esc leaves the block: its change is drawn as well
+    await page.key('Escape');
+    await waitDiffMarks(page, 2, 'two changes after leaving the block');
+    eq(await page.eval(`!!diffEditSeg()`), false, 'no block edited');
+    // a changed block: the caret goes into the new text, not the deleted one
+    await page.click(`js:[...document.querySelectorAll('#doc .d-ins')].find((x) => /red/.test(x.textContent))`);
+    await page.waitFor(`!DIFF.busy && diffEditSeg() && document.activeElement === diffEditSeg().edit`, 8000, 'the changed block being edited');
+    eq(await page.eval(`diffEditSeg().edit.querySelectorAll('.d-del, .d-ins').length`), 0, 'drawn without marks while edited');
+    await page.type('X');
+    has(await page.eval(`diffEditSeg().edit.textContent`), 'quick ', 'the block text');
+    const word = await page.eval(`diffEditSeg().edit.textContent.match(/quick (\\S+) fox/)[1]`);
+    if (!/^r?e?X?r?e?d?$/.test(word) || !word.includes('X') || word.replace('X', '') !== 'red') throw new Error('the caret was not in "red": ' + word);
+    // a save keeps the diff view and the block being edited
+    await page.save();
+    await page.waitFor(`DIFF.on && DIFF_SHOWN && !DIFF.busy && DIFF.marks.length === 0`, 8000, 'no change since the save');
+    has(env.read('main.tex'), 'encryption schemes. Again', 'the edit in the diff view is saved');
+    has(env.read('main.tex'), `quick ${word} fox`, 'the edit of the changed block is saved');
+    await page.click('#diffbtn');
+    await page.waitFor(`!DIFF.on`);
+    eq(await page.eval(`document.querySelectorAll('#doc [contenteditable="false"][data-diff-edit]').length`), 0, 'every block editable again');
+  },
+
+  async 'Diff: a paragraph break while editing, then the focus leaves the text'(env, page) {
+    await page.click('#diffbtn');
+    await page.waitFor(`DIFF_SHOWN && !$('#diffnav').hidden`, 8000, 'the diff');
+    await page.click(`js:ORDER.find((s) => s.kind === 'para' && s.src.includes('encryption schemes')).edit`);
+    await page.waitFor(`!DIFF.busy && diffEditSeg() && document.activeElement === diffEditSeg().edit`, 8000, 'the block being edited');
+    await page.select('encryption', 'end');
+    await page.key('Enter');
+    await page.type('Split');
+    await page.waitFor(`!DIFF.busy && DIFF_SHOWN`, 8000, 'the diff again');
+    // the focus leaving the text (a click beside it) leaves the block
+    await page.eval(`(() => { const a = document.activeElement; if (a && a.blur) a.blur(); })()`);
+    await page.waitFor(`!DIFF.busy && !diffEditSeg() && DIFF.marks.length >= 1`, 8000, 'the change drawn');
+    await page.click('#diffbtn');
+    await page.waitFor(`!DIFF.on`);
+    await page.save();
+    has(env.read('main.tex'), 'encryption\n\nSplit schemes', 'the paragraph break and the text after it');
   },
 
   // ---- figure viewer
@@ -3424,6 +3563,64 @@ for (const seed of SEEDS) {
 }
 
 // ------------------------------------------------------------ runner
+
+// ------------------------------------------------------------ rendering:
+// block tools from the margin, formulas KaTeX writes oddly, listings in colour
+
+Object.assign(TESTS, {
+  async 'block tools: the + shows when the mouse comes in from the margin'(env, page) {
+    const r = await page.eval(`(() => { const s = ORDER.find((x) => x.kind === 'para' && x.src.includes('lazy dog'));
+      s.el.scrollIntoView({ block: 'center' }); const b = s.el.getBoundingClientRect(); return { l: b.left, t: b.top }; })()`);
+    const shown = () => page.eval(`getComputedStyle(ORDER.find((x) => x.kind === 'para' && x.src.includes('lazy dog')).el.querySelector(':scope > .tools')).opacity`);
+    const move = (x, y) => page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+    await move(r.l - 300, r.t + 8); await sleep(80);
+    eq(await shown(), '0', 'tools far from the block');
+    for (let x = r.l - 300; x <= r.l - 12; x += 6) await move(x, r.t + 8);
+    await sleep(80);
+    eq(await shown(), '1', 'tools with the mouse in the margin beside the block');
+    await move(r.l + 40, r.t + 8); await sleep(80);
+    eq(await shown(), '1', 'tools with the mouse over the text');
+  },
+
+  async 'a braced multline with \\sample in a \\substack renders'(env, page) {
+    // cryptocode-like \sample, as papers define it: KaTeX nests an <mo> in an <mo> for it
+    env.write('main.tex', MAIN.replace('\\begin{document}', '\\newcommand{\\sample}{\\mathrel{\\leftarrow\\!\\!\\mathrel{\\$}}}\n\\begin{document}'));
+    env.write('sections/body.tex', BODY.replace('Detail text lives here.', String.raw`Detail text lives here, if
+{\setlength{\multlinegap}{0pt}%
+\begin{multline}\label{eq:bb}
+  \Pr\left[x\middle|\,\substack{\sigma\leftarrow\mathsf{Gen}\\x\sample\Adv(\sigma)}\right]\ge\tfrac12\\
+  \implies y
+\end{multline}}
+for every adversary.`));
+    await page.waitFor(`document.querySelector('#doc').innerText.includes('for every adversary')`, 8000, 'the page to reload');
+    const got = await page.eval(`(() => { const s = ORDER.find((x) => x.src.includes('multlinegap'));
+      const m = s.el.querySelector('.chip.math.display'), h = m && m.querySelector('.katex-html');
+      return { html: !!h, inMathml: !!(h && h.closest('.katex-mathml')), height: m ? m.getBoundingClientRect().height : 0,
+        raw: [...s.el.querySelectorAll('.chip.src')].map((c) => c.dataset.src) }; })()`);
+    eq(got.html && !got.inMathml, true, 'the visible formula outside the MathML');
+    eq(got.height > 30, true, 'the formula has its two lines (' + got.height + 'px)');
+    eq(got.raw.length, 0, 'no raw LaTeX shown (\\setlength prints nothing)');
+    eq(await dirty(page), 0, 'edited files');
+  },
+
+  async 'a listing written in the paper is coloured with the paper\'s language'(env, page) {
+    env.write('main.tex', MAIN.replace('\\begin{document}', String.raw`\usepackage{listings}
+\lstdefinelanguage{easycrypt}{morekeywords={proc,var,lemma},morecomment=[n]{(*}{*)}}
+\lstset{language=easycrypt}
+\begin{document}`).replace('code line', 'lemma foo (* why *) : proc var.'));
+    await page.waitFor(`document.querySelector('.seg.code .code-hl .lst-kw')`, 8000, 'a highlighted listing');
+    const got = await page.eval(`(() => { const hl = document.querySelector('.seg.code .code-hl');
+      return { kw: [...hl.querySelectorAll('.lst-kw')].map((k) => k.textContent), comment: (hl.querySelector('.lst-comment') || {}).textContent }; })()`);
+    eq(got.kw.join(','), 'lemma,proc,var', 'keywords');
+    eq(got.comment, '(* why *)', 'comment');
+    // typing in the code repaints the colours, and saves as typed
+    await page.eval(`(() => { const ta = document.querySelector('.seg.code textarea'); ta.focus(); ta.setSelectionRange(ta.value.indexOf('foo'), ta.value.indexOf('foo')); })()`);
+    await page.type('var ');
+    await page.waitFor(`document.querySelectorAll('.seg.code .code-hl .lst-kw').length === 4`, 4000, 'the new keyword coloured');
+    await page.save();
+    has(env.read('main.tex'), 'lemma var foo (* why *) : proc var.', 'the edit on disk');
+  },
+});
 
 async function main() {
   const chromeBin = findChrome();

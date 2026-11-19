@@ -5,16 +5,16 @@
   --bg: #fbfaf7; --fg: #1d1d1b; --muted: #6b6b66; --line: #dddad2;
   --chip: #eeece6; --accent: #2f5d8a; --dirty: #b5651d; --speak: #fff3c4;
   --math: #f3f6fa; --mark: #f7d774; --find: #b9dcff; --findcur: #ff9f43;
-  color-scheme: light;
+  --mark-blend: multiply; color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) { --bg: #1b1b1a; --fg: #e8e6e1; --muted: #9a978f; --line: #3a3935;
     --chip: #2c2b28; --accent: #8db6e0; --dirty: #e0a060; --speak: #4a4020; --math: #22262c;
-    --mark: #7a6418; --find: #24476b; --findcur: #a8561b; color-scheme: dark; }
+    --mark: #7a6418; --find: #24476b; --findcur: #a8561b; --mark-blend: screen; color-scheme: dark; }
 }
 :root[data-theme="dark"] { --bg: #1b1b1a; --fg: #e8e6e1; --muted: #9a978f; --line: #3a3935;
   --chip: #2c2b28; --accent: #8db6e0; --dirty: #e0a060; --speak: #4a4020; --math: #22262c;
-  --mark: #7a6418; --find: #24476b; --findcur: #a8561b; color-scheme: dark; }
+  --mark: #7a6418; --find: #24476b; --findcur: #a8561b; --mark-blend: screen; color-scheme: dark; }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg);
   font: 16px/1.5 "Latin Modern Roman", "CMU Serif", Georgia, serif; }
@@ -76,6 +76,11 @@ h1.doctitle { text-align: center; font-size: 1.7em; font-weight: normal; margin:
    and their padding bridges the gap to the text, so that the mouse never
    leaves the block on its way to them. */
 .seg:hover > .tools { opacity: 1; z-index: 6; pointer-events: auto; }
+/* The margin beside a block, where its tools appear, is part of the block:
+   the mouse coming in from the margin shows them, as coming from the text
+   does (the hidden tools themselves take no mouse events). */
+.seg:not(.heading)::after { content: ""; position: absolute; top: 0; bottom: 0; left: -2.2em; width: 2.2em; }
+body.two .seg:not(.heading)::after { left: auto; right: -1.6em; width: 1.6em; }
 /* a heading's buttons: in a row just above its line, at the right, in the
    heading's top margin (on its line they would cover a long title, and down
    the margin they would sit beside the text that follows) */
@@ -177,7 +182,9 @@ body.two .seg.figure img, body.two .seg.table img { max-height: min(64vh, 46rem)
   background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 1em 1.5em;
   box-shadow: 0 8px 30px rgba(0,0,0,.2); font: 15px/1.5 system-ui, sans-serif; }
 kbd { font: 12px ui-monospace, monospace; border: 1px solid var(--line); border-radius: 3px; padding: 0 .3em; }
-::highlight(tts) { background-color: var(--mark); }
+/* the phrase being read: bars over the text, mixed in as a background would be */
+#ttsmark { position: absolute; top: 0; left: 0; pointer-events: none; z-index: 5; mix-blend-mode: var(--mark-blend); }
+#ttsmark > div { position: absolute; background: var(--mark); border-radius: 2px; }
 .speaking { background: color-mix(in srgb, var(--speak) 45%, transparent) !important; }
 
 ::highlight(find) { background-color: var(--find); }
@@ -248,7 +255,7 @@ kbd { font: 12px ui-monospace, monospace; border: 1px solid var(--line); border-
 .diff-gone { box-shadow: -4px 0 0 #c33; background: color-mix(in srgb, #d33 8%, transparent); opacity: .85; }
 .diff-gone .para, .diff-gone h2, .diff-gone h3 { text-decoration: line-through; text-decoration-color: #c33; }
 .diff-current { outline: 2px solid var(--accent); outline-offset: 3px; }
-body.diffing #doc [contenteditable] { cursor: default; }
+body.diffing #doc [contenteditable] { cursor: text; }
 #diffcount { padding: 0 .4em; color: var(--muted); white-space: nowrap; }
 
 /* figure viewer and game editor */
@@ -1183,6 +1190,15 @@ body.two #widthrow { opacity: .45; }
 .lst-comment { color: var(--lst-comment); font-style: italic; }
 .lst-string { color: var(--lst-string); }
 .lst-error { color: var(--dirty); }
+/* a listing written in the paper: its textarea over a highlighted copy */
+.code-edit { position: relative; margin: .3em 0 .8em; }
+.seg.code .code-edit > textarea { position: relative; z-index: 1; display: block; margin: 0; background: transparent;
+  color: transparent; caret-color: var(--fg); }
+.seg.code .code-edit > textarea::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); color: transparent; }
+.code-hl { position: absolute; inset: 0; margin: 0; overflow: hidden; pointer-events: none; box-sizing: border-box;
+  font: .8125em/1.45 ui-monospace, "JetBrains Mono", monospace; padding: .5em .7em; border: 1px solid var(--line);
+  border-radius: 4px; background: var(--lst-bg); color: var(--fg); white-space: pre; }
+.code-hl > code { display: block; font: inherit; will-change: transform; }
 .chip.listing { display: block; background: none; padding: 0; cursor: pointer; }
 .tools button.on { border-color: var(--accent); color: var(--accent); }
 
@@ -1220,6 +1236,8 @@ svg.ic { fill: currentColor; }
 .popover button:hover > svg.ic, .popover button:hover > i { color: var(--accent); }
 #chrome .popover button > svg.ic, #chrome .popover button > i { width: 16px; height: 16px; margin-right: .45em; vertical-align: -3px; line-height: 16px; }
 .seg.diff-changed, .seg.diff-new, .seg.diff-ghost { position: relative; }
+/* the block being edited in the diff view: drawn as usual, its changes shown again when it is left */
+.seg.diff-editing { background: color-mix(in srgb, var(--accent) 7%, transparent); border-radius: 4px; }
 .diff-revert { position: absolute; top: .2em; right: -.4em; transform: translateX(100%); font: 12px system-ui, sans-serif;
   padding: .1em .5em; opacity: 0; transition: opacity .12s; z-index: 2; }
 .seg:hover > .diff-revert, .seg.diff-current > .diff-revert, .diff-revert:focus-visible { opacity: 1; }
@@ -1284,7 +1302,8 @@ svg.ic { fill: currentColor; }
   .d-ins { text-decoration: underline; } .d-del { text-decoration: line-through; }
   .seg.diff-new, .seg.diff-changed, .seg.diff-ghost { outline: 2px solid Highlight; }
   .seg.speaking { outline: 2px dashed Highlight; }
-  ::highlight(tts) { background-color: Highlight; color: HighlightText; }
+  #ttsmark { mix-blend-mode: normal; }
+  #ttsmark > div { background: none; outline: 2px solid Highlight; }
   .xclose, .banner-act { border: 1px solid ButtonText; }
   .pagemark { color: GrayText; }
 }
@@ -1299,6 +1318,11 @@ svg.ic { fill: currentColor; }
 .open-paper-where { grid-column: 1; color: var(--muted); font: 12px ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .open-paper-when { grid-column: 2; grid-row: 1 / span 2; align-self: center; color: var(--muted); font-size: 12px; }
 .open-paper.current { border-color: var(--accent); }
+.open-row { display: flex; align-items: center; gap: .25em; }
+.open-row .open-paper { flex: 1; min-width: 0; }
+.open-forget, .open-forget-none { width: 28px; flex: none; }
+.open-forget { opacity: .45; }
+.open-row:hover .open-forget, .open-row:focus-within .open-forget { opacity: 1; }
 #open-browse-head { display: flex; align-items: center; gap: .4em; }
 #open-browse-head button { display: inline-flex; align-items: center; gap: .35em; flex: none; }
 #open-browse-head .ic { width: 15px; height: 15px; flex: none; }

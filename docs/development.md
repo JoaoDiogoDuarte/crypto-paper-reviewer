@@ -60,6 +60,25 @@ failure.
 There is none. The project has no GitHub Actions workflows; run the quick
 and intensive commands above locally before pushing.
 
+## Electron window
+
+`./run` opens the editor in the Electron window of `shell/` by default
+(`--browser chrome-app` gives the Chrome app window). Without its application menu,
+every key reaches the page, including the ones Chrome keeps for itself
+(Ctrl+W, Ctrl+Tab, Ctrl+T, Ctrl+N). F12 opens the developer
+tools. `desktopName` in `shell/package.json` names the visible desktop entry,
+so the window shares the launcher's icon in the dock.
+
+    npm install --prefix shell
+    node shell/node_modules/electron/install.js    # if npm skipped the download
+    shell/node_modules/electron/dist/electron shell --probe          # which reserved keys reach a hidden page
+    shell/node_modules/electron/dist/electron shell --smoke <URL>    # the editor in a hidden window: loaded, console errors, whether prompt dialogs fit
+
+Without Electron installed, the default falls back to the Chrome app
+window. `shell/preload.js` supplies `prompt()` (Electron has none) and a find
+for Ctrl+F in the source view. `shell/icon.png` is made from
+`static/icon.svg` with `rsvg-convert -w 256`, since Electron reads no SVG. The window keeps its profile in `~/.config/paper-editor/electron-profile`.
+
 ## Debugging TeX builds
 
 `PAPER_EDITOR_DEBUG=1 ./run /path/to/paper` keeps the full `latexmk` output,

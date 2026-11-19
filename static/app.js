@@ -350,6 +350,7 @@ let RENDER_CACHE = new Map();    // key -> [{ el, seg, after }]
 let RENDER_STAMP = '';
 function render() {
   unicodeEngine.v = undefined;      // the preamble may have changed
+  if (DIFF_SHOWN) diffSync();       // the block edited in the diff view, into its file
   const wasDiff = DIFF_SHOWN;
   DIFF_SHOWN = false;
   const speech = typeof TTS !== 'undefined' ? TTS.detach() : null;
@@ -674,8 +675,18 @@ function quietLeadingBreaks(root) {
     const cl = n.classList;
     if (cl.contains('nl')) { cl.toggle('lead', after); continue; }
     if (cl.contains('hidden')) continue;
-    after = cl.contains('display') || cl.contains('parbreak') || n.tagName === 'DIV' || (cl.contains('listing'));
+    after = cl.contains('display') || cl.contains('parbreak') || n.tagName === 'DIV' || (cl.contains('listing')) || endsInDisplay(n);
   }
+}
+// a {...} group whose last shown part is a displayed formula: {\setlength{..}{..}\begin{multline}...\end{multline}}
+function endsInDisplay(n) {
+  if (!n.classList.contains('chip')) return false;
+  for (let k = n.lastChild; k; k = k.previousSibling) {
+    if (k.nodeType === 3) { if (k.data.trim()) return false; continue; }
+    if (k.nodeType !== 1 || k.classList.contains('hidden') || k.classList.contains('nl')) continue;
+    return k.classList.contains('display');
+  }
+  return false;
 }
 
 function renderPara(seg, ctx) {
@@ -787,7 +798,10 @@ function renderCode(seg) {
   // a listing read from a file (\lstinputlisting, \ecsnippet{F}{x}): the
   // code itself, with its LaTeX a click away
   const view = !c.pre && hasListing(c.body) ? listingView(c.body.replace(/^\s*\\begin\{[^}]*\}(?:\[[^\]]*\])?|\\end\{[^}]*\}\s*$/g, '').trim()) : null;
-  if (!view) return wrapSeg(seg, ta);
+  if (!view) {
+    const lang = inlineListingLanguage(c.pre);
+    return wrapSeg(seg, lang ? highlightedEditor(ta, lang) : ta);
+  }
   const box = el('div', 'lst-seg');
   ta.hidden = true;
   box.append(view, ta);
@@ -806,6 +820,37 @@ function renderCode(seg) {
   });
   view.addEventListener('dblclick', () => edit.click());
   return wrapSeg(seg, box, [edit]);
+}
+
+// A listing written in the paper (an lstlisting, alone or in a wrapper such
+// as ecblock) is highlighted as listings would typeset it: with the language
+// its options pick, else the paper's \lstset.  null: nothing to highlight.
+function inlineListingLanguage(pre) {
+  const all = DOC && DOC.lst_languages;
+  const m = /\\begin\{lstlisting\}(?:\[([^\]]*)\])?\s*$/.exec(pre || '');
+  if (!all || !m) return null;
+  const opt = (key) => { const o = new RegExp('(?:^|,)\\s*' + key + '\\s*=\\s*(?:\\[[^\\]]*\\])?\\s*\\{?\\s*([^,{}]+)').exec(m[1] || ''); return o ? o[1].trim().toLowerCase() : null; };
+  const lang = (all.languages || {})[opt('language')] || (all.styles || {})[opt('style')] || all.base;
+  const some = lang && (Object.values(lang.keywords || {}).some((w) => w.length) || (lang.comments || []).length
+    || (lang.line_comments || []).length || (lang.strings || []).length);
+  return some ? lang : null;
+}
+
+// The code's textarea over a highlighted copy of its text: the textarea's
+// own text is transparent, so the colours show through and the editing,
+// caret and selection stay the textarea's.
+function highlightedEditor(ta, lang) {
+  const box = el('div', 'code-edit');
+  const hl = el('pre', 'code-hl');
+  hl.setAttribute('aria-hidden', 'true');
+  const code = el('code');
+  hl.append(code);
+  const paint = () => { code.textContent = ''; code.append(highlightListing(ta.value, lang)); };
+  paint();
+  ta.addEventListener('input', paint);
+  ta.addEventListener('scroll', () => { code.style.transform = `translate(${-ta.scrollLeft}px, ${-ta.scrollTop}px)`; });
+  box.append(hl, ta);
+  return box;
 }
 
 // ------------------------------------------------------------ listings
@@ -1023,7 +1068,7 @@ function chip(cls, src, text) {
 }
 
 const HIDDEN = new Set(['label', 'crefalias', 'crefname', 'Crefname', 'urlstyle', 'addlinespace', 'morecmidrules', 'pagebreak', 'linebreak', 'newline', 'clearpage', 'newpage', 'maketitle', 'bibliographystyle', 'FloatBarrier',
-  'vspace', 'noindent', 'centering', 'title', 'author', 'nonumber', 'medskip', 'smallskip', 'bigskip',
+  'vspace', 'noindent', 'centering', 'setlength', 'addtolength', 'setcounter', 'addtocounter', 'title', 'author', 'nonumber', 'medskip', 'smallskip', 'bigskip',
   'Needspace', 'raggedbottom', 'balance', 'IEEEauthorblockN', 'IEEEauthorblockA', 'leavevmode',
   'protect', 'institute', 'inst', 'orcidID', 'email', 'date', 'titlerunning', 'authorrunning', 'thanks',
   'affiliation', 'address', 'addauthor', 'authorrunning', 'keywords', 'IEEEoverridecommandlockouts',
@@ -1381,7 +1426,10 @@ const KATEX_SHIMS = { '\\ensuremath': '#1', '\\xspace': '', '\\mathchoice': '#1'
   '\\protect': '', '\\nobreak': '', '\\allowbreak': '', '\\qedhere': '', '\\qed': '' };
 // cryptocode's keywords (\pcreturn, \sample …) preview in running text too, not
 // only in the game editor; the paper's own definitions still win
-const katexMacros = () => ({ ...KATEX_SHIMS, ...CRYPTOCODE_MACROS, ...DOC.macros });
+// KaTeX takes \displaylimits for a no-op and sets the limits as subscripts:
+// as in TeX, they go below in a displayed formula and beside inline.
+const katexMacros = (display = false) => ({ ...KATEX_SHIMS, ...CRYPTOCODE_MACROS, ...DOC.macros,
+  '\\displaylimits': display ? '\\limits' : '\\nolimits' });
 // A colour of the paper (\definecolor, \colorlet: gone = #009e73) or of
 // xcolor (red, blue …), as CSS; null for one the page cannot know.
 const XCOLORS = { red: '#ff0000', green: '#00ff00', blue: '#0000ff', black: '#000000', white: '#ffffff', gray: '#808080',
@@ -1433,6 +1481,15 @@ function tagInner(name, body) {
   return rows.join('');
 }
 
+// KaTeX writes empty MathML elements as <mspace .../>.  Inside an <mo> (it
+// nests one in another for \mathrel{\leftarrow\!\!\mathrel{\$}}, cryptocode's
+// \sample, in a \substack) the HTML parser reads HTML, where "/>" closes
+// nothing: the <mspace> then holds the rest of the formula, its visible part
+// included, and the formula shows as an empty box.  Close them explicitly.
+function closeMathmlTags(html) {
+  return html.replace(/<(mspace|mglyph|none|mprescripts|malignmark)\b([^<>]*?)\s*\/>/g, '<$1$2></$1>');
+}
+
 function typesetInto(src, node, display) {
   let [body, disp] = mathBody(src);
   body = tagRows(src, body);
@@ -1446,8 +1503,8 @@ function typesetInto(src, node, display) {
     const key = (display || disp ? 'D' : 'I') + body;
     let html = KATEX_CACHE.get(key);
     if (html === undefined) {
-      html = katex.renderToString(body, { displayMode: display || disp, throwOnError: false,
-        macros: katexMacros(), strict: false, trust: false });
+      html = closeMathmlTags(katex.renderToString(body, { displayMode: display || disp, throwOnError: false,
+        macros: katexMacros(display || disp), strict: false, trust: false }));
       KATEX_CACHE.set(key, html);
     }
     node.innerHTML = paperColorsInto(html);
@@ -1636,6 +1693,12 @@ function ser(node) {
       continue;
     }
     if (n.nodeType !== 1) continue;
+    // a line break right after another one (the sentence between them was
+    // deleted) would make a blank line, a paragraph break: keep one
+    if (n.classList.contains('nl') && /^[ \t]*\n[ \t]*$/.test(n.dataset.src || '') && /\n[ \t]*$/.test(out)) {
+      out = out.replace(/[ \t]+$/, '');
+      continue;
+    }
     if (n.dataset.src !== undefined) { out += n.dataset.src; continue; }
     if (n.dataset.prefix !== undefined) { out += n.dataset.prefix + ser(n) + '}'; continue; }
     const tag = n.tagName;
@@ -1689,7 +1752,9 @@ function segSource(seg, warnings, changes, applyRules = true) {
 function commit(applyRules = true) {
   const warnings = [];
   HOUSE_RULE_CHANGES = [];
-  if (DIFF_SHOWN) return warnings;   // the texts were committed when the diff opened
+  // the texts were committed when the diff opened: only the block edited
+  // there is read back (the others show marks)
+  if (DIFF_SHOWN) { diffSync(); return warnings; }
   flushEdits();
   for (const [name, f] of Object.entries(FILES)) {
     if (!f.segs) continue;
@@ -1765,7 +1830,10 @@ document.addEventListener('selectionchange', () => { clearTimeout(showWords.t); 
 
 // Commit, apply a change to the segment lists, re-render from the texts.
 function structural(change, snap = true) {
-  if (leaveDiff()) return;   // the blocks of the diff view are not the document
+  // the blocks of the diff view are not the document, except the one being
+  // edited there: a change in it goes on, and the diff is drawn again after
+  const rediff = DIFF.on && (!DIFF_SHOWN || !!diffEditSeg());
+  if (!rediff && leaveDiff()) return;
   // every structure change can be undone (Delete and Merge of a heading took
   // no snapshot, so Ctrl+Z could not bring the heading back)
   if (snap) snapshot();
@@ -1799,6 +1867,7 @@ function structural(change, snap = true) {
   const near = INSERT_HINT || at;
   INSERT_HINT = null;
   if (focus) focusPlaceholder(focus, near);
+  if (rediff) diffAgain(captureEditorState());
 }
 
 // Take a block out with one of the gaps around it: the one after a heading
@@ -3246,7 +3315,9 @@ async function restoreDraft(d, files, extra, quiet = false) {
 
 let SAVING = false, SAVE_AGAIN = false;
 async function save() {
-  leaveDiff();
+  // the diff view is drawn again after the save, with the caret where it was
+  const caret = DIFF_SHOWN && diffEditSeg() ? captureEditorState() : null;
+  if (DIFF_SHOWN) { const y = viewAnchor(); render(); restoreAnchor(y); }
   flushSource();
   if (SAVING) { SAVE_AGAIN = true; return; }
   SAVING = true;
@@ -3257,6 +3328,7 @@ async function save() {
     banner('Saving failed: ' + e.message + '. Your edits are still here.');
   } finally {
     SAVING = false;
+    if (DIFF.on && !DIFF_SHOWN) diffAgain(caret);
   }
 }
 
@@ -4384,13 +4456,87 @@ function rangeFor(map, a, b) {
   return started ? r : null;
 }
 
-// Highlight the phrase being read (CSS Custom Highlight API) and keep it on
-// screen.  Without the API, the block highlight remains.
+// Highlight the phrase being read and keep it on screen.  The highlight is
+// one bar per line, drawn over the text (a CSS ::highlight paints every box
+// of a formula on its own, so sub- and superscripts stuck out of the line).
+const PHRASE = { range: null, layer: null, ro: null, raf: 0 };
 function markPhrase(range, reveal = true, force = false) {
-  if (window.CSS && CSS.highlights) {
-    if (range) CSS.highlights.set('tts', new Highlight(range)); else CSS.highlights.delete('tts');
+  PHRASE.range = range || null;
+  drawPhrase();
+  if (!PHRASE.ro && range) {
+    // the bars follow the text when the page is laid out again
+    PHRASE.ro = new ResizeObserver(() => {
+      cancelAnimationFrame(PHRASE.raf);
+      PHRASE.raf = requestAnimationFrame(drawPhrase);
+    });
+    PHRASE.ro.observe($('#doc'));
+    addEventListener('resize', () => PHRASE.range && drawPhrase());
   }
   if (range && reveal) revealRange(range, true, force);
+}
+
+// The bars of a range: its boxes grouped into lines (boxes beside each other
+// at the same height, so two columns stay apart), each line as wide as its
+// boxes and as tall as its text.  A line with only a formula takes its box.
+function phraseBars(range) {
+  const text = [], other = [];
+  const root = range.commonAncestorContainer;
+  const walk = document.createTreeWalker(root.nodeType === 1 ? root : root.parentNode, NodeFilter.SHOW_TEXT);
+  for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+    if (!range.intersectsNode(n) || !n.data.trim()) continue;
+    if (n.parentElement && n.parentElement.closest('math, .math')) continue;
+    const r = document.createRange();
+    r.selectNodeContents(n);
+    if (n === range.startContainer) r.setStart(n, range.startOffset);
+    if (n === range.endContainer) r.setEnd(n, range.endOffset);
+    for (const b of r.getClientRects()) if (b.width && b.height) text.push(b);
+  }
+  for (const b of range.getClientRects()) if (b.width && b.height) other.push(b);
+  const lines = [];
+  const near = (l, b) => b.top < l.bottom && b.bottom > l.top && b.left < l.right + 24 && b.right > l.left - 24;
+  for (const b of text) {
+    const l = lines.find((x) => near(x, b));
+    if (l) { l.left = Math.min(l.left, b.left); l.right = Math.max(l.right, b.right); l.top = Math.min(l.top, b.top); l.bottom = Math.max(l.bottom, b.bottom); }
+    else lines.push({ left: b.left, right: b.right, top: b.top, bottom: b.bottom });
+  }
+  // formulas widen the line they sit on (by their middle), or make one
+  for (const b of other) {
+    const mid = (b.top + b.bottom) / 2;
+    const l = lines.find((x) => mid >= x.top && mid <= x.bottom && b.left < x.right + 24 && b.right > x.left - 24);
+    if (l) { l.left = Math.min(l.left, b.left); l.right = Math.max(l.right, b.right); }
+    else if (!lines.some((x) => near(x, b))) lines.push({ left: b.left, right: b.right, top: b.top, bottom: b.bottom });
+  }
+  // the words either side of a formula are one line once it is in
+  for (let i = 0; i < lines.length; i++) {
+    for (let j = i + 1; j < lines.length; j++) {
+      const a = lines[i], b = lines[j];
+      if (!near(a, b) || Math.abs((a.top + a.bottom) - (b.top + b.bottom)) / 2 > (a.bottom - a.top) / 2) continue;
+      a.left = Math.min(a.left, b.left); a.right = Math.max(a.right, b.right);
+      a.top = Math.min(a.top, b.top); a.bottom = Math.max(a.bottom, b.bottom);
+      lines.splice(j, 1); j = i;
+    }
+  }
+  return lines;
+}
+
+function drawPhrase() {
+  const range = PHRASE.range;
+  if (!range) { if (PHRASE.layer) PHRASE.layer.replaceChildren(); return; }
+  if (!PHRASE.layer) {
+    PHRASE.layer = document.createElement('div');
+    PHRASE.layer.id = 'ttsmark';
+    PHRASE.layer.setAttribute('aria-hidden', 'true');
+    document.body.append(PHRASE.layer);
+  }
+  const bars = [];
+  if (range.startContainer.isConnected) {
+    for (const l of phraseBars(range)) {
+      const d = document.createElement('div');
+      d.style.cssText = `left:${l.left + scrollX - 1}px;top:${l.top + scrollY}px;width:${l.right - l.left + 2}px;height:${l.bottom - l.top}px`;
+      bars.push(d);
+    }
+  }
+  PHRASE.layer.replaceChildren(...bars);
 }
 
 // Bring a range into view below the bars, a third of the way down.  Blocks
@@ -4458,7 +4604,7 @@ function mathSpeech(src) {
   let [body] = mathBody(src);
   body = body.replace(/\\label\{[^}]*\}/g, '').replace(/\\(nonumber|notag)\b/g, '');
   let html;
-  try { html = katex.renderToString(body, { output: 'mathml', throwOnError: false, macros: katexMacros(), strict: false }); }
+  try { html = closeMathmlTags(katex.renderToString(body, { output: 'mathml', throwOnError: false, macros: katexMacros(), strict: false })); }
   catch (e) { return ''; }
   const m = new DOMParser().parseFromString(html, 'text/html').querySelector('math');
   if (!m) return '';
@@ -4707,7 +4853,8 @@ doc.addEventListener('beforeinput', (e) => {
 });
 function restore(from, to) {
   clearTimeout(typingSnap); typingSnap = null; typingIn = null;
-  leaveDiff();
+  const rediff = DIFF.on && !SRC.on;
+  if (!rediff) leaveDiff();
   commit();
   const cur = Object.fromEntries(Object.entries(FILES).map(([n, f]) => [n, f.text]));
   let texts = from.pop();
@@ -4725,6 +4872,7 @@ function restore(from, to) {
   restoreAnchor(y);
   if (SRC.on) { refreshSourceView(); return; }
   caretAtChange(change);
+  if (rediff) diffAgain(captureEditorState());
 }
 
 // The first change between two sets of file texts: the file, where it
@@ -5425,6 +5573,11 @@ document.addEventListener('keydown', (e) => {
   } else if (!$('#openbox').hidden && /^[1-9]$/.test(e.key) && document.querySelectorAll('#open-recent .open-paper')[+e.key - 1]) {
     // like an editor's start page: the number of a recent paper opens it
     e.preventDefault(); document.querySelectorAll('#open-recent .open-paper')[+e.key - 1].click();
+  } else if (!$('#openbox').hidden && e.key === 'Delete' && e.target.closest('#open-recent .open-row')) {
+    // the focused recent paper comes off the list (not the one open now)
+    const x = e.target.closest('.open-row').querySelector('.open-forget');
+    e.preventDefault();
+    if (x) x.click();
   } else if (!$('#openbox').hidden && e.key === 'Enter' && !e.target.closest('button') && !$('#open-mainrow').hidden) {
     // (Enter on a button presses that button: a recent paper, a folder)
     e.preventDefault(); $('#open-confirm').click();
@@ -6252,7 +6405,68 @@ addEventListener('resize', updateDiffMap);
 // changed shows a word diff, a new block is tinted green, a deleted one is
 // shown struck through in red where it was.  Read-only while on.
 
-const DIFF = { on: false, marks: [], cur: -1 };
+// editing: the block being edited in the diff view ({ file, index }), drawn
+// as usual while the other blocks show their changes.  bases: the texts
+// compared with, kept while the diff is drawn again after an edit.
+const DIFF = { on: false, marks: [], cur: -1, editing: null, bases: null, busy: false };
+function diffEditSeg() {
+  const e = DIFF.editing;
+  const seg = e && FILES[e.file] && FILES[e.file].segs ? FILES[e.file].segs[e.index] : null;
+  return seg && seg.el && seg.el.isConnected ? seg : null;
+}
+const diffSource = (s) => s.removed ? '' : s.diffSrc !== undefined ? s.diffSrc : s.kind === 'hidden' && s.patched !== undefined ? s.patched : s.src;
+// The block edited in the diff view, into the text of its file (the other
+// blocks are taken as they were when the diff was drawn).
+function diffSync() {
+  const seg = diffEditSeg();
+  if (!seg) return;
+  flushEdits();
+  if (!seg.touched) return;
+  const src = segSource(seg, [], null, false);
+  seg.src = src; seg.diffSrc = src; seg.touched = false;
+  FILES[seg.file].text = FILES[seg.file].segs.map(diffSource).join('');
+}
+// Draw the diff again after an edit.  state (from captureEditorState) is the
+// block to edit and the caret in it, or null when no block is edited.  That
+// block keeps its place on screen.
+async function diffAgain(state) {
+  if (DIFF.busy) return;
+  DIFF.busy = true;
+  try {
+    if (DIFF_SHOWN) diffSync();
+    DIFF.editing = null;
+    const before = state && FILES[state.file] && FILES[state.file].segs ? FILES[state.file].segs[state.index] : null;
+    const top = before && before.el && before.el.isConnected ? before.el.getBoundingClientRect().top : null;
+    const y = viewAnchor();
+    render();
+    restoreAnchor(y);
+    if (state && FILES[state.file]) {
+      // the block by its place in its file, else the nearest with its source
+      const segs = FILES[state.file].segs;
+      if (!segs[state.index] || segs[state.index].src !== state.src) {
+        let best = -1;
+        segs.forEach((sg, i) => { if (sg.src === state.src && sg.edit && (best < 0 || Math.abs(i - state.index) < Math.abs(best - state.index))) best = i; });
+        if (best >= 0) state.index = best;
+      }
+      const seg = segs[state.index];
+      if (seg && seg.edit && seg.el) DIFF.editing = { file: state.file, index: state.index };
+    }
+    DIFF.on = true;
+    await diffOn(true);
+    const seg = diffEditSeg();
+    if (seg) {
+      if (top !== null) window.scrollBy(0, seg.el.getBoundingClientRect().top - top);
+      if (seg.edit.tagName === 'TEXTAREA') seg.edit.focus({ preventScroll: true });
+      else {
+        state.offset = Math.min(state.offset ?? Infinity, seg.edit.textContent.length);
+        if (state.end !== undefined) state.end = Math.min(state.end, seg.edit.textContent.length);
+        restoreEditorState(state);
+      }
+    }
+  } finally {
+    DIFF.busy = false;
+  }
+}
 
 function diffUnits(src) {
   // words, spaces and punctuation of the text; every other token whole
@@ -6479,10 +6693,10 @@ function diffBaseName(ref) {
 function diffRevert(name, fn) {
   const segs = FILES[name] && FILES[name].segs;
   if (!segs) return;
-  snapshot();
-  const cs = (s) => s.removed ? '' : s.diffSrc !== undefined ? s.diffSrc : s.kind === 'hidden' && s.patched !== undefined ? s.patched : s.src;
+  snapshot();   // with the block being edited, if any
+  DIFF.editing = null;
   fn(segs);
-  FILES[name].text = segs.map(cs).join('');
+  FILES[name].text = segs.map(diffSource).join('');
   for (const s of segs) delete s.diffSrc;
   const y = viewAnchor();
   render();
@@ -6499,18 +6713,30 @@ async function diffOn(quiet = false) {
   DIFF.marks = [];
   document.body.classList.add('diffing');
   DIFF_SHOWN = true;
-  for (const e of document.querySelectorAll('#doc [contenteditable="true"]')) e.contentEditable = 'false';
-  for (const ta of document.querySelectorAll('#doc textarea')) ta.readOnly = true;
+  // every block is read-only but the one being edited; a click on one of
+  // the others edits it instead (data-diff-edit)
+  const editing = diffEditSeg();
+  for (const e of document.querySelectorAll('#doc [contenteditable="true"]')) {
+    if (editing && editing.el.contains(e)) continue;
+    e.contentEditable = 'false'; e.dataset.diffEdit = '1';
+  }
+  for (const ta of document.querySelectorAll('#doc textarea')) {
+    if (editing && editing.el.contains(ta)) continue;
+    ta.readOnly = true; ta.dataset.diffEdit = '1';
+  }
+  if (editing) editing.el.classList.add('diff-editing');
   const names = Object.keys(FILES).filter((n) => FILES[n].segs);
   let changedFiles = 0;
   // Last save is the editor's disk snapshot; any other version is read for
   // all files at once.
   let bases = {};
-  if (ref !== 'save') {
+  if (ref !== 'save' && quiet && DIFF.bases && DIFF.bases.ref === ref) bases = DIFF.bases.texts;
+  else if (ref !== 'save') {
     try {
       const r = await fetch(`/api/baselines?ref=${encodeURIComponent(ref)}`);
       bases = r.ok ? await r.json() : {};
     } catch (e) { bases = {}; }
+    DIFF.bases = { ref, texts: bases };
   }
   for (const name of names) {
     let base;
@@ -6520,6 +6746,9 @@ async function diffOn(quiet = false) {
       const r = await fetch(`/api/baseline?name=${encodeURIComponent(name)}&ref=${ref}`);
       base = r.ok ? (await r.json()).text : null;
     }
+    // every block's source as the diff is drawn: what an edit in the diff
+    // view rebuilds its file from
+    for (const sg of FILES[name].segs) sg.diffSrc = segSource(sg, [], null, false);
     const cur = FILES[name].segs.filter((sg) => sg.el && !sg.removed);
     if (base === null) { cur.forEach((sg) => { sg.el.classList.add('diff-new'); DIFF.marks.push(sg.el); }); changedFiles++; continue; }
     if (base === FILES[name].text) continue;
@@ -6556,7 +6785,7 @@ async function diffOn(quiet = false) {
           b.el.classList.add('diff-changed');
           b.el.diffRevert = () => diffRevert(name, () => { b.diffSrc = d.src; });
           const target = b.edit && b.edit.tagName !== 'TEXTAREA' ? b.edit : null;
-          if (target) renderWordDiff(contentOf(d, d.src), contentOf(b, now.get(b)), target);
+          if (target && b !== editing) renderWordDiff(contentOf(d, d.src), contentOf(b, now.get(b)), target);
           DIFF.marks.push(b.el);
         } else {
           b.el.classList.add('diff-new');
@@ -6605,18 +6834,21 @@ async function diffOn(quiet = false) {
   fillDiffMap();
   $('#diffnav').hidden = false;
   $('#diffcount').textContent = DIFF.marks.length ? `${DIFF.marks.length} changes` : 'no changes';
-  if (!quiet || !DIFF.marks.length) banner(DIFF.marks.length ? `${DIFF.marks.length} changed blocks in ${changedFiles} file(s), compared with ${diffBaseName(ref)}. The page is read-only until you leave diff mode; Revert puts a block back.`
+  if (!quiet || !DIFF.marks.length) banner(DIFF.marks.length ? `${DIFF.marks.length} changed blocks in ${changedFiles} file(s), compared with ${diffBaseName(ref)}. Click a block to edit it, and the diff follows; Revert puts a block back.`
     : 'No changes since ' + diffBaseName(ref) + '.');
 }
 
 function diffOff() {
+  if (DIFF_SHOWN) diffSync();
+  DIFF.editing = null;
+  DIFF.bases = null;
   DIFF.on = false;
   $('#diffmap').hidden = true;
   document.body.classList.remove('diffing');
   $('#diffnav').hidden = true;
   $('#diffbase').hidden = true;
   $('#diffbtn').setAttribute('aria-pressed', 'false');
-  $('#diffbtn').title = 'Show what changed, Ctrl+Alt+V (read-only while on)';
+  $('#diffbtn').title = 'Show what changed, Ctrl+Alt+V (click a block to edit it)';
   const y = viewAnchor();
   render();
   restoreAnchor(y);
@@ -6650,7 +6882,12 @@ ACTIONS.diff = () => {
   $('#diffbtn').setAttribute('aria-pressed', 'true');
   $('#diffbtn').title = 'Leave the diff view (Ctrl+Alt+V)';
   $('#diffbase').hidden = false;
-  loadCommits().then(() => { if (DIFF.on) diffOn(); });
+  loadCommits().then(() => {
+    if (!DIFF.on) return;
+    commit();
+    const y = viewAnchor(); render(); restoreAnchor(y);
+    diffOn();
+  });
 };
 // after a commit outside the editor: the new list of commits, and the diff
 // computed again against it
@@ -6670,8 +6907,52 @@ function setDiffBase(ref) {
 $('#diffbase').onchange = () => { VIEW.save('diff', $('#diffbase').value); if (DIFF.on) { const y = viewAnchor(); render(); restoreAnchor(y); DIFF.on = true; diffOn(); } };
 $('#diffprev').onclick = () => diffStep(-1);
 $('#diffnext').onclick = () => diffStep(1);
-// no editing while diffing
-document.addEventListener('beforeinput', (e) => { if (DIFF.on) e.preventDefault(); }, true);
+// While diffing, only the block being edited takes input.  A click on
+// another block edits that one: the page is drawn again with it as usual
+// (no marks) and the caret where the click was, counted in the text without
+// what was deleted.  Leaving the block (a click outside the text, Esc) draws
+// its changes again.
+document.addEventListener('beforeinput', (e) => {
+  const seg = DIFF.on && DIFF_SHOWN ? diffEditSeg() : null;
+  if (DIFF.on && !(seg && seg.el.contains(e.target))) e.preventDefault();
+}, true);
+$('#doc').addEventListener('mousedown', (e) => {
+  if (!DIFF_SHOWN || DIFF.busy || e.button !== 0 || e.target.closest('button, a, input, select, .diff-ghost, .tools')) return;
+  const segEl = e.target.closest('.seg');
+  const seg = segEl && segEl.seg;
+  if (!seg || !seg.file || seg === diffEditSeg() || !seg.edit || !seg.edit.dataset.diffEdit) return;
+  const segs = FILES[seg.file] && FILES[seg.file].segs;
+  if (!segs || segs.indexOf(seg) < 0) return;
+  e.preventDefault();
+  let offset = Infinity;
+  const p = document.caretRangeFromPoint && document.caretRangeFromPoint(e.clientX, e.clientY);
+  if (p && seg.edit.contains(p.startContainer)) {
+    const r = document.createRange();
+    r.selectNodeContents(seg.edit);
+    r.setEnd(p.startContainer, p.startOffset);
+    const upTo = r.cloneContents();
+    for (const x of upTo.querySelectorAll('.d-del, .diff-revert, .boxbadge')) x.remove();
+    offset = upTo.textContent.length;
+  }
+  diffAgain({ file: seg.file, index: segs.indexOf(seg), src: seg.src, offset });
+}, true);
+$('#doc').addEventListener('focusout', (e) => {
+  const seg = DIFF_SHOWN && !DIFF.busy ? diffEditSeg() : null;
+  if (!seg || (e.relatedTarget && seg.el.contains(e.relatedTarget))) return;
+  setTimeout(() => {
+    if (!DIFF_SHOWN || DIFF.busy || diffEditSeg() !== seg) return;
+    const a = document.activeElement;
+    if (a && seg.el.contains(a)) return;
+    if (a && a !== document.body && !$('#doc').contains(a)) return;   // a toolbar or a dialog: still editing
+    diffAgain(null);
+  }, 0);
+});
+document.addEventListener('keydown', (e) => {
+  const seg = e.key === 'Escape' && DIFF_SHOWN && !DIFF.busy ? diffEditSeg() : null;
+  if (!seg || !seg.el.contains(e.target) || e.target.closest('input') || document.querySelector('.popover:not([hidden])')) return;
+  e.preventDefault(); e.stopPropagation();
+  diffAgain(null);
+}, true);
 {
   const q = new URLSearchParams(location.search);
   if (q.has('difftest')) {
@@ -8386,23 +8667,50 @@ const agoText = (t) => { const d = Date.now() / 1000 - t; return !t ? '' : d < 3
 async function chooseProjectDirectory() {
   $('#openbox').hidden = false;
   $('#open-mainrow').hidden = true;
+  await showRecent(0);
+}
+// The list of recent papers, with the focus on the one at index `at`.  Each
+// one but the paper open now has a × that takes it off the list (Delete does
+// the same on the focused one); its files stay where they are.
+async function showRecent(at) {
   let recent = await fetch('/api/recent', { headers: { 'X-Token': TOKEN } }).then((r) => r.json()).catch(() => []);
   if (!Array.isArray(recent)) recent = [];
   const list = $('#open-recent');
   list.textContent = '';
   for (const [i, p] of recent.entries()) {
+    const row = el('div', 'open-row');
+    row.setAttribute('role', 'listitem');
     const b = el('button', 'open-paper' + (p.current ? ' current' : ''));
-    b.setAttribute('role', 'listitem');
     b.append(el('span', 'open-paper-no', i < 9 ? String(i + 1) : ''), el('span', 'open-paper-title', p.title || p.main), el('span', 'open-paper-where', p.path.replace(/^\/home\/[^/]+/, '~') + '/' + p.main),
       el('span', 'open-paper-when', p.current ? 'open now' : agoText(p.t)));
     b.title = 'Open ' + p.path + '/' + p.main;
     b.onclick = () => { if (p.current) { $('#openbox').hidden = true; return; } openProject(p.path, p.main); };
-    list.append(b);
+    row.append(b);
+    if (p.current) row.append(el('span', 'open-forget-none'));
+    else {
+      const x = xButton('Remove ' + (p.title || p.main) + ' from the recent papers', () => forgetRecent(p, i),
+        'Remove from the recent papers (Delete). The files stay.');
+      x.classList.add('open-forget');
+      x.tabIndex = -1;
+      row.append(x);
+    }
+    list.append(row);
   }
   $('#open-recent-wrap').hidden = !recent.length;
   $('#open-hint').hidden = !recent.length;
-  const first = list.querySelector('button') || $('#open-system');
-  if (first) first.focus({ preventScroll: true });
+  const papers = list.querySelectorAll('.open-paper');
+  const focus = papers[Math.min(at, papers.length - 1)] || $('#open-system');
+  if (focus) focus.focus({ preventScroll: true });
+}
+async function forgetRecent(p, i) {
+  const r = await fetch('/api/recent/forget', { method: 'POST', headers: { 'X-Token': TOKEN, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: p.path, main: p.main }) }).catch(() => null);
+  if (!r || !r.ok) {
+    const err = r ? (await r.json().catch(() => ({}))).error : '';
+    toast('Could not remove it from the recent papers' + (err ? ': ' + err : ''), 'error');
+    return;
+  }
+  await showRecent(i);
 }
 // The documents of a folder chosen with the system's dialog: one opens at
 // once, several are offered as buttons

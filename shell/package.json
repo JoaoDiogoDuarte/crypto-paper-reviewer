@@ -1,0 +1,10 @@
+{
+  "name": "crypto-paper-reviewer-shell",
+  "private": true,
+  "description": "The Electron window for the editor (the default of ./run)",
+  "main": "main.js",
+  "desktopName": "crypto-paper-reviewer.desktop",
+  "devDependencies": {
+    "electron": "45.3.4"
+  }
+}
