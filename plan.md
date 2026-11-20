@@ -17,6 +17,7 @@ and the editor's keymap (`ACTION_DEFS`, `TEXT_KEYS`, `GLOBAL_KEYS`), find
    Done 2026-11-20 (section 2).
 3. Label rename from the Results tab. Done 2026-11-20 (section 3).
 4. Literal maths search, plus a consult-style result list for `C-f` and `C-S-f`.
+   Done 2026-11-20 (section 4).
 5. Multiple cursors: paper view, then source view.
 6. Kill ring, source-view completion and electric pairs, latexindent,
    spelling keys `C-,` and `C-.` (section 6b).
@@ -33,7 +34,7 @@ undo reverses each batch.
 ## Open decisions
 
 1. Maths search: does `$x$` find formulas that contain `x` as a token
-   (proposed), or only formulas equal to `x`?
+   (proposed), or only formulas equal to `x`? As proposed (`$=x$` for equal), 2026-11-20.
 2. Move go to line to `M-g` and make `C-g` cancel? Yes, decided 2026-11-20.
 3. Sidebar on the left or the right? List figures, tables and equations from
    the start? Left, headings only at first. Decided 2026-11-20.
@@ -330,6 +331,26 @@ chip into a `\u0000` barrier, so maths cannot be searched.
   maths match rewrites the chip's source.
 - A "Literal (text + $maths$)" toggle next to the regex, case and word
   toggles. It is on by default when the query contains `$`.
+
+### Done (2026-11-20)
+
+`literalRegex`, `normMath`, `searchMathBody`, `drawFindList`, `stayAtMatch`
+and `sourceSearch` in `static/app.js`. Departures and additions:
+
+- The query is split on `$…$` by a regular expression, not by the latex.js
+  tokenizer. The toggle is labelled `$x$` and turns on when a `$` is typed
+  (not in regular-expression mode).
+- Text parts ignore case without **Aa** (letter by letter), and the maths
+  parts always keep their case.
+- A replacement in this mode puts its `$…$` parts in as formulas.
+- The result list (consult-line): one row per match with its context
+  (formulas as `$…$`, or `…` with maths off), at most 300 rows. The arrows
+  move through it and the page follows; Enter after the arrows closes the
+  bar with that match selected, and plain Enter still goes to the next.
+- `Ctrl+Shift+F` (consult-line-multi): the lines of every `.tex` and `.bib`
+  file that hold all the words, in any order, in the palette as
+  `file:line`. A pick opens the source view at that line.
+- Tests: `node tests/e2e.js 'find: '`.
 
 ---
 

@@ -1462,3 +1462,7 @@ html.modal-open body::before {
 .sb-empty { color: var(--muted); padding: .6em; }
 body.sidebar #srcoutline { display: none; }
 .sb-keyedit { margin-left: auto; width: 9em; font: 11px ui-monospace, monospace; padding: 0 .3em; }
+#find-list { flex-basis: 100%; max-height: 11.5em; overflow: auto; border-top: 1px solid var(--line); padding-top: .2em; }
+.find-row { padding: .1em .4em; border-radius: 4px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+.find-row mark { background: color-mix(in srgb, var(--accent) 25%, transparent); color: var(--fg); }
+.find-row.sel { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--fg); }

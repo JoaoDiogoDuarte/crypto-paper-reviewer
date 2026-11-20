@@ -310,6 +310,8 @@ under ⋯. In narrow windows both show icons only; hovering a button names it.
 | `Ctrl+Alt+Left`, `Ctrl+Alt+Right` | previous, next sentence |
 | `Ctrl+Alt+S` | split the section at the cursor |
 | `Ctrl+Alt+A` | add a block after the one at the cursor |
+| `Ctrl+F` with `$…$` | maths in the search: `hello $x$` finds "hello" then a formula with the token `x` (not `\max`), `$=x$` the formula `x`, `$$` any formula; the `$x$` box turns on with a `$`; a list under the bar shows each match in its context, the arrows move the page through it, and Enter then stays at that match |
+| `Ctrl+Shift+F` | find in the source of every `.tex` and `.bib` file: lines that hold all the words, by file and line; a pick opens the source view there |
 | `Alt+O` | the contents sidebar: the headings (Contents) or the theorems, lemmas and definitions with their labels (Results), filtered by words in any order; Enter or a click goes there, `Alt+←` comes back; in the source view, the headings of the file and their lines |
 | `F2` (in the sidebar) | rename the label of the selected entry (a double-click on a label does the same): the `\label` and every reference to it in every file change at once, and `Ctrl+Z` undoes it |
 | `Ctrl+Alt+↑` / `Ctrl+Alt+↓` | move the section at the cursor up / down |

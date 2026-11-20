@@ -6040,7 +6040,7 @@ const PAL = { items: [], active: 0, savedRange: null, opts: null, picked: [], ti
 function openPalette(opts) {
   const r = selRange();
   PAL.savedRange = editableAt(r) ? r.cloneRange() : null;
-  if (!PAL.savedRange) { banner('Put the cursor in the text first.'); return; }
+  if (!PAL.savedRange && !opts.anywhere) { banner('Put the cursor in the text first.'); return; }
   PAL.opts = opts; PAL.picked = []; PAL.items = []; PAL.active = 0;
   $('#pal-title').textContent = opts.title;
   $('#pal-tray').textContent = '';
@@ -6313,11 +6313,68 @@ function refPalette() {
 
 // ---------------------------------------------------------- find/replace
 
-const FIND = { matches: [], cur: -1 };
+const FIND = { matches: [], ctx: [], cur: -1, listNav: false, listFor: null };
+
+// ---- maths in a search ("hello $x$")
+//
+// With the $x$ toggle on, a formula takes part in the searchable text as
+// \u0001 its LaTeX \u0002 (spaces dropped, {x} written as x), and the query
+// is read as text and $…$ parts: text matches text only, $x$ a formula with
+// the token x (not \max or \exp), $=x$ a formula that is x, $$ any formula.
+const findLiteral = () => $('#find-lit').checked && !$('#find-re').checked;
+function normMath(s) {
+  s = s.replace(/\{(\\[A-Za-z]+|[A-Za-z0-9])\}/g, ' $1 ');
+  return s.replace(/\s+/g, (m, off) => (/\\[A-Za-z]+$/.test(s.slice(0, off)) && /^[A-Za-z]/.test(s.slice(off + m.length)) ? ' ' : '')).trim();
+}
+// the LaTeX of a formula chip, without its delimiters (an environment's too)
+function searchMathBody(src) {
+  const t = (src || '').trim();
+  let m;
+  if ((m = /^\$\$([\s\S]*)\$\$$/.exec(t)) || (m = /^\$([\s\S]*)\$$/.exec(t)) || (m = /^\\\(([\s\S]*)\\\)$/.exec(t)) || (m = /^\\\[([\s\S]*)\\\]$/.exec(t))) return m[1];
+  if ((m = /^\\begin\{([^}]*)\}([\s\S]*)\\end\{\1\}$/.exec(t))) return m[2];
+  return t;
+}
+// The query in text and maths parts: [{math: false, s}, {math: true, s}]
+function findParts(q) {
+  const parts = [];
+  const re = /\$([^$]*)\$/g;
+  let i = 0, m;
+  while ((m = re.exec(q))) {
+    if (m.index > i) parts.push({ math: false, s: q.slice(i, m.index) });
+    parts.push({ math: true, s: m[1] });
+    i = m.index + m[0].length;
+  }
+  if (i < q.length) parts.push({ math: false, s: q.slice(i) });
+  return parts;
+}
+const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function literalRegex(q) {
+  const word = $('#find-word').checked;
+  const src = findParts(q).map((p, i, all) => {
+    if (!p.math) {
+      let t = p.s;
+      const lead = /^\s/.test(t) && i > 0, trail = /\s$/.test(t) && i < all.length - 1;
+      t = t.trim();
+      if (!t) return '\\s*';
+      // without Aa, a letter of the text matches either case (the maths are exact)
+      const cased = (w) => ($('#find-case').checked ? escRe(w) : escRe(w).replace(/\p{L}/gu, (c) => (c.toLowerCase() === c.toUpperCase() ? c : `[${c.toLowerCase()}${c.toUpperCase()}]`)));
+      let r = t.split(/\s+/).map(cased).join('\\s+');
+      if (word) r = '\\b' + r + '\\b';
+      return (lead ? '\\s*' : '') + r + (trail ? '\\s*' : '');
+    }
+    const body = p.s.trim();
+    if (!body) return '\u0001[^\u0002]*\u0002';
+    if (body.startsWith('=')) return '\u0001' + escRe(normMath(body.slice(1))) + '\u0002';
+    const n = normMath(body);
+    return '\u0001[^\u0002]*?' + (/^[A-Za-z]/.test(n) ? '(?<![A-Za-z])' : '') + escRe(n) + (/[A-Za-z]$/.test(n) ? '(?![A-Za-z])' : '') + '[^\u0002]*\u0002';
+  }).join('');
+  try { return new RegExp(src, 'gu'); } catch (e) { return null; }
+}
 
 function findRegex() {
   const q = $('#find-q').value;
   if (!q) return null;
+  if (findLiteral()) return literalRegex(q);
   let src = $('#find-re').checked ? q : q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   if ($('#find-word').checked) src = '\\b(?:' + src + ')\\b';
   try { return new RegExp(src, $('#find-case').checked ? 'g' : 'gi'); } catch (e) { return null; }
@@ -6327,6 +6384,7 @@ function findRegex() {
 // line break counted as a space, so that a match may cross them.
 function searchMaps() {
   const maps = [];
+  const lit = findLiteral();
   for (const seg of ORDER) {
     if (!seg.edit || seg.edit.tagName === 'TEXTAREA' || seg.removed) continue;
     const parts = [];
@@ -6341,6 +6399,7 @@ function searchMaps() {
         if (n.nodeType === 3) { parts.push({ start: text.length, node: n }); text += n.data; }
         else if (n.nodeType === 1 && n.classList.contains('chip')) {
           if (n.classList.contains('tie') || n.classList.contains('nl')) { parts.push({ start: text.length, chip: n }); text += ' '; }
+          else if (lit && n.classList.contains('math')) { parts.push({ start: text.length, chip: n }); text += '\u0001' + normMath(searchMathBody(n.dataset.src)) + '\u0002'; }
           else { parts.push({ start: text.length, chip: n }); text += '\u0000'; }
         } else if (n.nodeType === 1) visit(n);
       }
@@ -6373,9 +6432,12 @@ document.addEventListener('focusin', (e) => {
   document.documentElement.style.scrollPaddingTop = e.target.closest && e.target.closest(IN_BARS) ? '0px' : '';
 });
 
+// a piece of the searchable text as a person reads it
+const readable = (t) => t.replace(/\u0001([^\u0001\u0002]*)\u0002/g, '$$$1$$').replace(/[\u0001\u0002]/g, '').replace(/\u0000/g, '…');
 function runFind(keepIndex) {
   const re = findRegex();
   FIND.matches = [];
+  FIND.ctx = [];
   if (re) {
     for (const map of searchMaps()) {
       re.lastIndex = 0;
@@ -6389,6 +6451,7 @@ function runFind(keepIndex) {
         if (a[0] === 'before') r.setStartBefore(a[1]); else if (a[0] === 'after') r.setStartAfter(a[1]); else r.setStart(a[0], a[1]);
         if (b[0] === 'after') r.setEndAfter(b[1]); else if (b[0] === 'before') r.setEndBefore(b[1]); else r.setEnd(b[0], b[1]);
         FIND.matches.push(r);
+        FIND.ctx.push([map.text.slice(Math.max(0, m.index - 40), m.index), m[0], map.text.slice(m.index + m[0].length, m.index + m[0].length + 60)].map(readable));
       }
     }
   }
@@ -6401,7 +6464,26 @@ function firstVisibleMatch() {
   return i < 0 ? 0 : i;
 }
 
+// one row per match with the text around it; the row of the current match
+// is marked, and the page follows the arrows
+function drawFindList() {
+  const list = $('#find-list');
+  list.textContent = '';
+  list.hidden = !FIND.matches.length || !$('#find-q').value;
+  FIND.ctx.slice(0, 300).forEach(([pre, hit, post], i) => {
+    const row = el('div', 'find-row');
+    row.setAttribute('role', 'option');
+    const mk = el('mark', '', hit);
+    row.append(pre, mk, post);
+    row.onmousedown = (e) => { e.preventDefault(); FIND.cur = i; stayAtMatch(); };
+    list.append(row);
+  });
+}
 function paintFind(scroll) {
+  if (FIND.listFor !== FIND.matches) { FIND.listFor = FIND.matches; drawFindList(); }
+  [...$('#find-list').children].forEach((row, i) => row.classList.toggle('sel', i === FIND.cur));
+  const selRow = $('#find-list').children[FIND.cur];
+  if (selRow) selRow.scrollIntoView({ block: 'nearest' });
   const n = FIND.matches.length;
   $('#find-count').textContent = $('#find-q').value ? (n ? `${FIND.cur + 1} of ${n}` : 'no match') : '';
   if (!(window.CSS && CSS.highlights)) return;
@@ -6451,6 +6533,14 @@ function replaceAllMatches() {
 }
 
 function replaceRange(r) {
+  if (findLiteral()) {
+    // text stays text, and $…$ becomes a formula
+    const frag = document.createDocumentFragment();
+    for (const p of findParts($('#find-r').value)) frag.append(p.math ? mathChip('$' + p.s + '$', false) : document.createTextNode(p.s));
+    r.deleteContents();
+    r.insertNode(frag);
+    return;
+  }
   const text = r.toString().replace(/\u00a0/g, ' ');
   const rep = document.createTextNode(replacement(text));
   r.deleteContents();
@@ -6467,13 +6557,76 @@ function openFind(focusReplace) {
 }
 function closeFind() {
   $('#findbar').hidden = true;
+  FIND.listNav = false;
   if (window.CSS && CSS.highlights) { CSS.highlights.delete('find'); CSS.highlights.delete('findcur'); }
 }
 
-for (const id of ['#find-q', '#find-re', '#find-case', '#find-word']) $(id).addEventListener('input', () => runFind());
+for (const id of ['#find-q', '#find-re', '#find-case', '#find-word', '#find-lit']) $(id).addEventListener('input', () => { FIND.listNav = false; runFind(); });
+// Ctrl+Shift+F: the lines of every .tex and .bib file of the paper that hold
+// all the words of the query (in any order), by file and line; a pick opens
+// the source view there.
+async function sourceSearch() {
+  commit();
+  const texts = Object.fromEntries(Object.entries(FILES).filter(([, f]) => typeof f.text === 'string').map(([n, f]) => [n, f.text]));
+  for (const [n, f] of Object.entries((SRC && SRC.extra) || {})) if (typeof f.text === 'string') texts[n] = f.text;
+  try {
+    const list = await (await fetch('/api/srcfiles')).json();
+    for (const f of Array.isArray(list) ? list : []) {
+      const n = f.name;
+      if (texts[n] !== undefined || !/\.(tex|bib)$/.test(n)) continue;
+      const r = await fetch('/api/srcfile?name=' + encodeURIComponent(n)).catch(() => null);
+      const d = r && r.ok ? await r.json() : null;
+      if (d && typeof d.text === 'string') texts[n] = d.text;
+    }
+  } catch (e) { /* the paper's own files are enough */ }
+  const lines = Object.entries(texts).flatMap(([file, t]) => t.split('\n').map((text, i) => ({ file, line: i + 1, text, low: text.toLowerCase() })));
+  openPalette({
+    title: 'Find in the source',
+    placeholder: 'Words of one line, in any order (in every .tex and .bib file)',
+    anywhere: true,
+    delay: 60,
+    empty: 'No line holds all these words.',
+    search: async (q) => {
+      const words = q.toLowerCase().split(/\s+/).filter(Boolean);
+      if (!words.length) return [];
+      const out = [];
+      for (const l of lines) { if (words.every((w) => l.low.includes(w))) { out.push(l); if (out.length >= 300) break; } }
+      return out;
+    },
+    view: (l) => ({ main: `<code>${escHtml(l.file)}:${l.line}</code>`, sub: l.text.trim().slice(0, 200) }),
+    pick: async (l) => {
+      closePalette();
+      if (!SRC.on) await toggleSource(true);
+      await openSourceFile(l.file, l.line);
+    },
+  });
+}
+
+// The current match becomes the selection in the text, and the bar closes.
+function stayAtMatch() {
+  const r = FIND.matches[FIND.cur];
+  if (!r) return;
+  navPush();
+  closeFind();
+  const host = hostOf(r.startContainer);
+  if (host) host.focus({ preventScroll: true });
+  const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r.cloneRange());
+  revealRange(r, false);
+}
+// a $ in the query turns maths on (unless it is a regular expression)
+$('#find-q').addEventListener('input', () => { if ($('#find-q').value.includes('$') && !$('#find-re').checked && !$('#find-lit').checked) { $('#find-lit').checked = true; runFind(); } }, true);
 for (const id of ['#find-q', '#find-r']) {
   $(id).addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); if (id === '#find-r' && (e.ctrlKey || e.altKey)) replaceAllMatches(); else if (id === '#find-r') replaceOne(); else stepFind(e.shiftKey ? -1 : 1); }
+    // the arrows move through the list and the page follows; Enter after
+    // them stays at that match (closes the bar, selects it)
+    if (id === '#find-q' && (e.key === 'ArrowDown' || e.key === 'ArrowUp') && FIND.matches.length) {
+      e.preventDefault();
+      FIND.listNav = true;
+      FIND.cur = (FIND.cur + (e.key === 'ArrowDown' ? 1 : -1) + FIND.matches.length) % FIND.matches.length;
+      paintFind(true);
+      return;
+    }
+    if (e.key === 'Enter') { e.preventDefault(); if (id === '#find-r' && (e.ctrlKey || e.altKey)) replaceAllMatches(); else if (id === '#find-r') replaceOne(); else if (FIND.listNav) stayAtMatch(); else stepFind(e.shiftKey ? -1 : 1); }
     if (e.key === 'Escape') { e.preventDefault(); closeFind(); }
   });
 }
@@ -8797,6 +8950,7 @@ const ACTION_DEFS = [
   ['src-unindent', 'Source: unindent the region, or the line', 'source', ['S-Tab'], () => SOURCE_ACTIONS.unindent()],
   ['src-newline', 'Source: new line, indented as this one', 'source', ['Enter'], () => SOURCE_ACTIONS.newline()],
   ['src-goto', 'Source: go to line', 'source', ['M-g'], () => SOURCE_ACTIONS.gotoLine()],
+  ['findsource', 'Find in the source of every .tex and .bib file of the paper', 'global', ['C-F'], () => sourceSearch()],
   ['sidebar', 'Contents sidebar: open it, go to its filter, or close it', 'global', ['M-o'], () => { if (sidebarOpen() && !$('#sidebar').contains(document.activeElement)) $('#sb-filter').focus({ preventScroll: true }); else toggleSidebar(); }],
   ['cancel', 'Cancel: close the menu or window on top, or drop the selection (as Emacs C-g)', 'global', ['C-g'], () => cancelKey()],
   ['src-comment', 'Source: comment the region (or line) out with %, or back in', 'source', ['C-/'], () => SOURCE_ACTIONS.toggleComment()],

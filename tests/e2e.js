@@ -1200,6 +1200,64 @@ done.`));
     }
   },
 
+  async 'find: maths between $…$, by token, whole formula or any, and replaced'(env, page) {
+    const src = ['\\documentclass{article}', '\\begin{document}', '',
+      'Say hello $x_1 + y$ and $\\max$ and $\\exp$ and $\\mathsf{x}$, then Hello world $z$.', '', '\\end{document}', ''].join('\n');
+    env.write('main.tex', src);
+    await page.eval('load(true)');
+    await page.waitFor(`!!document.querySelector('#doc .chip.math')`, 8000, 'the formulas');
+    const count = async (q) => {
+      await page.eval(`(() => { $('#find-q').value = ${JSON.stringify(q)}; $('#find-q').dispatchEvent(new Event('input')); })()`);
+      return page.eval('FIND.matches.length');
+    };
+    await page.key('f', { ctrl: true });
+    await page.waitFor(`!$('#findbar').hidden`, 2000, 'the find bar');
+    eq(await count('$x$'), 2, '$x$: the token x, not \\max or \\exp');
+    eq(await page.eval(`$('#find-lit').checked`), true, 'a $ turns maths on');
+    eq(await count('$X$'), 0, 'maths keep their case');
+    eq(await count('$=z$'), 1, '$=z$: the formula z');
+    eq(await count('$= x_1+y $'), 1, 'spaces do not count');
+    eq(await count('hello $$'), 1, 'hello followed by a formula, in either case');
+    eq(await count('world $z$'), 1, 'text then maths');
+    has(await page.eval(`$('#find-list').children[0].textContent`), 'Hello world $z$.', 'the context shows the maths as LaTeX');
+    // replaced: the formula z becomes w
+    await count('$=z$');
+    await page.eval(`(() => { $('#find-r').value = '$w$'; })()`);
+    await page.eval('replaceAllMatches()');
+    await page.save();
+    has(env.read('main.tex'), 'Hello world $w$.', 'the formula replaced');
+    // with maths off, only the text is searched, as before
+    await page.eval(`(() => { $('#find-lit').checked = false; })()`);
+    eq(await count('hello'), 2, 'text only');
+    // one row per match with its context; the arrows move, Enter stays there
+    eq(await page.eval(`JSON.stringify([...$('#find-list').children].map((r) => r.querySelector('mark').textContent))`), '["hello","Hello"]', 'the list');
+    has(await page.eval(`$('#find-list').children[0].textContent`), 'Say hello … and', 'the context (formulas as … with maths off)');
+    await page.eval(`$('#find-q').focus()`);
+    await page.key('ArrowDown');
+    await page.key('ArrowDown');
+    await page.key('Enter');
+    await page.waitFor(`$('#findbar').hidden`, 2000, 'the bar closed');
+    eq(await page.eval(`getSelection().toString().toLowerCase()`), 'hello', 'the match is selected');
+  },
+
+  async 'find: Ctrl+Shift+F searches the source of every .tex and .bib file'(env, page) {
+    await page.select('lazy dog');
+    await page.key('F', { ctrl: true, shift: true });
+    await page.waitFor(`!$('#palette').hidden`, 3000, 'the palette');
+    const rows = async (q) => {
+      await page.eval(`(() => { $('#pal-q').value = ${JSON.stringify(q)}; $('#pal-q').dispatchEvent(new Event('input')); })()`);
+      await sleep(300);
+      return page.eval(`[...document.querySelectorAll('#pal-list .pal-item .main')].map((m) => m.textContent).join('|')`);
+    };
+    eq(await rows('dog lazy'), 'main.tex:6', 'words in any order, in main.tex');
+    eq(await rows('detail text'), 'sections/body.tex:5', 'in an \\input file');
+    eq(await rows('goldwasser'), 'refs.bib:2', 'in the .bib');
+    await page.key('Enter');
+    await page.waitFor(`SRC.on && SRC.name === 'refs.bib'`, 5000, 'the source view at the .bib');
+    eq(await page.eval(`(() => { const ta = $('#srcta'); return ta.value.slice(0, ta.selectionStart).split('\\n').length; })()`), 2, 'at its line');
+    await page.eval('toggleSource(false)');
+  },
+
   async 'a caption or heading never gets a blank line'(env, page) {
     env.write('main.tex', [
       '\\documentclass{article}', '\\begin{document}',

@@ -120,18 +120,20 @@
   <div class="popover menu" id="toolmore" hidden role="menu"></div></span>
 </nav>
 <div id="findbar" hidden>
-  <input id="find-q" placeholder="Find" spellcheck="false" title="Text only: maths and LaTeX chips are not searched">
+  <input id="find-q" placeholder="Find (hello $x$ finds maths too)" spellcheck="false" title="Text, and maths between $…$: $x$ finds formulas with the token x, $=x$ the formula x, $$ any formula">
   <input id="find-r" placeholder="Replace with" spellcheck="false">
   <label title="Regular expression"><input type="checkbox" id="find-re"> .*</label>
   <label title="Match case"><input type="checkbox" id="find-case"> Aa</label>
   <label title="Whole words"><input type="checkbox" id="find-word"> W</label>
+  <label title="Literal text and $maths$: on when the query has a $"><input type="checkbox" id="find-lit"> $x$</label>
   <span id="find-count"></span>
   <button id="find-prev" title="Previous (Shift+Enter)" aria-label="Previous match"><svg class="ic" aria-hidden="true"><use href="#i-prev"/></svg> Prev</button>
   <button id="find-next" title="Next (Enter)" aria-label="Next match"><svg class="ic" aria-hidden="true"><use href="#i-next"/></svg> Next</button>
   <button id="find-one" title="Replace this match"><i>⇄</i> Replace</button>
   <button id="find-all" title="Replace every match"><i>⇉</i> All</button>
   <button id="find-close" title="Close (Esc)" aria-label="Close find"><svg class="ic" aria-hidden="true"><use href="#i-close"/></svg> Close</button>
-  <span class="small">text only: maths and LaTeX chips are not searched</span>
+  <span class="small" id="find-note">maths between $…$; other LaTeX chips are not searched</span>
+  <div id="find-list" role="listbox" aria-label="Matches" hidden></div>
 </div>
 <div id="banner" hidden></div>
 </div>
