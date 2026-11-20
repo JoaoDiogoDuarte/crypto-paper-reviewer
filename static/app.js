@@ -8959,6 +8959,7 @@ const ACTION_DEFS = [
   // the chrome: every button of the bars and the ☰ menu has a key too
   ['menu', 'Open or close the ☰ menu', 'global', ['C-M-m'], () => $('#menubtn').click()],
   ['open', 'Open a paper directory…', 'global', ['C-o', 'C-M-o'], () => $('#openbtn').click()],
+  ['newpaper', 'New paper: folder, format, title, authors, abstract…', 'global', ['C-M-N'], () => openNewPaper()],
   ['details', 'Show the structure: where environments start and end, labels', 'global', ['C-M-i'], () => $('#detailsbtn').click()],
   ['source', 'Source view of the .tex and .bib files', 'global', ['C-M-e'], () => toggleSource()],
   ['srcwrap', 'Source view: wrap long lines or not', 'global', [], () => { buildSourceView(); setSourceWrap(!SRC.wrap); }],
@@ -9728,6 +9729,7 @@ $('#new-pick').onclick = async () => {
 };
 $('#new-cancel').onclick = () => { $('#newbox').hidden = true; };
 $('#open-new').onclick = openNewPaper;
+$('#newpaperbtn').onclick = () => { closePopovers(); openNewPaper(); };
 $('#new-create').onclick = async () => {
   if (!$('#new-name').value.trim()) { $('#new-status').textContent = 'Give the new folder a name.'; $('#new-name').focus(); return; }
   if (editedFiles().length && !confirm('You have unsaved edits; opening the new paper discards them. Continue?')) return;

@@ -336,6 +336,7 @@ listed and changeable under **Keys…**):
 | --- | --- |
 | `Ctrl+Alt+M` | the ☰ menu |
 | `Ctrl+O` (or `Ctrl+Alt+O`) / `Ctrl+Alt+T` / `Ctrl+Alt+L` | open a paper, save history, reload from disk |
+| `Ctrl+Alt+Shift+N` | a new paper (also ☰ → **New paper…**, and **New** in Open): folder, format, anonymous version, cryptobib, title, authors, keywords, abstract |
 | `Ctrl+Alt+E` / `Ctrl+Alt+I` | source view, show structure |
 | `Ctrl+Alt+Z` | open the file at the cursor's line in your own editor |
 | `Ctrl+Alt+B` / `Ctrl+Alt+Shift+B` | build the PDF now, clean build |

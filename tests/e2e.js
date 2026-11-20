@@ -1839,6 +1839,18 @@ done.`));
     await page.key('Escape');
   },
 
+  async 'New paper: opened from the menu and with Ctrl+Alt+Shift+N'(env, page) {
+    await page.click('#menubtn');
+    await page.click('#newpaperbtn');
+    await page.waitFor(`!$('#newbox').hidden && $('#new-venue').options.length > 3`, 4000, 'the dialog from the menu');
+    eq(await page.eval(`$('#mainmenu').hidden`), true, 'the menu closes');
+    await page.click('#new-cancel');
+    await page.waitFor(`$('#newbox').hidden`, 2000, 'cancelled');
+    await page.key('N', { ctrl: true, alt: true, shift: true });
+    await page.waitFor(`!$('#newbox').hidden`, 4000, 'the dialog from the key');
+    await page.click('#new-cancel');
+  },
+
   async 'New paper: a venue, anonymous, metadata, sections and cryptobib as a submodule'(env, page) {
     // a local stand-in for cryptobib (PE_CRYPTOBIB_URL): a repository with the two files
     const cb = path.join(env.dir, 'cryptobib-src');
