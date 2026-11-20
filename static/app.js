@@ -121,6 +121,10 @@ let DOC = null;          // payload of /api/doc: files, aux, macros, bib, figs
 const FILES = {};        // name -> { text, base (hash on disk), disk (text on disk), segs }
 let ORDER = [];          // display order: segments, each with .file and .el
 let lastTyping = 0;
+// multiple cursors (see the section of that name): declared here, since a
+// render, which drops them, can run before that section is reached
+const MC = { cursors: [], primary: null, replaying: false, word: false, dwimBlock: false, kill: null, clip: null, raf: 0, expand: -1, note: '', eatClick: false };
+const SMC = { cursors: [], primary: null, shadow: null, kill: null, value: null, raf: 0, word: false, dwimBlock: false, undo: [], redo: [] };
 // The diff view rewrites the editable blocks with its own marks: while it is
 // shown, the page is not the document, and nothing may read it back.
 let DIFF_SHOWN = false;
@@ -372,7 +376,15 @@ function fileBadge(node, name) {
 }
 let RENDER_CACHE = new Map();    // key -> [{ el, seg, after }]
 let RENDER_STAMP = '';
+// The cursors point into the blocks drawn before: they are taken over to the
+// new ones whose text is the same (a build, an outside change, a save), and
+// dropped where it is not.
 function render() {
+  const cursors = mcBeforeRender();
+  renderPage();
+  mcAfterRender(cursors);
+}
+function renderPage() {
   unicodeEngine.v = undefined;      // the preamble may have changed
   if (DIFF_SHOWN) diffSync();       // the block edited in the diff view, into its file
   const wasDiff = DIFF_SHOWN;
@@ -5254,6 +5266,7 @@ load(false).then(() => {
 // change made by the editor and at pauses in typing
 const HISTORY = { undo: [], redo: [] };
 function snapshot() {
+  if (MC.replaying) return;   // an edit at many cursors is one step, taken before it
   commit();
   const texts = Object.fromEntries(Object.entries(FILES).map(([n, f]) => [n, f.text]));
   const last = HISTORY.undo[HISTORY.undo.length - 1];
@@ -5274,6 +5287,7 @@ doc.addEventListener('beforeinput', (e) => {
 });
 function restore(from, to) {
   clearTimeout(typingSnap); typingSnap = null; typingIn = null;
+  mcClear();   // an undo goes back to one cursor
   const rediff = DIFF.on && !SRC.on;
   if (!rediff) leaveDiff();
   commit();
@@ -5997,6 +6011,7 @@ function keyName(e) {
 }
 
 function closeCurrentMenu() {
+  if (mcLeave()) return;
   if (SRC.on && $('#palette').hidden && $('#external').hidden) { toggleSource(false); return; }
   if (!$('#external').hidden) { $('#external-later').click(); return; }
   if (!$('#askbox').hidden) { const c = [...$('#ask-actions').children].pop(); if (c) c.click(); return; }
@@ -9090,6 +9105,15 @@ const ACTION_DEFS = [
   ['src-comment', 'Source: comment the region (or line) out with %, or back in', 'source', ['C-/'], () => SOURCE_ACTIONS.toggleComment()],
   ['duplicate', 'Duplicate the region, or the line', 'text', ['C-p'], () => duplicate()],
   ['expand', 'Expand the selection', 'text', ['C-+', 'C-='], () => expandRegion()],
+  // multiple cursors, with the keys of Emacs's multiple-cursors
+  ['mcnext', 'Multiple cursors: mark the next occurrence of the selection (or of the word at the cursor)', 'global', ['C->'], () => mcNext(1)],
+  ['mcprev', 'Multiple cursors: mark the previous occurrence', 'global', ['C-M->'], () => mcNext(-1)],
+  ['mcunnext', 'Multiple cursors: drop the last cursor', 'global', ['C-<'], () => mcUnmark(1)],
+  ['mcunprev', 'Multiple cursors: drop the first cursor', 'global', ['C-M-<'], () => mcUnmark(-1)],
+  ['mcall', 'Multiple cursors: mark every occurrence in the paper (from the find bar: every match)', 'global', ['C-C C-A'], () => mcAll('paper')],
+  ['mcdwim', 'Multiple cursors: mark every occurrence in the paragraph, then, pressed again, in the paper', 'global', ['C-C C-D'], () => mcDwim()],
+  ['mclines', 'Multiple cursors: a cursor on each line of the selection', 'global', ['C-C C-C'], () => mcLines()],
+  ['mcnumbers', 'Multiple cursors: insert 0, 1, 2, … at the cursors', 'global', ['C-C C-N'], () => mcNumbers()],
   // the chrome: every button of the bars and the ☰ menu has a key too
   ['menu', 'Open or close the ☰ menu', 'global', ['C-M-m'], () => $('#menubtn').click()],
   ['open', 'Open a paper directory…', 'global', ['C-o', 'C-M-o'], () => $('#openbtn').click()],
@@ -9428,8 +9452,9 @@ function applyKeymap() {
   for (const k of Object.keys(TEXT_KEYS)) delete TEXT_KEYS[k];
   for (const k of Object.keys(SOURCE_KEYS)) delete SOURCE_KEYS[k];
   for (const k of Object.keys(CODE_KEYS)) delete CODE_KEYS[k];
-  for (const [id, , scope, defaults, fn] of ACTION_DEFS) {
-    for (const key of USER_KEYS[id] || defaults) ({ global: GLOBAL_KEYS, text: TEXT_KEYS, source: SOURCE_KEYS }[scope])[key] = fn;
+  for (const [id, label, scope, defaults, fn] of ACTION_DEFS) {
+    const run = scope === 'source' ? smcGuard(id, label, fn) : mcGuard(id, label, scope, fn);
+    for (const key of USER_KEYS[id] || defaults) ({ global: GLOBAL_KEYS, text: TEXT_KEYS, source: SOURCE_KEYS }[scope])[key] = run;
     // a listing's text box keeps its own keys, but adding and deleting the
     // block work there too
     if (id === 'delblock' || id === 'addblock') for (const key of USER_KEYS[id] || defaults) CODE_KEYS[key] = fn;
@@ -9443,6 +9468,7 @@ fetch('/api/keys').then((r) => r.json()).then((k) => { USER_KEYS = k || {}; appl
 // the view, which Escape does.
 function cancelKey() {
   if (PREFIX) { dropPrefix(); return; }
+  if (mcLeave()) return;
   if (document.querySelector('.popover:not([hidden])')) { closePopovers(); return; }
   if (SRC.on) {
     if (!$('#palette').hidden) { closePalette(); return; }
@@ -9489,8 +9515,10 @@ document.addEventListener('keydown', (e) => {
   if (RECORDING || ['Control', 'Alt', 'Shift', 'Meta'].includes(e.key)) return;
   const t = e.target;
   // fields of their own (the find bar, the palette) keep their keys
-  if (/^(INPUT|SELECT)$/.test(t.tagName) || (t.tagName === 'TEXTAREA' && t.id !== 'srcta' && !t.closest('#doc .seg'))) return;
   const k = keyName(e);
+  // (except the chord that marks every match of the find bar with a cursor)
+  const findChord = t.closest && t.closest('#findbar') && (PREFIX || (USER_KEYS.mcall || ['C-C C-A']).some((c) => c.startsWith(k + ' ')));
+  if (!findChord && (/^(INPUT|SELECT)$/.test(t.tagName) || (t.tagName === 'TEXTAREA' && t.id !== 'srcta' && !t.closest('#doc .seg')))) return;
   if (!PREFIX) {
     if (!isPrefix(k)) return;
     e.preventDefault(); e.stopImmediatePropagation();
@@ -9508,6 +9536,738 @@ document.addEventListener('keydown', (e) => {
     (t.tagName === 'TEXTAREA' && t.closest('#doc .seg') && CODE_KEYS[full]) || GLOBAL_KEYS[full];
   if (fn) fn(); else toast(`${prettyChord(full)} does nothing here`);
 }, true);
+
+// ------------------------------------------------------- multiple cursors
+//
+// A page has one real selection, and the browser edits only there.  The
+// other cursors are the editor's: kept as character offsets in their block,
+// drawn over the text, and an edit is made at each of them in turn through
+// the real selection, from the last to the first, so that the existing code
+// does the work.  An offset counts the characters of the block's text and
+// one for each chip (a formula, a reference), which no cursor goes inside.
+// Every cursor lies in one editable text (a paragraph, a heading, a
+// caption).  The real selection is the primary cursor.  A render, a click,
+// Esc or C-g go back to one cursor.
+const mcActive = () => MC.cursors.length > 1;
+// Esc and C-g in the text with many cursors: back to one (in the find bar
+// or a dialog they close that first)
+function mcLeave() {
+  const a = document.activeElement;
+  if (mcActive() && a && a.closest && a.closest('#doc') && !topDialog()) { mcClear(); return true; }
+  if (smcActive() && a && a.id === 'srcta' && !topDialog()) { smcShow.one(); return true; }
+  return false;
+}
+// the number of cursors: one toast, changed in place while it shows
+function mcCount(msg) {
+  const t = mcCount.el;
+  if (t && t.isConnected && !t.classList.contains('gone')) { t.textContent = msg; return; }
+  toast(msg);
+  mcCount.el = $('#toasts') && $('#toasts').lastElementChild;
+}
+// (a <br> is only the browser's placeholder in an emptied block: no character)
+const mcAtom = (n) => n.nodeType === 1 && (n.classList.contains('chip') || n.getAttribute('contenteditable') === 'false' || n.tagName === 'IMG');
+// the text of a node as the offsets count it: a chip is one character
+function mcText(node) {
+  let s = '';
+  for (const c of node.childNodes) {
+    if (c.nodeType === 3) s += c.data;
+    else if (c.nodeType === 1) s += mcAtom(c) ? '\uFFFC' : mcText(c);
+  }
+  return s;
+}
+// the offset of a point of the page in the block `ed` (a point inside a chip
+// counts as after it)
+function mcOff(ed, node, off) {
+  let atom = null;
+  for (let n = node.nodeType === 1 ? node : node.parentElement; n && n !== ed; n = n.parentElement) if (mcAtom(n)) atom = n;
+  if (atom) { node = atom.parentNode; off = [...node.childNodes].indexOf(atom) + 1; }
+  let count = 0, done = false;
+  const walk = (p) => {
+    for (let i = 0; i < p.childNodes.length; i++) {
+      if (p === node && i === off) { done = true; return; }
+      const c = p.childNodes[i];
+      if (c === node) { count += off; done = true; return; }
+      if (c.nodeType === 3) count += c.data.length;
+      else if (c.nodeType === 1) {
+        if (mcAtom(c)) count += 1;
+        else { walk(c); if (done) return; }
+      }
+    }
+    if (p === node) done = true;
+  };
+  walk(ed);
+  return count;
+}
+// the point at an offset: in a text node where there is one, never in a chip
+function mcPoint(ed, n) {
+  let rest = n, found = null;
+  const walk = (p) => {
+    for (const c of p.childNodes) {
+      if (c.nodeType === 3) {
+        if (rest <= c.data.length) { found = [c, rest]; return true; }
+        rest -= c.data.length;
+      } else if (c.nodeType === 1) {
+        if (mcAtom(c)) {
+          if (rest === 0) { found = [p, [...p.childNodes].indexOf(c)]; return true; }
+          rest -= 1;
+        } else if (walk(c)) return true;
+      }
+    }
+    return false;
+  };
+  return walk(ed) ? found : [ed, ed.childNodes.length];
+}
+const mcUsable = (ed) => !!(ed && ed.isConnected && ed.getAttribute('contenteditable') === 'true' && ed.closest('#doc') &&
+  !ed.closest('.chip') && segOf(ed) && !DIFF.on);
+const mcEditables = () => [...document.querySelectorAll('#doc [contenteditable=true]')].filter(mcUsable);
+const mcLo = (c) => Math.min(c.a, c.f), mcHi = (c) => Math.max(c.a, c.f);
+function mcCmp(x, y) {
+  if (x.ed !== y.ed) return x.ed.compareDocumentPosition(y.ed) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+  return mcLo(x) - mcLo(y) || mcHi(x) - mcHi(y);
+}
+const mcSorted = () => [...MC.cursors].sort(mcCmp);
+function mcRange(c) {
+  const r = document.createRange();
+  r.setStart(...mcPoint(c.ed, mcLo(c)));
+  r.setEnd(...mcPoint(c.ed, mcHi(c)));
+  return r;
+}
+// make a cursor the real selection
+function mcSelect(c) {
+  if (document.activeElement !== c.ed) c.ed.focus({ preventScroll: true });
+  const a = mcPoint(c.ed, c.a), f = mcPoint(c.ed, c.f);
+  getSelection().setBaseAndExtent(a[0], a[1], f[0], f[1]);
+  if (c.a === c.f) clampCaretToVisibleEnd();
+}
+// the real selection as a cursor, if it lies in one usable block
+function mcFromSelection() {
+  const s = getSelection();
+  if (!s.rangeCount) return null;
+  const ed = hostOf(s.anchorNode);
+  if (!mcUsable(ed) || hostOf(s.focusNode) !== ed) return null;
+  return { ed, a: mcOff(ed, s.anchorNode, s.anchorOffset), f: mcOff(ed, s.focusNode, s.focusOffset) };
+}
+// the real selection becomes the first cursor
+function mcStart() {
+  if (DIFF.on) { toast('Multiple cursors work outside the diff view'); return false; }
+  if (mcActive()) return true;
+  const c = mcFromSelection();
+  if (!c) { toast('Put the cursor in the text of a paragraph, heading or caption first', 'error'); return false; }
+  MC.cursors = [c]; MC.primary = c; MC.word = false; MC.dwimBlock = false;
+  return true;
+}
+// a banner about the cursors goes with them
+const MC_BANNER = 'Esc goes back to one.';
+function mcBannerOff() { const b = $('#banner'); if (b && !b.hidden && b.textContent.includes(MC_BANNER)) b.hidden = true; }
+function mcClear(keepBanner = false) {
+  MC.stamp = null;
+  if (MC.cursors.length > 1 && !keepBanner) mcBannerOff();
+  MC.cursors = []; MC.primary = null; MC.dwimBlock = false; MC.expand = -1;
+  cancelAnimationFrame(MC.raf); MC.raf = 0;
+  const layer = document.getElementById('mc-layer');
+  if (layer) layer.textContent = '';
+  if (window.CSS && CSS.highlights) CSS.highlights.delete('mc');
+}
+// across a render: each cursor by its block (file, place in the file, and
+// which editable text of the block) and the block's text
+function mcBeforeRender() {
+  if (!mcActive()) { if (MC.cursors.length) mcClear(); return null; }
+  const keep = MC.cursors.map((c) => {
+    const box = c.ed.closest('.seg'), seg = box && box.seg;
+    if (!seg || !FILES[seg.file] || !c.ed.isConnected) return null;
+    return { file: seg.file, index: (FILES[seg.file].segs || []).indexOf(seg), k: [...box.querySelectorAll('[contenteditable=true]')].indexOf(c.ed),
+      text: mcText(c.ed), a: c.a, f: c.f, primary: c === MC.primary };
+  });
+  mcClear(true);
+  return keep;
+}
+function mcAfterRender(keep) {
+  if (!keep || DIFF.on) return;
+  const at = (seg, k) => {
+    const eds = seg && seg.el ? [...seg.el.querySelectorAll('[contenteditable=true]')] : [];
+    const ed = eds[k.k];
+    return ed && mcUsable(ed) && mcText(ed) === k.text ? ed : null;
+  };
+  const cs = [];
+  for (const k of keep) {
+    if (!k) continue;
+    const segs = (FILES[k.file] && FILES[k.file].segs) || [];
+    const ed = at(segs[k.index], k) || segs.reduce((got, seg) => got || at(seg, k), null);
+    if (ed) cs.push({ ed, a: k.a, f: k.f, primary: k.primary });
+  }
+  if (cs.length < 2) { mcBannerOff(); return; }
+  MC.cursors = cs.map(({ ed, a, f }) => ({ ed, a, f }));
+  MC.primary = MC.cursors[cs.findIndex((c) => c.primary)] || MC.cursors[MC.cursors.length - 1];
+  mcSettle();
+  const a = document.activeElement;
+  if (mcActive() && a && a.closest && a.closest('#doc')) mcShowPrimary();
+  mcDraw();
+}
+// one cursor left: the editor's own end, the real selection stays
+function mcSettle() {
+  mcMerge();
+  if (MC.cursors.length > 1) { if (!MC.raf) MC.raf = requestAnimationFrame(mcLoop); return; }
+  const last = MC.cursors[0];
+  mcClear();
+  if (last && last.ed.isConnected) mcSelect(last);
+}
+// cursors that meet become one
+function mcMerge() {
+  const out = [];
+  for (const c of mcSorted()) {
+    if (!c.ed.isConnected) continue;
+    const p = out[out.length - 1];
+    if (p && p.ed === c.ed && (mcLo(c) < mcHi(p) || (mcLo(c) === mcHi(p) && (c.a === c.f || p.a === p.f)))) {
+      const lo = Math.min(mcLo(p), mcLo(c)), hi = Math.max(mcHi(p), mcHi(c));
+      const keep = c === MC.primary ? c : p;
+      if (keep.a <= keep.f) { keep.a = lo; keep.f = hi; } else { keep.a = hi; keep.f = lo; }
+      out[out.length - 1] = keep;
+      continue;
+    }
+    out.push(c);
+  }
+  MC.cursors = out;
+  if (!out.includes(MC.primary)) MC.primary = out[out.length - 1] || null;
+}
+// After each action the carets show without blinking for a moment, as the
+// browser's own does, then blink with it (else they could be off just when
+// one looks for them).
+function mcSteady() {
+  const layer = document.getElementById('mc-layer');
+  if (!layer) return;
+  layer.classList.add('steady');
+  clearTimeout(mcSteady.t);
+  mcSteady.t = setTimeout(() => layer.classList.remove('steady'), 530);
+}
+// the real selection back on the primary cursor, scrolled to if asked
+function mcShowPrimary(scroll) {
+  mcSteady();
+  const p = MC.primary;
+  if (!p || !p.ed.isConnected) return;
+  mcSelect(p);
+  if (!scroll) return;
+  const b = mcRange(p).getBoundingClientRect();
+  if (b.top < 80 || b.bottom > innerHeight - 40) {
+    const n = mcPoint(p.ed, p.f)[0];
+    (n.nodeType === 1 ? n : n.parentElement).scrollIntoView({ block: 'center' });
+  }
+}
+
+// ---- drawing: the selected text with a highlight, the carets as bars
+function mcCaretBox(r) {
+  const rs = r.getClientRects();
+  if (rs.length && rs[0].height) return { x: rs[0].left, top: rs[0].top, h: rs[0].height };
+  const n = r.startContainer, o = r.startOffset;
+  const q = document.createRange();
+  if (n.nodeType === 3 && n.data.length) {
+    if (o > 0) { q.setStart(n, o - 1); q.setEnd(n, o); const b = [...q.getClientRects()].pop(); if (b) return { x: b.right, top: b.top, h: b.height }; }
+    else { q.setStart(n, 0); q.setEnd(n, 1); const b = q.getClientRects()[0]; if (b) return { x: b.left, top: b.top, h: b.height }; }
+  }
+  const after = n.nodeType === 1 && n.childNodes[o], before = n.nodeType === 1 && n.childNodes[o - 1];
+  const k = after || before;
+  if (k) {
+    q.selectNode(k);
+    const b = q.getBoundingClientRect();
+    if (b.height) return { x: after ? b.left : b.right, top: b.top, h: b.height };
+  }
+  const host = n.nodeType === 1 ? n : n.parentElement;
+  const b = host.getBoundingClientRect();
+  return b.height ? { x: b.left, top: b.top, h: Math.min(b.height, parseFloat(getComputedStyle(host).fontSize) * 1.3) } : null;
+}
+function mcDraw() {
+  if (!mcActive()) return;
+  // a render, the figure viewer or a dialog: back to one cursor
+  if (MC.cursors.some((c) => !c.ed.isConnected) || topDialog() || !$('#figview').hidden || SRC.on) { mcClear(); return; }
+  let layer = document.getElementById('mc-layer');
+  if (!layer) { layer = el('div'); layer.id = 'mc-layer'; document.body.append(layer); }
+  const sel = [];
+  let i = 0;
+  for (const c of MC.cursors) {
+    if (c === MC.primary) continue;
+    // a selection is drawn as the real one is, without a caret
+    if (c.a !== c.f) { sel.push(mcRange(c)); continue; }
+    const f = document.createRange();
+    f.setStart(...mcPoint(c.ed, c.f));
+    const box = mcCaretBox(f);
+    const bar = layer.children[i] || layer.appendChild(el('div', 'mc-caret'));
+    i++;
+    if (!box) { bar.style.display = 'none'; continue; }
+    bar.style.display = '';
+    bar.style.left = box.x + 'px'; bar.style.top = box.top + 'px'; bar.style.height = box.h + 'px';
+  }
+  while (layer.children.length > i) layer.lastChild.remove();
+  if (window.CSS && CSS.highlights) CSS.highlights.set('mc', new Highlight(...sel));
+}
+// the state the drawing depends on: drawn again only when it changes
+const mcStamp = (list, extra) => [scrollX, scrollY, innerWidth, innerHeight, document.documentElement.scrollHeight, extra,
+  list.map((c) => c.a + ',' + c.f + (c.ed ? ',' + c.ed.offsetHeight : '')).join(';')].join('|');
+function mcLoop() {
+  MC.raf = 0;
+  if (!mcActive()) return;
+  const stamp = mcStamp(MC.cursors, MC.cursors.indexOf(MC.primary));
+  if (stamp !== MC.stamp || MC.cursors.some((c) => !c.ed.isConnected) || topDialog() || !$('#figview').hidden || SRC.on) { MC.stamp = stamp; mcDraw(); }
+  if (mcActive()) MC.raf = requestAnimationFrame(mcLoop);
+}
+
+// ---- an edit at every cursor
+//
+// fn runs with the real selection on each cursor in turn, last first; i is
+// the cursor's place in the paper (0 for the first).  kind: 'type' (typing,
+// one undo step per burst, as for one cursor), 'edit' (one undo step), or
+// 'move' (no change to the text).  check: the balance of braces and
+// environments is checked afterwards, as for an edit with one cursor.
+function mcEach(fn, { kind = 'edit', check = kind === 'edit' } = {}) {
+  if (!mcActive()) return;
+  if (kind === 'type') {
+    if (!typingSnap || typingIn !== MC) snapshot();
+    typingIn = MC;
+    clearTimeout(typingSnap);
+    typingSnap = setTimeout(() => { typingSnap = null; }, 1200);
+  } else if (kind === 'edit') { clearTimeout(typingSnap); typingSnap = null; typingIn = null; snapshot(); }
+  if (kind !== 'move') MC.expand = -1;
+  MC.dwimBlock = false;
+  const list = mcSorted();
+  const blocks = new Map();
+  if (check) for (const c of list) { const seg = segOf(c.ed); if (seg && seg.edit === c.ed && !blocks.has(seg)) blocks.set(seg, blockSource(seg)); }
+  MC.note = '';
+  MC.replaying = true;
+  try {
+    for (let i = list.length - 1; i >= 0; i--) {
+      const c = list[i];
+      if (!c.ed.isConnected) continue;
+      const len0 = mcText(c.ed).length;
+      mcSelect(c);
+      fn(c, i);
+      if (!c.ed.isConnected) continue;
+      const now = mcFromSelection();
+      if (now && now.ed === c.ed) { c.a = now.a; c.f = now.f; }
+      const len = mcText(c.ed).length;
+      c.a = Math.min(c.a, len); c.f = Math.min(c.f, len);
+      // the cursors after this one in its block, done already, move with the text
+      const d = len - len0;
+      for (let j = i + 1; j < list.length && list[j].ed === c.ed; j++) { list[j].a += d; list[j].f += d; }
+    }
+  } finally { MC.replaying = false; }
+  // (the browser's beforeinput for each edit took the burst as its own)
+  if (kind === 'type') typingIn = MC;
+  if (kind !== 'move') { markEditedSoon(); lastTyping = Date.now(); }
+  for (const [seg, before] of blocks) {
+    if (!seg.edit || !seg.edit.isConnected) continue;
+    const bad = brokenBalance(before, blockSource(seg));
+    if (!bad) continue;
+    restore(HISTORY.undo, HISTORY.redo);
+    HISTORY.redo.pop();
+    toast(`Undid that edit, which ${bad.removed ? 'removed' : 'added'} ${bad.tokens.join(', ')} on its own. The source view can change it.`);
+    return;
+  }
+  if (MC.note) toast(MC.note);
+  mcSettle();
+  mcShowPrimary(true);
+  mcDraw();
+}
+
+// a character typed (or a piece of text put in) at every cursor; brackets,
+// quotes and $ do over a selection what they do with one cursor
+function mcType(text) {
+  const over = MC.cursors.some((c) => c.a !== c.f);
+  mcEach(() => {
+    const s = getSelection();
+    if (!s.isCollapsed && WRAP_PAIRS[text]) { wrapLiteral(...WRAP_PAIRS[text]); return; }
+    if (text === '$') {
+      if (!s.isCollapsed) { mathAtSelection(); return; }
+      if (closeMathAtCaret()) return;
+    }
+    if (!s.isCollapsed) {
+      const r = s.getRangeAt(0).cloneRange();
+      if (unpairedEnvChips(envChipsIn(r)).length) { deleteKeepingEnvs(r); s.removeAllRanges(); s.addRange(r); }
+    }
+    document.execCommand('insertText', false, text);
+  }, { kind: over || text === '$' ? 'edit' : 'type', check: over });
+  // what is typed next joins this step, as with one cursor
+  if (mcActive()) {
+    typingIn = MC;
+    clearTimeout(typingSnap);
+    typingSnap = setTimeout(() => { typingSnap = null; }, 1200);
+  }
+}
+// Backspace (back) or Delete at every cursor, a character or a word; like
+// the keys with one cursor, they never take the start or the end of an
+// environment alone
+function mcDelete(back, unit = 'character') {
+  const key = back ? 'Backspace' : 'Delete';
+  // at the start (or end) of a block it would join two blocks
+  if (MC.cursors.some((c) => c.a === c.f && (back ? c.f === 0 : c.f === mcText(c.ed).length))) {
+    banner(`${key} at the ${back ? 'start' : 'end'} of a paragraph would join it with the ${back ? 'previous' : 'next'} one, which takes one cursor: Esc goes back to one.`);
+    return;
+  }
+  const stops = (m) => `${key} stops at the ${envOf(m)[1] === 'begin' ? 'start' : 'end'} of ${envName(m)}`;
+  mcEach((c) => {
+    const s = getSelection();
+    if (s.isCollapsed) {
+      const nb = neighbours(s.getRangeAt(0));
+      const n = back ? nb.before : nb.after;
+      if (unit === 'character' && !nb.inText && n && n.nodeType === 1 && n.classList.contains('chip') &&
+          (n.classList.contains('parbreak') || n.classList.contains('nl') || n.classList.contains('tie'))) {
+        let m = back ? n.previousSibling : n.nextSibling;
+        while (m && m.nodeType === 3 && !m.data) m = back ? m.previousSibling : m.nextSibling;
+        if (envOf(m)) { MC.note = stops(m); return; }
+        const r = document.createRange(); r.setStartBefore(n); r.collapse(true);
+        n.remove();
+        s.removeAllRanges(); s.addRange(r);
+        return;
+      }
+      s.modify('extend', back ? 'backward' : 'forward', unit);
+      if (s.isCollapsed || hostOf(s.focusNode) !== c.ed) { mcSelect(c); return; }
+      const lone = unpairedEnvChips(envChipsIn(s.getRangeAt(0)));
+      if (lone.length) { MC.note = stops(lone[0]); mcSelect(c); return; }
+      document.execCommand('delete');
+      return;
+    }
+    const r = s.getRangeAt(0).cloneRange();
+    if (unpairedEnvChips(envChipsIn(r)).length) { deleteKeepingEnvs(r); s.removeAllRanges(); s.addRange(r); return; }
+    document.execCommand('delete');
+  }, { kind: 'edit' });
+}
+// arrows, Home and End at every cursor, Shift extending; a cursor never
+// leaves its block
+function mcMove(key, extend, ctrl) {
+  const back = /Left|Up|Home/.test(key);
+  const unit = /Up|Down/.test(key) ? 'line' : /Home|End/.test(key) ? (ctrl ? 'paragraphboundary' : 'lineboundary') : ctrl ? 'word' : 'character';
+  mcEach(() => {
+    const s = getSelection();
+    if (!extend && !s.isCollapsed && unit === 'character') { if (back) s.collapseToStart(); else s.collapseToEnd(); return; }
+    s.modify(extend ? 'extend' : 'move', back ? 'backward' : 'forward', unit);
+  }, { kind: 'move' });
+}
+
+// ---- the clipboard: a copy takes the text at every cursor, one line each,
+// and a paste of as many lines as there are cursors puts one at each
+function mcClipboard(e, cut, line) {
+  const s = getSelection();
+  const pieces = [];
+  MC.replaying = true;
+  try {
+    for (const c of mcSorted()) {
+      mcSelect(c);
+      if (s.isCollapsed && line) selectLine();
+      const now = mcFromSelection();
+      if (s.isCollapsed || !now || now.ed !== c.ed) { pieces.push(null); continue; }
+      const r = snapOutOfChips(s.getRangeAt(0).cloneRange());
+      KEEP_UNICODE = ''; KEEP_MATH_UNICODE = '';
+      const frag = r.cloneContents();
+      pieces.push({ c, plain: plainOf(frag), latex: ser(frag), a: mcOff(c.ed, r.startContainer, r.startOffset), f: mcOff(c.ed, r.endContainer, r.endOffset) });
+    }
+  } finally { MC.replaying = false; }
+  const got = pieces.filter(Boolean);
+  e.preventDefault();
+  if (!got.length) { mcShowPrimary(); toast('Nothing is selected at the cursors'); return; }
+  e.clipboardData.setData('text/plain', got.map((p) => p.plain).join('\n'));
+  e.clipboardData.setData(LATEX_MIME, got.map((p) => p.latex).join('\n'));
+  MC.kill = { plain: got.map((p) => p.plain), latex: got.map((p) => p.latex) };
+  if (!cut) { mcShowPrimary(); toast(`Copied the text at ${got.length} cursors`); return; }
+  const at = new Map(got.map((p) => [p.c, p]));
+  mcEach((c) => {
+    const p = at.get(c);
+    if (!p) return;
+    mcSelect({ ed: c.ed, a: p.a, f: p.f });
+    const r = getSelection().getRangeAt(0).cloneRange();
+    deleteKeepingEnvs(r);
+    const s2 = getSelection(); s2.removeAllRanges(); s2.addRange(r);
+  }, { kind: 'edit' });
+}
+for (const type of ['copy', 'cut']) {
+  document.addEventListener(type, (e) => {
+    if (!mcActive() || MC.replaying || !e.target.closest || !e.target.closest('#doc') || /^(TEXTAREA|INPUT)$/.test(e.target.tagName)) return;
+    e.stopImmediatePropagation();
+    mcClipboard(e, type === 'cut' || !!(MC.clip && MC.clip.cut), !!(MC.clip && MC.clip.line));
+  }, true);
+}
+// C-w and M-w: the region, or the line, at every cursor
+function mcCopy(cut) {
+  MC.clip = { cut, line: true };
+  try { document.execCommand('copy'); } finally { MC.clip = null; }
+}
+document.addEventListener('paste', (e) => {
+  if (!mcActive() || MC.replaying || !e.target.closest || !e.target.closest('#doc') || /^(TEXTAREA|INPUT)$/.test(e.target.tagName)) return;
+  e.preventDefault(); e.stopImmediatePropagation();
+  const plain = e.clipboardData.getData('text/plain'), latex = e.clipboardData.getData(LATEX_MIME);
+  const n = MC.cursors.length;
+  let pieces;
+  const kill = MC.kill;
+  if (kill && kill.plain.length === n && kill.plain.join('\n') === plain) pieces = kill.plain.map((p, i) => ({ plain: p, latex: kill.latex[i] }));
+  else {
+    const lines = plain.replace(/\r\n?/g, '\n').replace(/\n$/, '').split('\n');
+    const ll = latex ? latex.replace(/\n$/, '').split('\n') : [];
+    pieces = lines.length === n && n > 1 ? lines.map((l, i) => ({ plain: l, latex: ll.length === n ? ll[i] : '' }))
+      : MC.cursors.map(() => ({ plain, latex }));
+  }
+  mcEach((c, i) => {
+    const dt = new DataTransfer();
+    dt.setData('text/plain', pieces[i].plain);
+    if (pieces[i].latex) dt.setData(LATEX_MIME, pieces[i].latex);
+    c.ed.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+  }, { kind: 'edit' });
+}, true);
+
+// ---- keys
+//
+// With more than one cursor, every action of the keymap either runs at each
+// cursor, runs once (the actions of the whole page, and those of the
+// cursors themselves), or is refused (those that change the page's
+// structure).
+const MC_EACH = { bold: 'edit', emph: 'edit', italic: 'edit', mono: 'edit', math: 'edit', deleteline: 'edit', duplicate: 'edit', deltospace: 'edit',
+  linestart: 'move', lineend: 'move', selstart: 'move', selend: 'move' };
+const MC_CLEARS = new Set(['nextheading', 'prevheading', 'nextblock', 'prevblock', 'source']);
+function mcGuard(id, label, scope, fn) {
+  if (/^mc/.test(id)) { fn.isMc = true; return fn; }
+  if (scope === 'global') return MC_CLEARS.has(id) ? () => { mcClear(); return fn(); } : fn;
+  return () => {
+    if (!mcActive()) return fn();
+    if (id === 'copyline') return mcCopy(false);
+    if (id === 'cut') return mcCopy(true);
+    if (id === 'delback') return mcDelete(true);
+    if (id === 'expand') return mcExpand();
+    if (id === 'math' && MC.cursors.some((c) => c.a === c.f)) { banner('Select text at every cursor to make it maths: a new formula takes one cursor.'); return; }
+    if (MC_EACH[id]) return mcEach(() => fn(), { kind: MC_EACH[id] });
+    banner(`${label} works with one cursor: Esc goes back to one.`);
+  };
+}
+// C-+ at every cursor: words, then lines, then blocks, all at one level
+function mcExpand() {
+  const lvl = MC.cursors.every((c) => c.a === c.f) ? 0 : Math.min(MC.expand + 1, 2);
+  mcEach((c) => {
+    if (lvl > 0) { expandLevel = lvl; expandAt = c.ed; }
+    expandRegion();
+  }, { kind: 'move' });
+  MC.expand = Math.max(lvl, 0);
+}
+// the keys the keymap does not bind: typing, deleting, moving
+document.addEventListener('keydown', (e) => {
+  if (!mcActive() || RECORDING || PREFIX || e.isComposing || ['Control', 'Alt', 'Shift', 'Meta'].includes(e.key)) return;
+  const t = e.target;
+  if (!t.isContentEditable || !t.closest || !t.closest('#doc')) return;
+  const k = keyName(e);
+  if (TEXT_KEYS[k] || GLOBAL_KEYS[k]) return;   // through mcGuard
+  const stop = () => { e.preventDefault(); e.stopImmediatePropagation(); };
+  if (e.metaKey) return;
+  if (e.key.length === 1 && !e.ctrlKey && !e.altKey) { stop(); mcType(e.key); return; }
+  if ((e.key === 'Backspace' || e.key === 'Delete') && !e.altKey) { stop(); mcDelete(e.key === 'Backspace', e.ctrlKey ? 'word' : 'character'); return; }
+  if (/^(Arrow(Left|Right|Up|Down)|Home|End)$/.test(e.key) && !e.altKey) { stop(); mcMove(e.key, e.shiftKey, e.ctrlKey); return; }
+  if (e.key === 'Enter' || e.key === 'Tab') { stop(); banner(`${e.key} would ${e.key === 'Enter' ? 'split a paragraph' : 'leave the text'}, which takes one cursor: Esc goes back to one.`); }
+}, true);
+// text put in without a key (a spelling suggestion, an input method's text)
+document.addEventListener('beforeinput', (e) => {
+  if (!mcActive() || MC.replaying || e.isComposing || !e.target.closest || !e.target.closest('#doc') || !e.target.isContentEditable) return;
+  // a spelling suggestion replaces its own word: back to one cursor for it
+  if (e.inputType === 'insertReplacementText') { mcClear(); return; }
+  if (e.inputType === 'insertText' && e.data) { e.preventDefault(); e.stopImmediatePropagation(); mcType(e.data); }
+}, true);
+// a dead key or an input method composes its text at the real cursor (the
+// browser lets no one else in); when it is done, the same text goes to the
+// other cursors
+document.addEventListener('compositionstart', (e) => {
+  MC.compose = mcActive() && e.target.closest && e.target.closest('#doc') && MC.primary ? { p: MC.primary, len: mcText(MC.primary.ed).length } : null;
+}, true);
+document.addEventListener('compositionend', (e) => {
+  const g = MC.compose;
+  MC.compose = null;
+  if (!g || !mcActive() || g.p !== MC.primary || !e.data || !g.p.ed.isConnected) return;
+  const p = g.p, d = mcText(p.ed).length - g.len;
+  for (const c of MC.cursors) if (c !== p && c.ed === p.ed && mcLo(c) >= mcHi(p)) { c.a += d; c.f += d; }
+  const now = mcFromSelection();
+  if (now && now.ed === p.ed) { p.a = now.a; p.f = now.f; }
+  const text = e.data;
+  mcEach((c) => { if (c !== p) document.execCommand('insertText', false, text); }, { kind: 'edit', check: false });
+}, true);
+// C-S-click adds a cursor (or takes away the one there); any other click
+// goes back to one cursor
+document.addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return;
+  if (e.ctrlKey && e.shiftKey && !e.altKey && e.target.closest && e.target.closest('#doc')) {
+    e.preventDefault(); e.stopImmediatePropagation();
+    MC.eatClick = true;   // the click that follows would open a formula, a reference
+    const at = pointAt(e.clientX, e.clientY);
+    const ed = at && hostOf(at.node);
+    if (!mcUsable(ed)) { toast('A cursor goes in the text of a paragraph, heading or caption'); return; }
+    if (!MC.cursors.length) { const c = mcFromSelection(); if (c) { MC.cursors = [c]; MC.primary = c; } }
+    const off = mcOff(ed, at.node, at.offset);
+    const there = MC.cursors.find((c) => c.ed === ed && c.a === c.f && c.f === off);
+    if (there && MC.cursors.length > 1) MC.cursors = MC.cursors.filter((c) => c !== there);
+    else if (!there) { const c = { ed, a: off, f: off }; MC.cursors.push(c); if (!MC.primary) MC.primary = c; }
+    mcSettle();
+    mcShowPrimary();
+    mcDraw();
+    return;
+  }
+  if (mcActive() && !(e.target.closest && e.target.closest('#findbar, #whichkey'))) mcClear();
+}, true);
+for (const type of ['mouseup', 'click']) {
+  document.addEventListener(type, (e) => {
+    if (!MC.eatClick) return;
+    e.preventDefault(); e.stopImmediatePropagation();
+    if (type === 'click') MC.eatClick = false;
+  }, true);
+}
+
+// ---- marking
+//
+// The text to look for: the selection of the primary cursor, or else the
+// word at it, which the first press selects.  A word found that way is
+// matched as a whole word only.
+function mcNeedle() {
+  const p = MC.primary;
+  if (p.a === p.f) {
+    const t = mcText(p.ed), w = /[\p{L}\p{N}_]/u;
+    let i = p.f, j = p.f;
+    while (i > 0 && w.test(t[i - 1])) i--;
+    while (j < t.length && w.test(t[j])) j++;
+    if (i === j) { toast('Put the cursor on a word, or select some text'); return null; }
+    p.a = i; p.f = j;
+    MC.word = true;
+  }
+  const needle = mcText(p.ed).slice(mcLo(p), mcHi(p));
+  if (needle.includes('\uFFFC')) { banner('Select text without formulas or references to mark it again.'); return null; }
+  return needle;
+}
+function mcOccurrences(needle, eds) {
+  const out = [], w = /[\p{L}\p{N}_]/u;
+  for (const ed of eds) {
+    const t = mcText(ed);
+    for (let i = t.indexOf(needle); i >= 0; i = t.indexOf(needle, i + 1)) {
+      if (MC.word && (w.test(t[i - 1] || '') || w.test(t[i + needle.length] || ''))) continue;
+      out.push({ ed, a: i, f: i + needle.length });
+    }
+  }
+  return out;
+}
+const mcTaken = (o) => MC.cursors.some((c) => c.ed === o.ed && mcLo(c) < o.f && o.a < mcHi(c));
+function mcNext(dir) {
+  if (SRC.on) return smcNext(dir);
+  const fresh = !mcActive();
+  if (fresh) { if (!mcStart()) return; MC.word = false; }
+  MC.dwimBlock = false;
+  const needle = mcNeedle();
+  if (needle === null) { if (fresh) mcClear(); return; }
+  const all = mcOccurrences(needle, mcEditables());
+  const sorted = mcSorted();
+  const ref = dir > 0 ? sorted[sorted.length - 1] : sorted[0];
+  const after = all.filter((o) => mcCmp(o, ref) > 0), before = all.filter((o) => mcCmp(o, ref) < 0);
+  const order = dir > 0 ? [...after, ...before] : [...before.reverse(), ...after.reverse()];
+  const next = order.find((o) => !mcTaken(o));
+  if (!next) {
+    toast(`No other “${needle}” in the paper`);
+    if (fresh) { const p = MC.primary; mcClear(); mcSelect(p); } else { mcShowPrimary(); mcDraw(); }
+    return;
+  }
+  MC.cursors.push(next);
+  MC.primary = next;
+  mcSettle();
+  mcShowPrimary(true);
+  mcDraw();
+  mcCount(`${MC.cursors.length} cursors`);
+}
+function mcUnmark(dir) {
+  if (SRC.on) return smcUnmark(dir);
+  if (!mcActive()) { toast('There is one cursor'); return; }
+  const sorted = mcSorted();
+  const gone = dir > 0 ? sorted[sorted.length - 1] : sorted[0];
+  MC.cursors = MC.cursors.filter((c) => c !== gone);
+  if (MC.primary === gone) { const rest = mcSorted(); MC.primary = dir > 0 ? rest[rest.length - 1] : rest[0]; }
+  mcSettle();
+  mcShowPrimary(true);
+  mcDraw();
+}
+// every occurrence in the paper, or in the primary cursor's block; from
+// the find bar, every match of the search
+function mcAll(scope) {
+  if (SRC.on) return smcAll(scope);
+  const bar = document.activeElement && document.activeElement.closest && document.activeElement.closest('#findbar');
+  if (bar) {
+    const cs = [];
+    for (const r of FIND.matches) {
+      const ed = hostOf(r.startContainer);
+      if (!mcUsable(ed) || hostOf(r.endContainer) !== ed) continue;
+      cs.push({ ed, a: mcOff(ed, r.startContainer, r.startOffset), f: mcOff(ed, r.endContainer, r.endOffset) });
+    }
+    if (!cs.length) { toast('No matches in the text to put cursors on'); return; }
+    const cur = FIND.matches[FIND.cur];
+    closeFind();
+    mcClear();
+    MC.cursors = cs; MC.word = false;
+    MC.primary = (cur && cs.find((c) => c.ed === hostOf(cur.startContainer) && c.a === mcOff(c.ed, cur.startContainer, cur.startOffset))) || cs[0];
+  } else {
+    const fresh = !mcActive();
+    if (fresh) { if (!mcStart()) return; MC.word = false; }
+    const needle = mcNeedle();
+    if (needle === null) { if (fresh) mcClear(); return; }
+    const p = MC.primary;
+    const found = mcOccurrences(needle, scope === 'block' ? [p.ed] : mcEditables());
+    MC.cursors = found.map((o) => (o.ed === p.ed && o.a === mcLo(p) ? p : o));
+    if (!MC.cursors.includes(p)) MC.cursors.push(p);
+  }
+  const n = MC.cursors.length;
+  mcSettle();
+  mcShowPrimary(true);
+  mcDraw();
+  mcCount(n > 1 ? `${n} cursors` : 'No other occurrence');
+}
+function mcDwim() {
+  if (SRC.on) return smcDwim();
+  if (mcActive() && MC.dwimBlock) { mcAll('paper'); return; }
+  mcAll('block');
+  MC.dwimBlock = mcActive();
+}
+// a cursor on each line of the selection, at the column of its end, as
+// the lines are drawn on the screen (lines out of the window get none)
+function mcLines() {
+  if (SRC.on) return smcLines();
+  const s = getSelection();
+  const r = selRange();
+  if (!r || r.collapsed) { banner('Select the lines first: a cursor goes on each line of the selection.'); return; }
+  const f = document.createRange();
+  f.setStart(s.focusNode, s.focusOffset);
+  const fb = mcCaretBox(f);
+  // every place between two characters of the selection, with where it is
+  // drawn (the boxes of the characters exist off screen too), by line
+  const lines = [];
+  const root = r.commonAncestorContainer.nodeType === 1 ? r.commonAncestorContainer : r.commonAncestorContainer.parentElement;
+  const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const q = document.createRange();
+  for (let n = w.nextNode(); n; n = w.nextNode()) {
+    if (!r.intersectsNode(n) || !n.data.trim() || (n.parentElement && n.parentElement.closest('.chip')) || !mcUsable(hostOf(n))) continue;
+    const from = n === r.startContainer ? r.startOffset : 0, to = n === r.endContainer ? r.endOffset : n.data.length;
+    for (let i = from; i < to; i++) {
+      q.setStart(n, i); q.setEnd(n, i + 1);
+      const b = q.getClientRects()[0];
+      if (!b || !b.height) continue;
+      const mid = (b.top + b.bottom) / 2;
+      let l = lines.find((x) => mid >= x.top && mid <= x.bottom);
+      if (!l) lines.push(l = { top: b.top, bottom: b.bottom, at: [] });
+      l.at.push([n, i, b.left], [n, i + 1, b.right]);
+    }
+    if (n === r.endContainer) break;
+  }
+  const x = fb ? fb.x : 0;
+  const cs = [];
+  for (const l of lines.sort((a, b) => a.top - b.top)) {
+    const [n, i] = l.at.reduce((best, p) => (Math.abs(p[2] - x) < Math.abs(best[2] - x) ? p : best));
+    const ed = hostOf(n);
+    const off = mcOff(ed, n, i);
+    cs.push({ ed, a: off, f: off });
+  }
+  if (cs.length < 2) { toast('The selection is one line'); return; }
+  mcClear();
+  MC.cursors = cs; MC.primary = cs[cs.length - 1]; MC.word = false;
+  mcSettle();
+  mcShowPrimary();
+  mcDraw();
+  mcCount(`${MC.cursors.length} cursors`);
+}
+function mcNumbers() {
+  if (SRC.on) return smcNumbers();
+  if (!mcActive()) { toast('Insert numbers needs more than one cursor'); return; }
+  mcEach((c, i) => document.execCommand('insertText', false, String(i)), { kind: 'edit', check: false });
+}
 
 // "C-M-r" -> "Ctrl+Alt+R"
 const prettyKey = (k) => k.replace(/^((?:[CMS]-)*)(.+)$/, (_, mods, key) =>
@@ -10281,6 +11041,7 @@ function buildSourceView() {
     SRC.snap = Date.now();
   });
   ta.addEventListener('input', () => {
+    if (SRC.quiet) return;
     paintSource();
     const name = SRC.name;
     if (srcDoc(name)) {
@@ -10686,7 +11447,7 @@ function refreshSourceView() {
 // ---- editing keys of the source view (your Emacs bindings by default).
 // Every change goes through insertText, so the text's own undo (Ctrl+Z)
 // takes it back.
-const srcTa = () => $('#srcta');
+const srcTa = () => SMC.shadow || $('#srcta');
 function srcLineBounds(ta, a = ta.selectionStart, b = ta.selectionEnd) {
   const v = ta.value;
   const start = v.lastIndexOf('\n', a - 1) + 1;
@@ -10695,6 +11456,12 @@ function srcLineBounds(ta, a = ta.selectionStart, b = ta.selectionEnd) {
   return [start, end];
 }
 function srcReplace(ta, a, b, text) {
+  if (ta.shadow) {
+    if (a !== b || text) ta.ops.push([a, b, text]);
+    ta.value = ta.value.slice(0, a) + text + ta.value.slice(b);
+    ta.setSelectionRange(a + text.length, a + text.length);
+    return;
+  }
   ta.focus();
   ta.setSelectionRange(a, b);
   if (!document.execCommand('insertText', false, text)) { ta.setRangeText(text, a, b, 'end'); ta.dispatchEvent(new Event('input')); }
@@ -10803,6 +11570,511 @@ const SOURCE_ACTIONS = {
     srcReplace(ta, ta.selectionStart, ta.selectionEnd, '\n' + ind);
   },
 };
+
+// ---- multiple cursors in the source view
+//
+// The cursors are offsets in the text of #srcta, as anchor and focus.  An
+// edit runs at each cursor, last first, on a copy of the text (SMC.shadow,
+// which srcTa() then returns, so that SOURCE_ACTIONS work unchanged), and
+// the result goes into the text in one insertText: one step of the text's
+// own undo.  The highlighted copy of the text (#srchl) gives the places to
+// draw the other cursors.
+const smcActive = () => !!SRC.on && SMC.cursors.length > 1;
+const smcLo = (c) => Math.min(c.a, c.f), smcHi = (c) => Math.max(c.a, c.f);
+const smcSorted = () => [...SMC.cursors].sort((x, y) => smcLo(x) - smcLo(y) || smcHi(x) - smcHi(y));
+function smcShadow(value) {
+  return { shadow: true, value, ops: [], selectionStart: 0, selectionEnd: 0, selectionDirection: 'none', readOnly: false, scrollTop: 0, clientHeight: 0,
+    focus() {}, dispatchEvent() {},
+    setSelectionRange(a, b, d = 'none') { if (b < a) a = b; this.selectionStart = a; this.selectionEnd = b; this.selectionDirection = d; } };
+}
+function smcFromTa(ta) {
+  const back = ta.selectionDirection === 'backward';
+  return { a: back ? ta.selectionEnd : ta.selectionStart, f: back ? ta.selectionStart : ta.selectionEnd };
+}
+function smcToTa(ta, c) { ta.setSelectionRange(smcLo(c), smcHi(c), c.f < c.a ? 'backward' : 'forward'); }
+function smcStart() {
+  const ta = $('#srcta');
+  if (!ta || ta.readOnly) { toast(ta && ta.readOnly ? 'Preview only: turn it off to edit here' : 'Open the source view first'); return false; }
+  if (smcActive()) return true;
+  const c = smcFromTa(ta);
+  SMC.cursors = [c]; SMC.primary = c; SMC.word = false; SMC.dwimBlock = false; SMC.value = ta.value;
+  return true;
+}
+function smcClear() {
+  SMC.stamp = null;
+  if (SMC.cursors.length > 1) mcBannerOff();
+  SMC.cursors = []; SMC.primary = null; SMC.dwimBlock = false; SMC.value = null;
+  cancelAnimationFrame(SMC.raf); SMC.raf = 0;
+  const layer = document.getElementById('mc-layer');
+  if (layer && !mcActive()) layer.textContent = '';
+  if (window.CSS && CSS.highlights && !mcActive()) CSS.highlights.delete('mc');
+}
+function smcMerge() {
+  const out = [];
+  for (const c of smcSorted()) {
+    const p = out[out.length - 1];
+    if (p && (smcLo(c) < smcHi(p) || (smcLo(c) === smcHi(p) && (c.a === c.f || p.a === p.f)))) {
+      const lo = Math.min(smcLo(p), smcLo(c)), hi = Math.max(smcHi(p), smcHi(c));
+      const keep = c === SMC.primary ? c : p;
+      if (keep.a <= keep.f) { keep.a = lo; keep.f = hi; } else { keep.a = hi; keep.f = lo; }
+      out[out.length - 1] = keep;
+      continue;
+    }
+    out.push(c);
+  }
+  SMC.cursors = out;
+  if (!out.includes(SMC.primary)) SMC.primary = out[out.length - 1] || null;
+}
+// the real selection on the primary cursor, scrolled to; one cursor left ends it
+function smcShow() {
+  smcMerge();
+  const ta = $('#srcta');
+  const p = SMC.primary;
+  if (SMC.cursors.length < 2) { smcClear(); if (p) { ta.focus(); smcToTa(ta, p); } return; }
+  ta.focus();
+  smcToTa(ta, p);
+  SMC.value = ta.value;
+  mcSteady();
+  const line = ta.value.slice(0, p.f).split('\n').length, y = srcLineTop(line);
+  if (y < ta.scrollTop || y > ta.scrollTop + ta.clientHeight - 30) { ta.scrollTop = Math.max(0, y - ta.clientHeight / 3); ta.dispatchEvent(new Event('scroll')); }
+  ta.dispatchEvent(new Event('keyup'));
+  if (!SMC.raf) SMC.raf = requestAnimationFrame(smcLoop);
+}
+// Esc, C-g: back to the primary cursor alone
+smcShow.one = () => {
+  const p = SMC.primary;
+  smcClear();
+  if (p) smcToTa($('#srcta'), p);
+};
+// an edit at every cursor (fn gets the copy of the text, with the cursor
+// as its selection), or, with move, a change of the cursors only
+function smcEach(fn) {
+  const ta = $('#srcta');
+  if (ta.readOnly) { toast('Preview only: turn it off to edit here'); return; }
+  const before = ta.value;
+  const sh = smcShadow(before);
+  const list = smcSorted();
+  const was = smcSave();
+  SMC.dwimBlock = false;
+  SMC.shadow = sh;
+  try {
+    for (let i = list.length - 1; i >= 0; i--) {
+      const c = list[i];
+      const len0 = sh.value.length;
+      smcToTa(sh, c);
+      fn(sh, c, i);
+      Object.assign(c, smcFromTa(sh));
+      const d = sh.value.length - len0;
+      for (let j = i + 1; j < list.length; j++) { list[j].a += d; list[j].f += d; }
+    }
+  } finally { SMC.shadow = null; }
+  if (sh.ops.length) {
+    // the same small edits, in the same order, in the text itself: each is a
+    // step of the text's own undo (a single replacement of the whole span
+    // would be one step, but Chrome takes seconds to insert text with many
+    // lines); the view is drawn again once, at the end
+    SRC.quiet = true;
+    try { for (const [a, b, t] of sh.ops) srcReplace(ta, a, b, t); } finally { SRC.quiet = false; }
+    if (ta.value !== sh.value) { ta.setRangeText(sh.value, 0, ta.value.length); SMC.undo = []; }
+    else { SMC.undo.push({ n: sh.ops.length, at: ta.value, cursors: was, after: null }); SMC.redo = []; }
+    ta.dispatchEvent(new Event('input'));
+  }
+  smcShow();
+  if (sh.ops.length && SMC.undo.length && SMC.undo[SMC.undo.length - 1].at === ta.value) SMC.undo[SMC.undo.length - 1].after = smcSave();
+}
+// the cursors as they are (for undo and redo), and back
+function smcSave() { return { list: SMC.cursors.map((c) => ({ a: c.a, f: c.f })), primary: SMC.cursors.indexOf(SMC.primary) }; }
+function smcLoad(st) {
+  if (!st || st.list.length < 2) return false;
+  SMC.cursors = st.list.map((c) => ({ ...c }));
+  SMC.primary = SMC.cursors[st.primary] || SMC.cursors[SMC.cursors.length - 1];
+  return true;
+}
+function smcType(ch) {
+  smcEach((ta) => {
+    const a = ta.selectionStart, b = ta.selectionEnd;
+    const pair = { '{': '}', '(': ')', '[': ']', $: '$' }[ch];
+    if (pair && a !== b) {
+      const inner = ta.value.slice(a, b);
+      srcReplace(ta, a, b, ch + inner + pair);
+      ta.setSelectionRange(a + 1, a + 1 + inner.length);
+      return;
+    }
+    srcReplace(ta, a, b, ch);
+  });
+}
+const SMC_WORD = /[\p{L}\p{N}_@]/u;
+function smcDelete(back, word) {
+  smcEach((ta) => {
+    const v = ta.value, a = ta.selectionStart, b = ta.selectionEnd;
+    if (a !== b) { srcReplace(ta, a, b, ''); return; }
+    if (back) {
+      let i = a - 1;
+      if (word) { i = a; while (i > 0 && !SMC_WORD.test(v[i - 1]) && v[i - 1] !== '\n') i--; while (i > 0 && SMC_WORD.test(v[i - 1])) i--; if (i === a) i = a - 1; }
+      if (i >= 0) srcReplace(ta, i, a, '');
+    } else {
+      let j = a + 1;
+      if (word) { j = a; while (j < v.length && !SMC_WORD.test(v[j]) && v[j] !== '\n') j++; while (j < v.length && SMC_WORD.test(v[j])) j++; if (j === a) j = a + 1; }
+      if (j <= v.length) srcReplace(ta, a, j, '');
+    }
+  });
+}
+// arrows, Home and End at every cursor (Up and Down keep the column the
+// cursor had, as Emacs does)
+function smcMove(key, extend, ctrl) {
+  const v = $('#srcta').value;
+  const lineStart = (o) => v.lastIndexOf('\n', o - 1) + 1;
+  const lineEnd = (o) => { const e = v.indexOf('\n', o); return e < 0 ? v.length : e; };
+  for (const c of SMC.cursors) {
+    let f = c.f;
+    if (!/Up|Down/.test(key)) c.goal = undefined;
+    if (!extend && c.a !== c.f && /Left|Right/.test(key) && !ctrl) f = /Left/.test(key) ? smcLo(c) : smcHi(c);
+    else if (key === 'ArrowLeft') {
+      if (ctrl) { f = c.f; while (f > 0 && !SMC_WORD.test(v[f - 1])) f--; while (f > 0 && SMC_WORD.test(v[f - 1])) f--; } else f = Math.max(0, c.f - 1);
+    } else if (key === 'ArrowRight') {
+      if (ctrl) { f = c.f; while (f < v.length && !SMC_WORD.test(v[f])) f++; while (f < v.length && SMC_WORD.test(v[f])) f++; } else f = Math.min(v.length, c.f + 1);
+    } else if (key === 'Home') f = ctrl ? 0 : lineStart(c.f);
+    else if (key === 'End') f = ctrl ? v.length : lineEnd(c.f);
+    else {
+      const s = lineStart(c.f);
+      if (c.goal === undefined) c.goal = c.f - s;
+      if (key === 'ArrowUp') { if (s === 0) f = 0; else { const ps = lineStart(s - 1); f = Math.min(ps + c.goal, s - 1); } }
+      else { const e = lineEnd(c.f); if (e === v.length) f = v.length; else { const ns = e + 1; f = Math.min(ns + c.goal, lineEnd(ns)); } }
+    }
+    c.f = f;
+    if (!extend) c.a = f;
+  }
+  smcShow();
+}
+// the text at each cursor: the selection, or the line
+function smcPieces() {
+  const v = $('#srcta').value;
+  return smcSorted().map((c) => {
+    if (c.a !== c.f) return { c, text: v.slice(smcLo(c), smcHi(c)), a: smcLo(c), b: smcHi(c) };
+    const [a, b] = srcLineBounds({ value: v }, c.f, c.f);
+    return { c, text: v.slice(a, b), a, b: Math.min(v.length, b + 1) };
+  });
+}
+function smcCopy(cut, clipboardData) {
+  const ps = smcPieces();
+  const text = ps.map((p) => p.text).join('\n');
+  SMC.kill = ps.map((p) => p.text);
+  if (clipboardData) clipboardData.setData('text/plain', text); else srcClip(text);
+  if (!cut) { toast(`Copied the text at ${ps.length} cursors`); return; }
+  const at = new Map(ps.map((p) => [p.c, p]));
+  smcEach((ta, c) => { const p = at.get(c); srcReplace(ta, p.a, p.b, ''); });
+}
+function smcPaste(text) {
+  const n = SMC.cursors.length;
+  const lines = text.replace(/\r\n?/g, '\n').replace(/\n$/, '').split('\n');
+  const pieces = SMC.kill && SMC.kill.length === n && SMC.kill.join('\n') === text ? SMC.kill
+    : lines.length === n ? lines : null;
+  smcEach((ta, c, i) => srcReplace(ta, ta.selectionStart, ta.selectionEnd, pieces ? pieces[i] : text));
+}
+// the word at the primary cursor (selected by the first press), or its selection
+function smcNeedle() {
+  const v = $('#srcta').value, p = SMC.primary;
+  if (p.a === p.f) {
+    let i = p.f, j = p.f;
+    while (i > 0 && SMC_WORD.test(v[i - 1])) i--;
+    while (j < v.length && SMC_WORD.test(v[j])) j++;
+    if (i === j) { toast('Put the cursor on a word, or select some text'); return null; }
+    p.a = i; p.f = j; SMC.word = true;
+  }
+  return v.slice(smcLo(p), smcHi(p));
+}
+function smcOccurrences(needle, from = 0, to = Infinity) {
+  const v = $('#srcta').value, out = [];
+  for (let i = v.indexOf(needle, from); i >= 0 && i + needle.length <= to; i = v.indexOf(needle, i + 1)) {
+    if (SMC.word && (SMC_WORD.test(v[i - 1] || '') || SMC_WORD.test(v[i + needle.length] || ''))) continue;
+    out.push({ a: i, f: i + needle.length });
+  }
+  return out;
+}
+const smcTaken = (o) => SMC.cursors.some((c) => smcLo(c) < o.f && o.a < smcHi(c));
+function smcNext(dir) {
+  const fresh = !smcActive();
+  if (fresh && !smcStart()) return;
+  SMC.dwimBlock = false;
+  const needle = smcNeedle();
+  if (needle === null) { if (fresh) smcClear(); return; }
+  const all = smcOccurrences(needle), sorted = smcSorted();
+  const ref = dir > 0 ? smcHi(sorted[sorted.length - 1]) : smcLo(sorted[0]);
+  const order = dir > 0 ? [...all.filter((o) => o.a >= ref), ...all.filter((o) => o.a < ref)]
+    : [...all.filter((o) => o.f <= ref).reverse(), ...all.filter((o) => o.f > ref).reverse()];
+  const next = order.find((o) => !smcTaken(o));
+  if (!next) { toast(`No other “${needle}” in this file`); if (fresh) { const p = SMC.primary; smcClear(); smcToTa($('#srcta'), p); } else smcShow(); return; }
+  SMC.cursors.push(next);
+  SMC.primary = next;
+  smcShow();
+  mcCount(`${SMC.cursors.length} cursors`);
+}
+function smcUnmark(dir) {
+  if (!smcActive()) { toast('There is one cursor'); return; }
+  const sorted = smcSorted();
+  const gone = dir > 0 ? sorted[sorted.length - 1] : sorted[0];
+  SMC.cursors = SMC.cursors.filter((c) => c !== gone);
+  if (SMC.primary === gone) { const rest = smcSorted(); SMC.primary = dir > 0 ? rest[rest.length - 1] : rest[0]; }
+  smcShow();
+}
+// every occurrence in the file, or in the paragraph (the lines between blank ones)
+function smcAll(scope) {
+  const fresh = !smcActive();
+  if (fresh && !smcStart()) return;
+  const needle = smcNeedle();
+  if (needle === null) { if (fresh) smcClear(); return; }
+  const v = $('#srcta').value, p = SMC.primary;
+  let from = 0, to = v.length;
+  if (scope === 'block') {
+    const blank = /\n[ \t]*\n/g;
+    let m;
+    while ((m = blank.exec(v))) { if (m.index + m[0].length <= smcLo(p)) from = m.index + m[0].length; else if (m.index >= smcHi(p)) { to = m.index; break; } }
+  }
+  const found = smcOccurrences(needle, from, to);
+  SMC.cursors = found.map((o) => (o.a === smcLo(p) ? p : o));
+  if (!SMC.cursors.includes(p)) SMC.cursors.push(p);
+  const n = SMC.cursors.length;
+  smcShow();
+  mcCount(n > 1 ? `${n} cursors` : 'No other occurrence');
+}
+function smcDwim() {
+  if (smcActive() && SMC.dwimBlock) { smcAll('paper'); return; }
+  smcAll('block');
+  SMC.dwimBlock = smcActive();
+}
+// a cursor on each line of the selection, at the column of its end (a
+// line too short gets one at its end), as Emacs's edit-lines
+function smcLines() {
+  const ta = $('#srcta');
+  if (ta.readOnly) { toast('Preview only: turn it off to edit here'); return; }
+  const c = smcActive() ? SMC.primary : smcFromTa(ta);
+  if (c.a === c.f) { banner('Select the lines first: a cursor goes on each line of the selection.'); return; }
+  const v = ta.value;
+  const lo = smcLo(c);
+  let hi = smcHi(c);
+  if (hi > lo && v[hi - 1] === '\n') hi--;          // a selection to the start of a line leaves that line out
+  const col = c.f - (v.lastIndexOf('\n', c.f - 1) + 1);
+  const cs = [];
+  for (let s = v.lastIndexOf('\n', lo - 1) + 1; s <= hi; ) {
+    let e = v.indexOf('\n', s);
+    if (e < 0) e = v.length;
+    const o = Math.min(s + col, e);
+    cs.push({ a: o, f: o });
+    s = e + 1;
+    if (e === v.length) break;
+  }
+  if (cs.length < 2) { toast('The selection is one line'); return; }
+  SMC.cursors = cs; SMC.primary = cs[cs.length - 1]; SMC.word = false; SMC.dwimBlock = false;
+  smcShow();
+  mcCount(`${cs.length} cursors`);
+}
+function smcNumbers() {
+  if (!smcActive()) { toast('Insert numbers needs more than one cursor'); return; }
+  smcEach((ta, c, i) => srcReplace(ta, ta.selectionStart, ta.selectionEnd, String(i)));
+}
+
+// ---- drawing, from the rows of #srchl (one per line of the text)
+// the start of every line, for smcLine
+function smcStarts(v) {
+  const out = [0];
+  for (let i = v.indexOf('\n'); i >= 0; i = v.indexOf('\n', i + 1)) out.push(i + 1);
+  return out;
+}
+function smcLine(starts, off) {
+  let lo = 0, hi = starts.length - 1;
+  while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (starts[mid] <= off) lo = mid; else hi = mid - 1; }
+  return lo;
+}
+function smcPoint(rows, starts, off) {
+  const line = smcLine(starts, off);
+  const row = rows[line];
+  if (!row) return null;
+  let col = off - starts[line];
+  const w = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
+  let n, last = null;
+  while ((n = w.nextNode())) {
+    if (n.data === '​') return [n, 0];
+    if (col <= n.data.length) return [n, col];
+    col -= n.data.length;
+    last = n;
+  }
+  return last ? [last, last.data.length] : [row, 0];
+}
+function smcDraw() {
+  const ta = $('#srcta');
+  if (SMC.compose) return;   // the text changes under a composition; its end catches up
+  if (!smcActive() || !ta || ta.value !== SMC.value || mcActive()) { smcClear(); return; }
+  const rows = $('#srchl').children, v = ta.value;
+  if (SMC.startsFor !== v) { SMC.starts = smcStarts(v); SMC.startsFor = v; }
+  const starts = SMC.starts;
+  // only the lines in the window are looked at
+  const first = Math.max(0, srcTopLine() - 2), last = first + Math.ceil(ta.clientHeight / 12) + 4;
+  let layer = document.getElementById('mc-layer');
+  if (!layer) { layer = el('div'); layer.id = 'mc-layer'; document.body.append(layer); }
+  const box = $('#srcwrap').getBoundingClientRect();
+  if (!rows.length) { smcDrawPlain(ta, starts, first, last, layer, box); return; }
+  const sel = [];
+  let i = 0;
+  for (const c of SMC.cursors) {
+    if (c === SMC.primary) continue;
+    const lf = smcLine(starts, c.f), ll = smcLine(starts, smcLo(c)), lh = smcLine(starts, smcHi(c));
+    if (lh < first || ll > last) continue;
+    const f = lf >= first && lf <= last ? smcPoint(rows, starts, c.f) : null;
+    if (c.a !== c.f) {
+      const a = smcPoint(rows, starts, smcLo(c)), b = smcPoint(rows, starts, smcHi(c));
+      if (a && b) { const r = document.createRange(); r.setStart(...a); r.setEnd(...b); sel.push(r); }
+      continue;
+    }
+    if (!f) continue;
+    const r = document.createRange();
+    r.setStart(...f);
+    const cb = mcCaretBox(r);
+    const bar = layer.children[i] || layer.appendChild(el('div', 'mc-caret'));
+    i++;
+    const shown = cb && cb.top + cb.h > box.top && cb.top < box.bottom && cb.x >= box.left - 1 && cb.x <= box.right;
+    bar.style.display = shown ? '' : 'none';
+    if (shown) { bar.style.left = cb.x + 'px'; bar.style.top = cb.top + 'px'; bar.style.height = cb.h + 'px'; }
+  }
+  while (layer.children.length > i) layer.lastChild.remove();
+  if (window.CSS && CSS.highlights) CSS.highlights.set('mc', new Highlight(...sel));
+}
+// A file too large for colours (#srchl is empty, the text draws itself): with
+// long lines not wrapped, a place is its line times the line height and its
+// column times the width of a character (the font is monospaced); wrapped,
+// the cursors work but are not drawn, which a toast says once.
+function smcDrawPlain(ta, starts, first, last, layer, box) {
+  if (window.CSS && CSS.highlights) CSS.highlights.delete('mc');
+  if (SRC.wrap) {
+    layer.textContent = '';
+    if (SMC.saidPlain !== SRC.name) { SMC.saidPlain = SRC.name; toast('In a file this large the other cursors are drawn only with Wrap off; they work either way'); }
+    return;
+  }
+  const cs = getComputedStyle(ta), lh = parseFloat(cs.lineHeight) || 18;
+  if (SMC.chFont !== cs.font) {
+    const ctx = document.createElement('canvas').getContext('2d');
+    ctx.font = cs.font;
+    SMC.ch = ctx.measureText('M'.repeat(100)).width / 100;
+    SMC.chFont = cs.font;
+  }
+  const tab = parseInt(cs.tabSize, 10) || 4, tb = ta.getBoundingClientRect(), v = ta.value;
+  let i = 0;
+  for (const c of SMC.cursors) {
+    if (c === SMC.primary || c.a !== c.f) continue;
+    const line = smcLine(starts, c.f);
+    if (line < first || line > last) continue;
+    let col = 0;
+    for (let k = starts[line]; k < c.f; k++) col = v[k] === '\t' ? (Math.floor(col / tab) + 1) * tab : col + 1;
+    const x = tb.left + parseFloat(cs.paddingLeft) + col * SMC.ch - ta.scrollLeft;
+    const top = tb.top + parseFloat(cs.paddingTop) + line * lh - ta.scrollTop;
+    const bar = layer.children[i] || layer.appendChild(el('div', 'mc-caret'));
+    i++;
+    const shown = top + lh > box.top && top < box.bottom && x >= box.left - 1 && x <= box.right;
+    bar.style.display = shown ? '' : 'none';
+    if (shown) { bar.style.left = x + 'px'; bar.style.top = top + 'px'; bar.style.height = lh + 'px'; }
+  }
+  while (layer.children.length > i) layer.lastChild.remove();
+}
+function smcLoop() {
+  SMC.raf = 0;
+  if (!smcActive()) { smcClear(); return; }
+  const ta = $('#srcta');
+  const stamp = mcStamp(SMC.cursors, [SMC.cursors.indexOf(SMC.primary), ta.scrollTop, ta.scrollLeft, ta.clientWidth, ta.value.length, $('#srchl').childElementCount, SRC.wrap, $('#srchl').offsetHeight].join(','));
+  if (stamp !== SMC.stamp || ta.value !== SMC.value || mcActive()) { SMC.stamp = stamp; smcDraw(); }
+  if (smcActive()) SMC.raf = requestAnimationFrame(smcLoop);
+}
+
+// ---- keys and the mouse in the source text
+const SMC_EACH = new Set(['src-linestart', 'src-lineend', 'src-selstart', 'src-selend', 'src-deleteline', 'src-duplicate', 'src-delback',
+  'src-deltospace', 'src-indent', 'src-unindent', 'src-newline', 'src-comment']);
+function smcGuard(id, label, fn) {
+  return () => {
+    if (!smcActive()) return fn();
+    if (id === 'src-copy') return smcCopy(false);
+    if (id === 'src-cut') return smcCopy(true);
+    if (SMC_EACH.has(id)) return smcEach(() => fn());
+    if (id === 'src-goto') { smcClear(); return fn(); }
+    banner(`${label.replace(/^Source: /, '')} works with one cursor: Esc goes back to one.`);
+  };
+}
+document.addEventListener('keydown', (e) => {
+  if (RECORDING || PREFIX || e.isComposing || ['Control', 'Alt', 'Shift', 'Meta'].includes(e.key) || e.target.id !== 'srcta') return;
+  const k = keyName(e);
+  // Ctrl+Z after an edit at many cursors takes all of it back at once (the
+  // text's own undo, as many steps as the edit made), and Ctrl+Shift+Z or
+  // Ctrl+Y redoes it
+  if ((k === 'C-z' || k === 'C-Z' || k === 'C-y') && !e.target.readOnly) {
+    const redo = k !== 'C-z', from = redo ? SMC.redo : SMC.undo, to = redo ? SMC.undo : SMC.redo;
+    const top = from[from.length - 1], ta = e.target;
+    if (top && top.at === ta.value) {
+      e.preventDefault(); e.stopImmediatePropagation();
+      from.pop();
+      smcClear();
+      SRC.quiet = true;
+      try { for (let i = 0; i < top.n; i++) document.execCommand(redo ? 'redo' : 'undo'); } finally { SRC.quiet = false; }
+      to.push({ n: top.n, at: ta.value, cursors: top.cursors, after: top.after });
+      ta.dispatchEvent(new Event('input'));
+      // the cursors come back where they were before (or after) the edit
+      if (smcLoad(redo ? top.after : top.cursors)) smcShow();
+      return;
+    }
+  }
+  // C-> and the other marking keys (the chords go through the prefix keys)
+  const g = GLOBAL_KEYS[k];
+  if (g && g.isMc) { e.preventDefault(); e.stopImmediatePropagation(); g(); return; }
+  if (!smcActive() || SOURCE_KEYS[k] || GLOBAL_KEYS[k] || e.metaKey) return;
+  if (e.target.readOnly) return;
+  const stop = () => { e.preventDefault(); e.stopImmediatePropagation(); };
+  if (e.key.length === 1 && !e.ctrlKey && !e.altKey) { stop(); smcType(e.key); return; }
+  if ((e.key === 'Backspace' || e.key === 'Delete') && !e.altKey) { stop(); smcDelete(e.key === 'Backspace', e.ctrlKey); return; }
+  if (/^(Arrow(Left|Right|Up|Down)|Home|End)$/.test(e.key) && !e.altKey) { stop(); smcMove(e.key, e.shiftKey, e.ctrlKey); }
+}, true);
+for (const type of ['copy', 'cut']) {
+  addEventListener(type, (e) => {
+    if (!smcActive() || e.target.id !== 'srcta') return;
+    e.preventDefault(); e.stopImmediatePropagation();
+    smcCopy(type === 'cut', e.clipboardData);
+  }, true);
+}
+addEventListener('paste', (e) => {
+  if (!smcActive() || e.target.id !== 'srcta' || e.target.readOnly) return;
+  e.preventDefault(); e.stopImmediatePropagation();
+  smcPaste(e.clipboardData.getData('text/plain').replace(PASTE_INVISIBLE_RE, ''));
+}, true);
+addEventListener('beforeinput', (e) => {
+  if (!smcActive() || e.target.id !== 'srcta' || SMC.shadow || SRC.quiet || e.isComposing) return;
+  if (e.inputType === 'insertReplacementText') { smcClear(); return; }
+  if (e.inputType === 'insertText' && e.data) { e.preventDefault(); e.stopImmediatePropagation(); smcType(e.data); }
+}, true);
+// a dead key or an input method: its text goes to the other cursors at the end
+addEventListener('compositionstart', (e) => {
+  SMC.compose = smcActive() && e.target.id === 'srcta' ? { p: SMC.primary, len: e.target.value.length } : null;
+}, true);
+addEventListener('compositionend', (e) => {
+  const g = SMC.compose, ta = e.target;
+  SMC.compose = null;
+  if (!g || SMC.cursors.length < 2 || g.p !== SMC.primary || !e.data) return;
+  const p = g.p, d = ta.value.length - g.len;
+  for (const c of SMC.cursors) if (c !== p && smcLo(c) >= smcHi(p)) { c.a += d; c.f += d; }
+  Object.assign(p, smcFromTa(ta));
+  SMC.value = ta.value;
+  smcEach((sh, c) => { if (c !== p) srcReplace(sh, sh.selectionStart, sh.selectionEnd, e.data); });
+}, true);
+// C-S-click: the browser moves the caret there (extending the selection),
+// which becomes a cursor of its own; any other click goes back to one cursor
+document.addEventListener('mousedown', (e) => {
+  if (e.button !== 0 || e.target.id !== 'srcta') { if (smcActive() && e.button === 0 && !(e.target.closest && e.target.closest('#whichkey'))) smcClear(); return; }
+  const ta = e.target;
+  if (!(e.ctrlKey && e.shiftKey && !e.altKey)) { if (smcActive()) smcClear(); return; }
+  if (ta.readOnly) return;
+  if (!SMC.cursors.length) { const c = smcFromTa(ta); SMC.cursors = [c]; SMC.primary = c; SMC.value = ta.value; }
+  addEventListener('mouseup', () => setTimeout(() => {
+    const o = smcFromTa(ta).f;
+    const there = SMC.cursors.find((c) => c.a === c.f && c.f === o);
+    if (there && SMC.cursors.length > 1) { SMC.cursors = SMC.cursors.filter((c) => c !== there); if (SMC.primary === there) SMC.primary = SMC.cursors[SMC.cursors.length - 1]; }
+    else if (!there) { const c = { a: o, f: o }; SMC.cursors.push(c); SMC.primary = c; }
+    smcShow();
+  }, 0), { once: true, capture: true });
+}, true);
 
 // Saving the files of the source view that are not part of the document.
 // ---- files from the source view: new, rename, delete

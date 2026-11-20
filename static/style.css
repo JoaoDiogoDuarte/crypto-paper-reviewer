@@ -1485,3 +1485,11 @@ body.sidebar #srcoutline { display: none; }
 .srcfile-ren:hover { color: var(--fg); background: var(--chip); }
 .srcfile-edit { flex: 1; min-width: 0; font: 12px ui-monospace, monospace; padding: .15em .4em; }
 .srcfile-del:hover { color: #c0392b; background: var(--chip); }
+
+/* multiple cursors: the cursors other than the real one */
+#mc-layer { position: fixed; inset: 0; pointer-events: none; z-index: 8; }
+.mc-caret { position: absolute; width: 2px; margin-left: -1px; background: var(--accent); animation: mc-blink 1.06s steps(1) infinite; }
+#mc-layer.steady .mc-caret { animation: none; }
+@keyframes mc-blink { 50% { opacity: 0; } }
+/* as the page's own selection (::selection) */
+::highlight(mc) { background-color: color-mix(in srgb, var(--accent) 28%, transparent); }

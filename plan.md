@@ -18,7 +18,8 @@ and the editor's keymap (`ACTION_DEFS`, `TEXT_KEYS`, `GLOBAL_KEYS`), find
 3. Label rename from the Results tab. Done 2026-11-20 (section 3).
 4. Literal maths search, plus a consult-style result list for `C-f` and `C-S-f`.
    Done 2026-11-20 (section 4).
-5. Multiple cursors: paper view, then source view.
+5. Multiple cursors: paper view, then source view. Done 2026-11-20, with
+   the departures listed at the end of section 5.
 6. Kill ring, source-view completion and electric pairs, latexindent,
    spelling keys `C-,` and `C-.` (section 6b).
 7. One sentence per line on save (section 7). Done 2026-11-19.
@@ -459,6 +460,59 @@ through `insertText` to keep native undo. A mirror div draws the carets.
 - After a save or build: one cursor left, no overlay elements remain.
 - A `ui_torture.js` case mixing cursor edits with random operations,
   checked against the round trip.
+
+### Done (2026-11-20)
+
+Paper view and source view, the keys above (all in `ACTION_DEFS`, global
+scope so that the source view and the find bar reach them), 11 cases in
+`node tests/e2e.js multi`, and `tests/mc_torture.js` (random cursor work in
+both views, 16 seeds of 70 steps pass; see its header). Departures:
+
+- A cursor is a character offset in its block (a chip counts as one
+  character), not a live Range. Chrome's editing merges and splits text
+  nodes, and a live Range in a removed node jumps to its parent, which moved
+  cursors already done. The edits still run last to first, and the cursors
+  after an edit in the same block move by the change in its length.
+- `beforeinput` does fire for `execCommand` in Chrome, so the typing
+  snapshot and the balance check run for each cursor's edit; `snapshot()` is
+  a no-op while the edits run, and the burst is given back to the cursors
+  afterwards.
+- `C->` on a caret selects the word and marks its next occurrence at once,
+  matching whole words; on a selection it matches the text anywhere. The
+  search wraps around the paper. `C-<` and `C-M-<` drop the last and the
+  first cursor in the paper's order.
+- Edit lines in the paper view puts a cursor on each line as drawn, at the
+  column of the selection's end, found from the boxes of the characters (so
+  lines out of the window get theirs too).
+- The torture's own `ui_torture.js` case became a file of its own,
+  `tests/mc_torture.js`: it checks each plain step (typing, Backspace and
+  Delete over letters, arrows over letters) against a model of the text and
+  the cursors, and the round trip after each run.
+- Source view: the edits run on a copy of the text (`SMC.shadow`, returned
+  by `srcTa()`, so `SOURCE_ACTIONS` serve unchanged), and then go into the
+  text one small `insertText` each, with the view drawn once. One
+  `insertText` of the whole changed span would be one undo step, but Chrome
+  takes seconds to insert text of a few hundred lines (8 s for 20 KB). So
+  `Ctrl+Z` right after an edit at many cursors calls the text's undo as many
+  times as that edit made steps, and brings the cursors back.
+- A render keeps the cursors (not as planned): before it, each cursor is
+  noted by its block (file, place, which editable text) and the block's
+  text; afterwards it goes to the new block with the same text, and is
+  dropped where the text changed. A build or an outside change otherwise
+  ended the cursors at a moment the user does not see coming (the Electron
+  run showed it). A save keeps them; undo in the paper view ends them, and
+  in the source view keeps them.
+- A file over 600 kB (shown without colours, the text drawing itself): the
+  other carets are placed by line and column in the monospaced font with
+  Wrap off; with Wrap on they are not drawn (a toast says so), and their
+  selections are not drawn either way. They work in both.
+- Not done: a cursor per source line from the paper view.
+- `tests/electron_test.js` runs the e2e tests in the Electron window
+  (`shell/main.js --test-window`: hidden, drawn offscreen, a profile of its
+  own, outside the single-instance lock, no dialogs), through
+  `--remote-debugging-port`. Nothing shows on the screen.
+- `Ctrl+Shift+N` never reaches the page in Chrome, even from the test
+  driver, so the test calls the action itself.
 
 ---
 

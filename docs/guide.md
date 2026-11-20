@@ -130,6 +130,30 @@ under ⋯. In narrow windows both show icons only; hovering a button names it.
   `\[…\]`) become formulas, and Unicode maths symbols are written as LaTeX
   for pdfLaTeX papers. Zero-width spaces and byte-order marks that come
   with text copied from web pages are dropped (pdfLaTeX stops at them).
+- **Multiple cursors.** As in Emacs's multiple-cursors: `Ctrl+>` selects
+  the word at the cursor and marks its next occurrence (whole words only;
+  with a selection, the next occurrence of the selected text), and each
+  press marks one more; `Ctrl+Alt+>` marks the previous one, `Ctrl+<` and
+  `Ctrl+Alt+<` drop the last and the first cursor. After `Ctrl+Shift+C`,
+  `Ctrl+Shift+A` marks every occurrence in the paper (in the find bar: every
+  match of the search, maths searches included), `Ctrl+Shift+D` every
+  occurrence in the paragraph and, pressed again, in the paper,
+  `Ctrl+Shift+C` puts a cursor on each line of the selection, and
+  `Ctrl+Shift+N` inserts 0, 1, 2, … at the cursors (the Chrome app window
+  keeps `Ctrl+Shift+C` and `Ctrl+Shift+N` for itself; the Electron window
+  does not, and **Keys…** can move them). `Ctrl+Shift`+click adds a cursor (or
+  takes away the one there). Typing, `Backspace`, `Delete`, the arrows,
+  `Home`, `End`, `Ctrl+A`/`Ctrl+E`, bold, emphasis, maths over selections,
+  brackets over selections, copy, cut and paste then act at every cursor; a
+  copy takes one line per cursor, and a paste of as many lines as there are
+  cursors puts one line at each. An edit at all the cursors is one step of
+  undo. What changes the page's structure (`Enter`, `Backspace` at a
+  paragraph's start, headings, moving sections) asks for one cursor.
+  `Esc`, `Ctrl+G`, a click or an undo go back to one cursor; a save, a
+  build or a change on disk keeps the cursors whose paragraph did not
+  change. The
+  source view has the same keys, on lines of the file; there `Ctrl+Z`
+  takes back an edit at all the cursors at once and brings the cursors back.
 - **Selecting across paragraphs.** Drag, `Shift`+click or `Shift`+arrows go on
   from one paragraph into the next. Such a selection can be copied (text and
   LaTeX), cut, deleted or typed over: the blocks between go and the first
@@ -311,6 +335,10 @@ under ⋯. In narrow windows both show icons only; hovering a button names it.
 | `Ctrl+D`, `Alt+W`, `Ctrl+W`, `Ctrl+P` | delete line, cut / copy the region or the line, duplicate (Emacs style; browsers may keep `Ctrl+W` for themselves) |
 | `Ctrl+Q`, `Ctrl+Backspace` | delete the character before, delete back to the previous space |
 | `Ctrl++` | expand the selection: word, line, paragraph |
+| `Ctrl+>`, `Ctrl+Alt+>` | multiple cursors: mark the next, previous occurrence of the word at the cursor or of the selection |
+| `Ctrl+<`, `Ctrl+Alt+<` | drop the last, the first cursor |
+| `Ctrl+Shift+C`, then `Ctrl+Shift+A` / `D` / `C` / `N` | cursors on every occurrence (in the find bar: every match) / in the paragraph, then the paper / on each line of the selection; insert 0, 1, 2, … |
+| `Ctrl+Shift`+click | add a cursor, or take away the one there |
 | `Alt+R`, `Alt+P`, `Alt+S` | read aloud, pause, stop |
 | `Ctrl+Alt+Left`, `Ctrl+Alt+Right` | previous, next sentence |
 | `Ctrl+Alt+S` | split the section at the cursor |

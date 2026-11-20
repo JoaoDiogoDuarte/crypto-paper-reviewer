@@ -452,7 +452,282 @@ async function mergeAnswer(page, label, keepAsSub = false) {
   await sleep(150);
 }
 
+// Multiple cursors: a paper section with repeated words, Ctrl+Shift+clicks, chords.
+const MC_BODY = String.raw`\section{Body}\label{sec:body}
+One alpha and alpha.
+
+\subsection{Details}
+An alpha here, alphabet not.
+`;
+async function mcMouse(page, x, y) {
+  const base = { x, y, button: 'left', clickCount: 1, modifiers: 10 };
+  await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+  await page.send('Input.dispatchMouseEvent', { ...base, type: 'mousePressed' });
+  await page.send('Input.dispatchMouseEvent', { ...base, type: 'mouseReleased' });
+  await sleep(30);
+}
+// Ctrl+Shift+click just after (or before) the text `needle`
+async function mcClickAt(page, needle, where = 'end') {
+  const p = await page.eval(`(() => {
+    for (const ed of document.querySelectorAll('#doc [contenteditable=true]')) {
+      const w = document.createTreeWalker(ed, NodeFilter.SHOW_TEXT); let t;
+      while ((t = w.nextNode())) {
+        const i = t.data.indexOf(${JSON.stringify(needle)});
+        if (i < 0) continue;
+        t.parentElement.scrollIntoView({ block: 'center' });
+        const k = ${where === 'end' ? `i + ${needle.length} - 1` : 'i'};
+        const r = document.createRange(); r.setStart(t, k); r.setEnd(t, k + 1);
+        const b = r.getBoundingClientRect();
+        return { x: ${where === 'end' ? 'b.right - 1' : 'b.left + 1'}, y: (b.top + b.bottom) / 2 };
+      }
+    }
+  })()`);
+  if (!p) throw new Error('text not on the page: ' + needle);
+  await mcMouse(page, p.x, p.y);
+}
+// the source view of sections/body.tex
+async function mcSource(page) {
+  await page.eval('toggleSource(true)');
+  await page.waitFor(`SRC.on && SRC.name`, 4000, 'the source view');
+  await page.eval(`openSourceFile('sections/body.tex')`);
+  await page.waitFor(`SRC.name === 'sections/body.tex'`, 4000, 'body.tex');
+}
+// Ctrl+Shift+C, then Ctrl+Shift+<key>
+async function mcChord(page, key) {
+  await page.key('c', { ctrl: true, shift: true });
+  await page.key(key, { ctrl: true, shift: true });
+  await sleep(30);
+}
+
 const TESTS = {
+
+  async 'multi: Ctrl+Shift+click adds a cursor in another file; typing goes to both'(env, page) {
+    await page.select('fox', 'end');
+    await mcClickAt(page, 'text lives', 'start');
+    eq(await page.eval('MC.cursors.length'), 2, 'cursors');
+    await page.typeKeys('Q');
+    await page.save();
+    onlyChange(env, 'main.tex', 'brown fox jumps', 'brown foxQ jumps');
+    onlyChange(env, 'sections/body.tex', 'Detail text', 'Detail Qtext');
+  },
+
+  async 'multi: Ctrl+> marks the next words; typing replaces them; one undo restores all'(env, page) {
+    await mergeFresh(env, page, { 'sections/body.tex': MC_BODY });
+    await page.select('alpha', 'start');
+    await page.key('>', { ctrl: true, shift: true });
+    await page.key('>', { ctrl: true, shift: true });
+    eq(await page.eval('MC.cursors.length'), 3, 'cursors after two presses');
+    await page.key('>', { ctrl: true, shift: true });
+    eq(await page.eval('MC.cursors.length'), 3, '"alphabet" is not the word alpha');
+    await page.typeKeys('beta');
+    const t = await page.pageText();
+    has(t, 'One beta and beta.', 'first paragraph');
+    has(t, 'An beta here, alphabet not.', 'second paragraph');
+    await page.key('z', { ctrl: true });
+    eq(await page.eval('MC.cursors.length'), 0, 'one cursor after the undo');
+    await page.save();
+    eq(env.read('sections/body.tex'), MC_BODY, 'one undo restores every cursor\'s word');
+  },
+
+  async 'multi: a cursor never goes inside a formula'(env, page) {
+    await page.select('Body text', 'start');
+    const b = await page.eval(`(() => { const c = [...document.querySelectorAll('#doc .chip.math')].find((x) => (x.dataset.src || '').includes('Adv'));
+      c.scrollIntoView({ block: 'center' }); const r = c.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+    await mcMouse(page, b.x, b.y);
+    eq(await page.eval('MC.cursors.length'), 2, 'cursors');
+    await page.typeKeys('Z');
+    await page.save();
+    const body = env.read('sections/body.tex');
+    has(body, 'ZBody text', 'the first cursor');
+    has(body, '$\\Adv$', 'the formula is whole');
+    eq((body.match(/Z/g) || []).length, 2, 'one Z at each cursor');
+  },
+
+  async 'multi: Backspace at the start of a paragraph does not join, and says why'(env, page) {
+    await mergeFresh(env, page, { 'sections/body.tex': MC_BODY });
+    await page.select('alpha', 'start');
+    await mcChord(page, 'a');
+    eq(await page.eval('MC.cursors.length'), 3, 'every alpha');
+    await page.key('ArrowLeft');
+    await page.key('a', { ctrl: true });
+    eq(await page.eval('MC.cursors.length'), 2, 'two cursors at line starts (the two in one line meet)');
+    await page.key('Backspace');
+    has(await page.banner(), 'would join it', 'the banner');
+    await page.save();
+    eq(env.read('sections/body.tex'), MC_BODY, 'nothing changed');
+  },
+
+  async 'multi: two cursors in one line, edited last to first'(env, page) {
+    await mergeFresh(env, page, { 'sections/body.tex': MC_BODY });
+    await page.select('alpha', 'start');
+    await mcChord(page, 'd');
+    eq(await page.eval('MC.cursors.length'), 2, 'the alphas of the paragraph only');
+    await page.typeKeys('xy');
+    await page.key('Backspace');
+    await page.key('ArrowLeft');
+    await page.typeKeys('[');
+    const v = await page.eval('AUXVER');
+    await page.save();
+    eq(env.read('sections/body.tex'), MC_BODY.replace('One alpha and alpha.', 'One [x and [x.'), 'the file');
+    // the save, the build and the page read again keep the cursors
+    await page.waitFor(`AUXVER > ${v}`, 8000, 'the build');
+    await sleep(300);
+    eq(await page.eval('MC.cursors.length'), 2, 'the cursors after the save and the build');
+    await page.typeKeys('z');
+    await page.key('Escape');
+    eq(await page.eval(`MC.cursors.length + document.querySelectorAll('#mc-layer *').length + (CSS.highlights.has('mc') ? 1 : 0)`), 0, 'nothing left after Esc');
+    await page.save();
+    eq(env.read('sections/body.tex'), MC_BODY.replace('One alpha and alpha.', 'One [zx and [zx.'), 'typed after the build');
+  },
+
+  async 'multi: copy takes a line per cursor, a paste of as many lines puts one at each'(env, page) {
+    await mergeFresh(env, page, { 'sections/body.tex': MC_BODY });
+    await page.select('alpha', 'start');
+    await mcChord(page, 'a');
+    eq((await page.copy())['text/plain'], 'alpha\nalpha\nalpha', 'the copy');
+    await page.paste('1\n2\n3');
+    // Ctrl+Shift+C Ctrl+Shift+N: Chrome keeps Ctrl+Shift+N (a new window) even from the test driver
+    await page.eval('mcNumbers()');
+    await page.save();
+    eq(env.read('sections/body.tex'), MC_BODY.replace('One alpha and alpha.', 'One 10 and 21.').replace('An alpha', 'An 32'), 'the file');
+  },
+
+  async 'multi: Ctrl+Shift+C Ctrl+Shift+A in the find bar puts a cursor on every match'(env, page) {
+    await mergeFresh(env, page, { 'sections/body.tex': MC_BODY });
+    await page.select('One', 'start');
+    await page.key('f', { ctrl: true });
+    await page.waitFor(`!$('#findbar').hidden && document.activeElement.closest('#findbar')`, 3000, 'the find bar');
+    await page.type('alpha');
+    await page.waitFor('FIND.matches.length === 4', 3000, 'four matches');
+    await mcChord(page, 'a');
+    eq(await page.eval('MC.cursors.length'), 4, 'a cursor on every match');
+    eq(await page.eval(`$('#findbar').hidden`), true, 'the find bar closed');
+    await page.typeKeys('o');
+    await page.save();
+    eq(env.read('sections/body.tex'), MC_BODY.replace(/alpha/g, 'o'), 'the file');
+  },
+
+  async 'multi: an action at every cursor is one undo step; a structural one is refused'(env, page) {
+    await mergeFresh(env, page, { 'sections/body.tex': MC_BODY });
+    await page.select('alpha', 'start');
+    await mcChord(page, 'a');
+    await page.key('b', { ctrl: true });
+    await page.key('1', { ctrl: true, alt: true });
+    has(await page.banner(), 'works with one cursor', 'the heading is refused');
+    await page.save();
+    eq(env.read('sections/body.tex'), MC_BODY.replace(/\balpha\b/g, '\\textbf{alpha}'), 'bold at each');
+    await page.key('z', { ctrl: true });
+    await page.save();
+    eq(env.read('sections/body.tex'), MC_BODY, 'one undo');
+  },
+
+  async 'multi: source view: Ctrl+> and typing, one Ctrl+Z takes it all back, Esc keeps one cursor'(env, page) {
+    await mergeFresh(env, page, { 'sections/body.tex': MC_BODY });
+    await mcSource(page);
+    await page.eval(`(() => { const ta = $('#srcta'), i = ta.value.indexOf('alpha'); ta.focus(); ta.setSelectionRange(i + 2, i + 2); })()`);
+    await page.key('>', { ctrl: true, shift: true });
+    await page.key('>', { ctrl: true, shift: true });
+    eq(await page.eval('SMC.cursors.length'), 3, 'three cursors (alphabet is not the word)');
+    await page.typeKeys('xy');
+    eq(await page.eval(`$('#srcta').value`), MC_BODY.replace(/\balpha\b/g, 'xy'), 'typed at each');
+    await page.key('Backspace');
+    await page.key('z', { ctrl: true });
+    eq(await page.eval(`$('#srcta').value`), MC_BODY.replace(/\balpha\b/g, 'xy'), 'one undo for the Backspace at three cursors');
+    await page.key('z', { ctrl: true, shift: true });
+    eq(await page.eval(`$('#srcta').value`), MC_BODY.replace(/\balpha\b/g, 'x'), 'one redo');
+    await page.key('Escape');
+    eq(await page.eval('SRC.on && SMC.cursors.length === 0'), true, 'Esc: one cursor, still in the source view');
+    await page.key('Escape');
+    await page.save();
+    eq(env.read('sections/body.tex'), MC_BODY.replace(/\balpha\b/g, 'x'), 'the file');
+  },
+
+  async 'multi: source view: edit lines, Home, a copy pasted back one line per cursor'(env, page) {
+    await mergeFresh(env, page, { 'sections/body.tex': MC_BODY });
+    await mcSource(page);
+    await page.eval(`(() => { const ta = $('#srcta'), i = ta.value.indexOf('One'), j = ta.value.indexOf('An alpha'); ta.focus(); ta.setSelectionRange(i + 1, j + 1); })()`);
+    await mcChord(page, 'c');
+    eq(await page.eval('SMC.cursors.length'), 4, 'a cursor on each of the four lines');
+    await page.key('Home');
+    await page.typeKeys('Z');
+    await page.key('End', { shift: true });
+    const clip = (type, text) => page.eval(`(() => { const dt = new DataTransfer(); if (${JSON.stringify(text || '')}) dt.setData('text/plain', ${JSON.stringify(text || '')});
+      $('#srcta').dispatchEvent(new ClipboardEvent(${JSON.stringify(type)}, { clipboardData: dt, bubbles: true, cancelable: true })); return dt.getData('text/plain'); })()`);
+    eq((await clip('copy')).split('\n').length, 4, 'one line of the copy per cursor');
+    await page.key('End');
+    await clip('paste', 'a\nb\nc\nd');
+    await page.save();
+    const lines = env.read('sections/body.tex').split('\n');
+    eq(lines.slice(1, 5).join('|'), 'ZOne alpha and alpha.a|Zb|Z\\subsection{Details}c|ZAn alpha here, alphabet not.d', 'the lines');
+  },
+
+  async 'multi: a dead key (a composition) gives its letter to every cursor, in the paper and the source'(env, page) {
+    await mergeFresh(env, page, { 'sections/body.tex': MC_BODY });
+    await page.select('alpha', 'end');
+    await page.key('>', { ctrl: true, shift: true });
+    await page.key('>', { ctrl: true, shift: true });
+    await page.key('ArrowRight');
+    const compose = async () => {
+      await page.send('Input.imeSetComposition', { text: '´', selectionStart: 1, selectionEnd: 1 });
+      await page.send('Input.insertText', { text: 'é' });
+      await sleep(50);
+    };
+    await compose();
+    await page.typeKeys('s');
+    await page.save();
+    eq(env.read('sections/body.tex'), MC_BODY.replace(/\balpha\b/g, 'alphaés'), 'the paper');
+    await mcSource(page);
+    await page.eval(`(() => { const ta = $('#srcta'), i = ta.value.indexOf('alpha'); ta.focus(); ta.setSelectionRange(i + 1, i + 1); })()`);
+    await page.key('>', { ctrl: true, shift: true });
+    await page.key('>', { ctrl: true, shift: true });
+    eq(await page.eval('SMC.cursors.length'), 3, 'three cursors in the source');
+    await page.key('ArrowLeft');
+    await compose();
+    await page.key('Escape');
+    await page.key('Escape');
+    await page.save();
+    eq(env.read('sections/body.tex'), MC_BODY.replace(/\balpha\b/g, 'éalphaés'), 'the source');
+  },
+
+  async 'multi: Ctrl+Shift+C Ctrl+Shift+N by keys inserts numbers (in Electron; Chrome keeps Ctrl+Shift+N)'(env, page) {
+    if (!(await page.eval('navigator.userAgent.includes("Electron")'))) return;
+    await page.select('text', 'start');
+    await mcChord(page, 'a');
+    await page.key('ArrowLeft');
+    await mcChord(page, 'n');
+    await page.save();
+    onlyChange(env, 'sections/body.tex', 'Body text with a formula $\\Adv$ and more words.\n\n\\subsection{Details}\nDetail text', 'Body 0text with a formula $\\Adv$ and more words.\n\n\\subsection{Details}\nDetail 1text');
+  },
+
+  async 'multi: a cursor on each line of a selection longer than the window'(env, page) {
+    const paras = Array.from({ length: 40 }, (_, i) => `Line ${i} of the long text.`);
+    await mergeFresh(env, page, { 'sections/body.tex': '\\section{Body}\n' + paras.join('\n\n') + '\n' });
+    await page.eval(`(() => { const eds = mcEditables().filter((e) => /^Line \\d+ of/.test(mcText(e)));
+      const a = mcPoint(eds[0], 0), b = mcPoint(eds[eds.length - 1], 4); eds[0].scrollIntoView({ block: 'start' }); eds[eds.length - 1].focus();
+      getSelection().setBaseAndExtent(a[0], a[1], b[0], b[1]); })()`);
+    await mcChord(page, 'c');
+    eq(await page.eval('MC.cursors.length'), 40, 'a cursor on each of the 40 lines, most of them out of the window');
+    await page.typeKeys('Q');
+    await page.save();
+    const body = env.read('sections/body.tex');
+    eq((body.match(/LineQ \d+ of/g) || []).length, 40, 'Q after "Line" on each');
+  },
+
+  async 'multi: a cursor on each line of a selection'(env, page) {
+    await mergeFresh(env, page, { 'sections/body.tex': MC_BODY });
+    await page.eval(`(() => { const eds = [...document.querySelectorAll('#doc [contenteditable=true]')];
+      const t = (s) => { for (const ed of eds) { const w = document.createTreeWalker(ed, NodeFilter.SHOW_TEXT); let n; while ((n = w.nextNode())) if (n.data.includes(s)) return n; } };
+      const a = t('One alpha'), b = t('An alpha'); b.parentElement.closest('[contenteditable=true]').focus();
+      getSelection().setBaseAndExtent(a, 0, b, 2); })()`);
+    await mcChord(page, 'c');
+    eq(await page.eval('MC.cursors.length'), 3, 'the paragraph, the heading, the paragraph');
+    await page.typeKeys('Q');
+    await page.save();
+    const body = env.read('sections/body.tex');
+    eq((body.match(/Q/g) || []).length, 3, 'a Q on each line');
+    has(body, 'AnQ alpha', 'at the column of the end of the selection');
+  },
+
   async 'load: nothing edited, save writes nothing'(env, page) {
     eq(await dirty(page), 0, 'edited files after load');
     await page.save();
