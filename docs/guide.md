@@ -339,6 +339,10 @@ under ⋯. In narrow windows both show icons only; hovering a button names it.
 | `Ctrl+<`, `Ctrl+Alt+<` | drop the last, the first cursor |
 | `Ctrl+Shift+C`, then `Ctrl+Shift+A` / `D` / `C` / `N` | cursors on every occurrence (in the find bar: every match) / in the paragraph, then the paper / on each line of the selection; insert 0, 1, 2, … |
 | `Ctrl+Shift`+click | add a cursor, or take away the one there |
+| `Ctrl+Shift+V` | the kill ring: pick one of the last 30 copies and cuts (of the paper and the source view) to paste, by words of its text |
+| `Ctrl+.` | spelling: correct the misspelled word at or before the cursor with the first suggestion; pressed again at once, the next suggestion (and at the end the word as it was); one `Ctrl+Z` takes it back |
+| `Ctrl+,` | spelling: the suggestions for that word, listed at it (`1`–`9` or Enter pick one; the last entry adds the word to the paper's dictionary, `.paper-editor/words.txt`); pressed again, the misspelled word before it |
+| `Ctrl+Shift+C`, then `Ctrl+Shift+F` | latexindent: indent the file shown in the source view, or in the paper the file of the block at the cursor (the paper's `localSettings.yaml` or `.latexindent.yaml` applies); one `Ctrl+Z` takes it back |
 | `Alt+R`, `Alt+P`, `Alt+S` | read aloud, pause, stop |
 | `Ctrl+Alt+Left`, `Ctrl+Alt+Right` | previous, next sentence |
 | `Ctrl+Alt+S` | split the section at the cursor |
@@ -361,6 +365,15 @@ the line; `Shift` selects), `Ctrl+D` delete line, `Ctrl+P` duplicate,
 `Ctrl+W` / `Alt+W` copy / cut the region or the line, `Ctrl+Q`,
 `Ctrl+Backspace`, `Tab` / `Shift+Tab` indent / unindent, `Enter` keeps the
 indentation; `Ctrl+Z` is the text's own undo. All of them are under **Keys…**.
+Brackets typed at the cursor come in pairs (`(`, `[`, `{`, and after a
+backslash `\(\)`, `\[\]`, `\{\}`): a closing bracket typed before the same
+one steps over it, and Backspace between an empty pair takes both. In the
+paper view this is off, and ☰ → **Close brackets as you type** turns it on
+for `(` and `[`. As you type, a list completes `\` and a letter (the
+preamble's macros, the commands the paper uses, common ones), `\begin{`
+(the `\end` comes too), the labels in `\cref{…}` and the like, and the keys of
+the `.bib` files in `\cite{…}`: Up and Down choose, Enter or Tab take one,
+Escape closes the list.
 
 Everything in the bars and the ☰ menu has a key too (all `Ctrl+Alt+…`, and all
 listed and changeable under **Keys…**):

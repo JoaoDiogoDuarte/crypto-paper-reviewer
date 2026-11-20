@@ -167,6 +167,29 @@ class BackendTest(unittest.TestCase):
             urllib.request.urlopen(req({'name': 'main.tex', 'base': server.sha('unknown'), 'text': 'x'}))
         self.assertEqual(e.exception.code, 404)
 
+    @unittest.skipUnless(shutil.which('hunspell'), 'hunspell is not installed')
+    def test_spelling_with_the_paper_dictionary(self):
+        status, d = self.post('/api/spell', {'words': ['recieve', 'receive', 'Shoup'], 'lang': 'en-GB'})
+        self.assertEqual(status, 200)
+        self.assertEqual(d['misspelled']['recieve'][0], 'receive')
+        self.assertNotIn('receive', d['misspelled'])
+        self.assertIn('Shoup', d['misspelled'])
+        self.assertEqual(self.post('/api/spell/add', {'word': 'Shoup'})[0], 200)
+        self.assertEqual(self.post('/api/spell/add', {'word': 'two words'})[0], 400)
+        with open(os.path.join(self.state, 'words.txt')) as f:
+            self.assertEqual(f.read(), 'Shoup\n')
+        self.assertNotIn('Shoup', self.post('/api/spell', {'words': ['Shoup']})[1]['misspelled'])
+
+    @unittest.skipUnless(shutil.which('latexindent'), 'latexindent is not installed')
+    def test_latexindent_writes_nothing_into_the_paper(self):
+        before = sorted(os.listdir(self.tmp))
+        text = '\\begin{itemize}\n\\item a\n\\end{itemize}'
+        status, d = self.post('/api/latexindent', {'text': text})
+        self.assertEqual(status, 200)
+        self.assertEqual(d['text'], '\\begin{itemize}\n\t\\item a\n\\end{itemize}')   # no newline added at the end
+        self.assertEqual(sorted(os.listdir(self.tmp)), before)
+        self.assertEqual(self.post('/api/latexindent', {'text': 5})[0], 400)
+
     def test_clients_survive_a_suspend(self):
         # the wall clock jumps by an hour between two ticks: the open page
         # is not taken for gone and the server keeps running

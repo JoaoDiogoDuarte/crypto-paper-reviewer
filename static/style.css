@@ -1493,3 +1493,11 @@ body.sidebar #srcoutline { display: none; }
 @keyframes mc-blink { 50% { opacity: 0; } }
 /* as the page's own selection (::selection) */
 ::highlight(mc) { background-color: color-mix(in srgb, var(--accent) 28%, transparent); }
+
+/* completion in the source view */
+#comp { position: fixed; z-index: 42; min-width: 14em; max-width: min(40em, 90vw); max-height: 17em; overflow: auto; padding: .2em 0;
+  background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.2);
+  font: 13px/1.5 ui-monospace, "JetBrains Mono", "DejaVu Sans Mono", monospace; }
+#comp .comp-item { display: flex; gap: 1em; justify-content: space-between; padding: 0 .7em; cursor: pointer; white-space: nowrap; }
+#comp .comp-item.active { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+#comp .comp-sub { color: var(--muted); overflow: hidden; text-overflow: ellipsis; font-family: system-ui, sans-serif; font-size: 12px; }

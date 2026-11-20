@@ -10,6 +10,15 @@ contextBridge.exposeInMainWorld('__shellPrompt', (message, value) =>
 webFrame.executeJavaScript(`window.prompt = (message, value) =>
   window.__shellPrompt(message === undefined ? '' : String(message), value === undefined || value === null ? '' : String(value));`);
 
+// The window's spell checker (en-GB, set on the session), for the editor's
+// spelling keys: whether a word is misspelled, its suggestions, and adding a
+// word to the window's dictionary.
+contextBridge.exposeInMainWorld('__shellSpell', {
+  misspelled: (word) => webFrame.isWordMisspelled(String(word)),
+  suggestions: (word) => webFrame.getWordSuggestions(String(word)),
+  add: (word) => ipcRenderer.send('shell-spell-add', String(word)),
+});
+
 // Ctrl+F the editor did not take (it leaves it to the browser in the source
 // view): Electron has no find bar, so the window asks for the text.
 window.addEventListener('keydown', (e) => {

@@ -500,6 +500,200 @@ async function mcChord(page, key) {
 }
 
 const TESTS = {
+  async 'completion: the source view completes environments, labels, macros and cite keys'(env, page) {
+    await mcSource(page);
+    const end = async () => page.eval(`(() => { const ta = $('#srcta'); ta.focus(); const i = ta.value.indexOf('Detail text lives here.') + 23; ta.setSelectionRange(i, i); })()`);
+    const shown = () => page.eval(`COMP.open ? COMP.items.map((i) => i.name).join(',') : ''`);
+    await end();
+    await page.key('Enter');
+    await page.typeKeys('\\begin{ite');
+    await page.waitFor(`COMP.open && COMP.items[0].name === 'itemize'`, 3000, 'itemize offered');
+    await page.key('Enter');
+    eq(await page.eval(`COMP.open`), false, 'closed after the choice');
+    await page.typeKeys('\\item see \\cref{sec:');
+    await page.waitFor(`COMP.open && COMP.kind === 'label'`, 3000, 'the labels');
+    has(await shown(), 'sec:intro', 'a label of the paper');
+    await page.eval(`COMP.active = COMP.items.findIndex((i) => i.name === 'sec:intro')`);
+    await page.key('Tab');
+    await page.key('}');
+    await page.typeKeys(' and $\\Ad');
+    await page.waitFor(`COMP.open && COMP.items.some((i) => i.name === 'Adv')`, 3000, 'the macro of the preamble');
+    await page.eval(`COMP.active = COMP.items.findIndex((i) => i.name === 'Adv')`);
+    await page.key('Enter');
+    await page.typeKeys('$ in \\cite{GM');
+    await page.waitFor(`COMP.open && COMP.items.some((i) => i.name === 'GM84')`, 3000, 'a key of refs.bib');
+    await page.key('Enter');
+    await page.key('}');
+    await page.typeKeys('.');
+    await page.key('Enter');
+    await page.typeKeys('\\sec');
+    await page.waitFor(`COMP.open`, 3000, 'macros');
+    await page.key('Escape');
+    eq(await page.eval(`COMP.open || !SRC.on`), false, 'Escape closes the list, not the source view');
+    const v = await page.eval(`$('#srcta').value`);
+    has(v, 'Detail text lives here.\n\\begin{itemize}\n\\item see \\cref{sec:intro} and $\\Adv$ in \\cite{GM84}.\n\\sec\n\\end{itemize}', 'the text');
+  },
+
+  async 'spelling: Ctrl+. corrects the word before the cursor and cycles, one undo; never a word in maths'(env, page) {
+    if (require('child_process').spawnSync('which', ['hunspell']).status !== 0) return;
+    const body = '\\section{Body}\\label{sec:body}\nWe recieve teh message $teh$ here.\n';
+    await mergeFresh(env, page, { 'sections/body.tex': body });
+    await page.select('here.', 'end', 1);   // (the first is in the introduction)
+    await page.key('.', { ctrl: true });
+    await page.waitFor(`mcEditables().some((e) => mcText(e).includes('We recieve the message'))`, 5000, 'teh -> the');
+    await page.key('.', { ctrl: true });
+    // (the second suggestion: hunspell's or the Electron window's)
+    await page.waitFor(`SPELL.cycle && SPELL.cycle.idx === 1 && mcEditables().some((e) => mcText(e).includes('We recieve ' + SPELL.cycle.sugg[1] + ' message'))`, 5000, 'the next suggestion');
+    await page.key('z', { ctrl: true });
+    await page.save();
+    eq(env.read('sections/body.tex'), body, 'one undo for the correction and its cycle');
+  },
+
+  async 'spelling: Ctrl+, lists the suggestions at the word; Enter or a digit picks; Add goes to the paper dictionary'(env, page) {
+    if (require('child_process').spawnSync('which', ['hunspell']).status !== 0) return;
+    const body = '\\section{Body}\\label{sec:body}\nWe recieve teh message here.\n';
+    await mergeFresh(env, page, { 'sections/body.tex': body });
+    await page.select('teh', 'end');
+    await page.key(',', { ctrl: true });
+    await page.waitFor(`!$('#palette').hidden && PAL.items.length > 1`, 5000, 'the list');
+    eq(await page.eval(`$('#pal-title').textContent`), 'Spelling: “teh”', 'the word nearest the cursor');
+    // pressed again: the misspelled word before it
+    await page.key(',', { ctrl: true });
+    await page.waitFor(`$('#pal-title').textContent === 'Spelling: “recieve”' && PAL.items.length > 1`, 5000, 'the word before');
+    await page.key('1');
+    await page.waitFor(`$('#palette').hidden`, 3000, 'the list to close');
+    await page.select('teh', 'end');
+    await page.key(',', { ctrl: true });
+    await page.waitFor(`!$('#palette').hidden && PAL.items.length > 1`, 5000, 'the list again');
+    await page.eval(`PAL.active = PAL.items.length - 1`);
+    await page.key('Enter');
+    await page.waitFor(`$('#palette').hidden`, 3000, 'added');
+    await sleep(200);
+    has(env.read(path.join('..', 'state', 'words.txt')), 'teh', 'the paper dictionary');
+    await page.key('.', { ctrl: true });
+    await page.waitFor(`[...document.querySelectorAll('#toasts > *')].some((t) => t.textContent.includes('No misspelled word'))`, 5000, 'nothing left to correct');
+    await page.save();
+    eq(env.read('sections/body.tex'), body.replace('recieve', 'receive'), 'the file');
+  },
+
+  async 'kill ring: with two cursors the pick goes to both, and the cursors stay while choosing'(env, page) {
+    await page.select('quick brown');
+    await page.copy();
+    await page.select('text', 'start');
+    await page.key('>', { ctrl: true, shift: true });
+    await page.key('ArrowLeft');
+    eq(await page.eval('MC.cursors.length'), 2, 'two cursors');
+    await page.key('V', { ctrl: true, shift: true });
+    await page.waitFor(`!$('#palette').hidden && PAL.items.length === 1`, 3000, 'the palette');
+    await sleep(100);
+    eq(await page.eval('MC.cursors.length'), 2, 'the cursors while the palette is open');
+    await page.key('Enter');
+    await page.waitFor(`$('#palette').hidden`, 3000, 'the palette to close');
+    await page.key('Escape');
+    await page.save();
+    onlyChange(env, 'sections/body.tex', 'Body text with a formula $\\Adv$ and more words.\n\n\\subsection{Details}\nDetail text', 'Body quick browntext with a formula $\\Adv$ and more words.\n\n\\subsection{Details}\nDetail quick browntext');
+  },
+
+  async 'kill ring: Ctrl+Shift+V pastes one of the last copies, in the paper and in the source view'(env, page) {
+    await page.select('quick brown');
+    await page.copy();
+    await page.select('second paragraph');
+    await page.copy();
+    await page.select('Detail text', 'end');
+    await page.key('V', { ctrl: true, shift: true });
+    await page.waitFor(`!$('#palette').hidden && PAL.items.length === 2`, 3000, 'the two copies');
+    eq(await page.eval(`PAL.items.map((k) => k.plain).join('|')`), 'second paragraph|quick brown', 'newest first');
+    await page.key('ArrowDown');
+    await page.key('Enter');
+    await page.waitFor(`$('#palette').hidden`, 3000, 'the palette to close');
+    await page.save();
+    onlyChange(env, 'sections/body.tex', 'Detail text', 'Detail textquick brown');
+    // in the source view, with the words of the query
+    await mcSource(page);
+    await page.eval(`(() => { const ta = $('#srcta'), i = ta.value.indexOf('lives'); ta.focus(); ta.setSelectionRange(i, i); })()`);
+    await page.key('V', { ctrl: true, shift: true });
+    await page.waitFor(`!$('#palette').hidden`, 3000, 'the palette');
+    await page.type('second');
+    await page.waitFor(`PAL.items.length === 1 && !PAL.busy`, 3000, 'one match');
+    await page.key('Enter');
+    await page.waitFor(`$('#srcta').value.includes('second paragraphlives')`, 3000, 'the paste in the source');
+  },
+
+  async 'latexindent: the file of the source view indented, one Ctrl+Z takes it back, nothing left in the paper'(env, page) {
+    if (require('child_process').spawnSync('which', ['latexindent']).status !== 0) return;
+    const nested = '\\section{Body}\\label{sec:body}\n\\begin{itemize}\n\\item a\n\\begin{enumerate}\n\\item b\n\\end{enumerate}\n\\end{itemize}\n';
+    await mergeFresh(env, page, { 'sections/body.tex': nested });
+    await mcSource(page);
+    await page.eval(`(() => { const ta = $('#srcta'); ta.focus(); ta.setSelectionRange(0, 0); })()`);
+    await mcChord(page, 'f');
+    await page.waitFor(`$('#srcta').value.includes('\\t\\\\item a')`, 8000, 'the indented text');
+    const indented = await page.eval(`$('#srcta').value`);
+    has(indented, '\t\t      \\item b', 'the inner item');
+    await page.key('z', { ctrl: true });
+    eq(await page.eval(`$('#srcta').value`), nested, 'one undo');
+    await page.key('z', { ctrl: true, shift: true });
+    eq(await page.eval(`$('#srcta').value`), indented, 'one redo');
+    await page.key('Escape');
+    await page.save();
+    eq(env.read('sections/body.tex'), indented, 'saved');
+    eq(fs.readdirSync(env.paper).filter((n) => /indent|\.log$|\.bak/.test(n)).join(), '', 'no log or backup in the paper');
+  },
+
+  async 'latexindent: from the paper, the file of the block at the cursor, one undo'(env, page) {
+    if (require('child_process').spawnSync('which', ['latexindent']).status !== 0) return;
+    const nested = '\\section{Body}\\label{sec:body}\nText here.\n\\begin{itemize}\n\\item a\n\\end{itemize}\n';
+    await mergeFresh(env, page, { 'sections/body.tex': nested });
+    await page.select('Text here', 'end');
+    await mcChord(page, 'f');
+    await page.waitFor(`FILES['sections/body.tex'].text.includes('\\t\\\\item a')`, 8000, 'the indented file');
+    await page.save();
+    has(env.read('sections/body.tex'), '\t\\item a', 'saved indented');
+    untouched(env, 'main.tex');
+    await page.key('z', { ctrl: true });
+    await page.save();
+    eq(env.read('sections/body.tex'), nested, 'one undo');
+  },
+
+  async 'pairs: the source view closes brackets as you type, steps over the closing one, Backspace takes an empty pair'(env, page) {
+    await mcSource(page);
+    const at = (needle) => page.eval(`(() => { const ta = $('#srcta'), i = ta.value.indexOf(${JSON.stringify(needle)}) + ${needle.length}; ta.focus(); ta.setSelectionRange(i, i); })()`);
+    await at('Detail text');
+    await page.typeKeys(' (x');
+    await page.typeKeys(')');
+    await page.typeKeys(' \\[');
+    await page.typeKeys('y');
+    await page.key('ArrowRight'); await page.key('ArrowRight');
+    await page.typeKeys(' {');
+    await page.key('Backspace');
+    // before a letter the bracket stays alone
+    await at('Body ');
+    await page.typeKeys('[');
+    await page.save();
+    eq(env.read('sections/body.tex'), BODY.replace('Detail text', 'Detail text (x) \\[y\\] ').replace('Body text', 'Body [text'), 'the file');
+  },
+
+  async 'pairs: in the paper view brackets close only when turned on, at every cursor too'(env, page) {
+    await page.select('Detail text', 'end');
+    await page.typeKeys(' (a');
+    await page.eval(`$('#pairsbtn').click()`);
+    eq(await page.eval('PAPER_PAIRS'), true, 'on');
+    await page.typeKeys(' (b');
+    await page.typeKeys(')');
+    await page.typeKeys('[');
+    await page.key('Backspace');
+    await page.select('the paper', 'end');
+    await page.key('>', { ctrl: true, shift: true });
+    eq(await page.eval('MC.cursors.length'), 2, 'the two "paper"');
+    await page.key('ArrowRight');
+    await page.typeKeys('(');
+    await page.key('Escape');
+    await page.eval(`$('#pairsbtn').click()`);
+    await page.save();
+    onlyChange(env, 'sections/body.tex', 'Detail text', 'Detail text (a (b)');
+    has(env.read('main.tex'), 'another paper().', 'a pair at the first cursor');
+    has(env.read('main.tex'), 'the paper().', 'and at the second');
+  },
+
 
   async 'multi: Ctrl+Shift+click adds a cursor in another file; typing goes to both'(env, page) {
     await page.select('fox', 'end');

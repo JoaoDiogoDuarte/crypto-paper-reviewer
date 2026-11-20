@@ -1166,6 +1166,91 @@ def build_figures(log):
     log(f'figures: rendered {rendered}/{len(todo)}')
 
 
+# ---------------------------------------------------------------- spelling
+#
+# For the spelling keys of the Chrome app window (the Electron window asks its
+# own spell checker): hunspell's pipe mode, with the paper's dictionary,
+# .paper-editor/words.txt (one word per line), as the personal dictionary.
+
+def words_path():
+    return os.path.join(STATE, 'words.txt')
+
+
+def paper_words():
+    try:
+        with open(words_path(), encoding='utf-8') as f:
+            return [w.strip() for w in f if w.strip()]
+    except OSError:
+        return []
+
+
+def add_paper_word(word):
+    words = paper_words()
+    if word in words:
+        return
+    os.makedirs(STATE, exist_ok=True)
+    with open(words_path(), 'a', encoding='utf-8') as f:
+        f.write(word + '\n')
+
+
+def spell_check(words, lang):
+    """{word: [suggestions]} for the words hunspell finds misspelled."""
+    exe = shutil.which('hunspell')
+    if not exe:
+        raise RuntimeError('hunspell is not installed')
+    def run(d):
+        cmd = [exe, '-a', '-d', d]
+        if os.path.exists(words_path()):
+            cmd += ['-p', words_path()]
+        return subprocess.run(cmd, input=''.join('^' + w + '\n' for w in words), capture_output=True, text=True,
+                              errors='replace', timeout=30)
+    r = run((lang or 'en-GB').replace('-', '_'))
+    if r.returncode != 0 or not r.stdout.startswith('@'):
+        r = run('en_GB')
+    if r.returncode != 0 or not r.stdout.startswith('@'):
+        raise RuntimeError('hunspell did not run: ' + (r.stderr.strip().splitlines() or ['no dictionary'])[-1])
+    # after the banner, the results of each input line end with an empty line
+    groups = r.stdout.split('\n', 1)[1].split('\n\n')
+    out = {}
+    for w, g in zip(words, groups):
+        for line in g.strip('\n').split('\n'):
+            if line[:1] == '&':
+                out[w] = line.split(': ', 1)[1].split(', ') if ': ' in line else []
+            elif line[:1] == '#':
+                out[w] = []
+    return out
+
+
+# ------------------------------------------------------------- latexindent
+
+LATEXINDENT_SETTINGS = ('localSettings.yaml', 'latexindent.yaml', '.localSettings.yaml', '.latexindent.yaml')
+
+
+def latexindent(text):
+    """The text indented by latexindent, with the paper's own settings when it
+    has some (localSettings.yaml and the like, next to the main file) and the
+    user's (~/.indentconfig.yaml, which latexindent reads itself).  It reads
+    the text on stdin and writes no log or backup into the paper."""
+    exe = shutil.which('latexindent')
+    if not exe:
+        raise RuntimeError('latexindent is not installed (it comes with TeX Live)')
+    cmd = [exe, '-g', os.devnull]
+    if any(os.path.exists(os.path.join(PAPER, n)) for n in LATEXINDENT_SETTINGS):
+        cmd.append('-l')
+    try:
+        r = subprocess.run(cmd, cwd=PAPER, input=text, capture_output=True, text=True, errors='replace', timeout=60)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError('latexindent took more than a minute')
+    if r.returncode != 0 or (not r.stdout.strip() and text.strip()):
+        tail = (r.stderr or '').strip().splitlines()[-3:]
+        raise RuntimeError('latexindent printed nothing' + (': ' + ' '.join(tail) if tail else ''))
+    out = r.stdout
+    # latexindent ends the text with a newline; keep the file's own ending
+    if not text.endswith('\n') and out.endswith('\n'):
+        out = out[:-1]
+    return out
+
+
 # ----------------------------------------------------------------- snippets
 #
 # A command or picture in running text that the page cannot draw itself
@@ -2605,6 +2690,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send(200, {'venues': [{'id': k, 'label': v[0], 'anonClass': v[1] != v[2]} for k, v in convert.TARGETS.items()],
                                    'home': os.path.expanduser('~'),
                                    'parent': os.path.dirname(os.path.dirname(os.path.join(PAPER, MAIN))) if PAPER else os.path.expanduser('~')})
+        if p == '/api/spell/words':
+            return self.send(200, {'words': paper_words()})
         if p == '/api/srcfiles':
             docs = set(paper_files())
             return self.send(200, [{'name': n, 'doc': n in docs} for n in source_files()])
@@ -2849,6 +2936,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if queued:
                 BUILDER.request_snippets()
             return self.send(200, out)
+        if urllib.parse.urlparse(self.path).path == '/api/spell':
+            req = self.json_body() or {}
+            words = [w for w in (req.get('words') or []) if isinstance(w, str) and 0 < len(w) <= 60 and '\n' not in w][:500]
+            try:
+                return self.send(200, {'misspelled': spell_check(words, req.get('lang'))})
+            except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+                return self.send(503, {'error': str(e)})
+        if urllib.parse.urlparse(self.path).path == '/api/spell/add':
+            req = self.json_body() or {}
+            word = req.get('word')
+            if not isinstance(word, str) or not word.strip() or len(word) > 60 or any(c.isspace() for c in word.strip()):
+                return self.send(400, {'error': 'expected one word'})
+            add_paper_word(word.strip())
+            return self.send(200, {'words': paper_words()})
+        if urllib.parse.urlparse(self.path).path == '/api/latexindent':
+            # a text (a file as the page has it, saved or not) through latexindent
+            req = self.json_body() or {}
+            text = req.get('text')
+            if not isinstance(text, str) or len(text) > 5_000_000:
+                return self.send(400, {'error': 'expected the text of a file'})
+            try:
+                return self.send(200, {'text': latexindent(text)})
+            except RuntimeError as e:
+                return self.send(422, {'error': str(e)})
         if urllib.parse.urlparse(self.path).path == '/api/merge':
             # the page's edits of a file that changed on disk, merged with it
             req = self.json_body() or {}

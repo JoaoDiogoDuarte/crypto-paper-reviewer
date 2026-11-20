@@ -21,7 +21,8 @@ and the editor's keymap (`ACTION_DEFS`, `TEXT_KEYS`, `GLOBAL_KEYS`), find
 5. Multiple cursors: paper view, then source view. Done 2026-11-20, with
    the departures listed at the end of section 5.
 6. Kill ring, source-view completion and electric pairs, latexindent,
-   spelling keys `C-,` and `C-.` (section 6b).
+   spelling keys `C-,` and `C-.` (section 6b). Done 2026-11-20, with the
+   departures listed at the end of section 6b.
 7. One sentence per line on save (section 7). Done 2026-11-19.
 8. Merging sections, subsections and subsubsections (section 8). Done
    2026-11-20, with the departures listed at the end of section 8.
@@ -39,7 +40,9 @@ undo reverses each batch.
 2. Move go to line to `M-g` and make `C-g` cancel? Yes, decided 2026-11-20.
 3. Sidebar on the left or the right? List figures, tables and equations from
    the start? Left, headings only at first. Decided 2026-11-20.
-4. Electric pairs in the paper view: on or off by default?
+4. Electric pairs in the paper view: on or off by default? Off (☰ → Close
+   brackets as you type turns them on for `(` and `[`); always on in the
+   source view. Decided 2026-11-20.
 5. Merging: into the previous section by default, as Combine does now, with
    "into the next" only on a key. Decided 2026-11-19.
 6. Merging files: the second file goes to the editor's trash. Decided
@@ -556,6 +559,30 @@ them. Tests: e2e cases on a paragraph with a known misspelling ("recieve"):
 `C-.` gives "receive" on disk after a save, a second `C-.` cycles, `C-z`
 restores the word, `C-,` lists suggestions and Enter applies the chosen one,
 a word inside maths is never offered.
+
+### Done (2026-11-20): step 6 and 6b
+
+- Kill ring: `C-S-v` (action `yank`) lists the last 30 copies and cuts,
+  newest first, in the palette (filtered by words). Every copy path records
+  into it: the paper's copy and cut, `C-w`/`M-w`, copies at many cursors,
+  the source view's copy, cut, `C-w`/`M-w` and the browser's own copy of the
+  text. The pick goes through the paste handlers, so formulas come back as
+  formulas and many cursors each get it. Kept in memory only.
+- Electric pairs: always on in the source view, also at many cursors;
+  after a backslash the escaped pair. In the paper view off by default, a
+  ☰ toggle (kept in the browser's storage), `(` and `[` only.
+- latexindent: on `C-S-c C-S-f`, not `C-c f`: making `C-c` a prefix would
+  take Ctrl+C (copy) from every field. The server runs `latexindent -g
+  /dev/null` on the text through stdin (its `-s` would silence the result
+  too), with `-l` when the paper has local settings; nothing is written
+  into the paper. In the source view the changed lines go in one by one and
+  one `Ctrl+Z` takes them all back; in the paper it is one undo step.
+- Completion: in the source view only, as planned. Labels come from the
+  page (`collectLabels`), cite keys from `/api/bib` (as the cite palette).
+- Spelling keys: as planned. The Electron window's checker is used when it
+  has its dictionary (it answers that "recieve" is misspelled); else
+  `hunspell -a` with the paper's `words.txt` as its personal dictionary.
+- Tests: `node tests/e2e.js 'pairs:' latexindent 'kill ring' spelling completion`.
 
 ## 7. One sentence per line on save
 

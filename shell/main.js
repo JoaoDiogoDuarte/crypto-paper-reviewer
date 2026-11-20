@@ -187,6 +187,9 @@ ipcMain.on('shell-prompt', (event, message, value) => {
   askText(BrowserWindow.fromWebContents(event.sender), message, value, (v) => { event.returnValue = v; });
 });
 
+// a word added to the dictionary from the editor's spelling keys
+ipcMain.on('shell-spell-add', (event, word) => { if (word) event.sender.session.addWordToSpellCheckerDictionary(word); });
+
 // Ctrl+F that the editor leaves to the browser (in the source view): Chrome
 // has a find bar there, Electron has none.  The same text again goes to the
 // next match; an empty one ends the search.

@@ -123,6 +123,7 @@ let ORDER = [];          // display order: segments, each with .file and .el
 let lastTyping = 0;
 // multiple cursors (see the section of that name): declared here, since a
 // render, which drops them, can run before that section is reached
+let SNAP_HOLD = false;   // snapshot() waits: the edit under way belongs to the step before
 const MC = { cursors: [], primary: null, replaying: false, word: false, dwimBlock: false, kill: null, clip: null, raf: 0, expand: -1, note: '', eatClick: false };
 const SMC = { cursors: [], primary: null, shadow: null, kill: null, value: null, raf: 0, word: false, dwimBlock: false, undo: [], redo: [] };
 // The diff view rewrites the editable blocks with its own marks: while it is
@@ -5266,7 +5267,7 @@ load(false).then(() => {
 // change made by the editor and at pauses in typing
 const HISTORY = { undo: [], redo: [] };
 function snapshot() {
-  if (MC.replaying) return;   // an edit at many cursors is one step, taken before it
+  if (MC.replaying || SNAP_HOLD) return;   // an edit at many cursors (or a spelling cycle) is one step, taken before it
   commit();
   const texts = Object.fromEntries(Object.entries(FILES).map(([n, f]) => [n, f.text]));
   const last = HISTORY.undo[HISTORY.undo.length - 1];
@@ -5519,6 +5520,51 @@ const WRAP_PAIRS = {
   '(': ['(', ')'], ')': ['(', ')'], '[': ['[', ']'], ']': ['[', ']'], '{': ['{', '}'], '}': ['{', '}'],
   '"': ['“', '”'], "'": ['‘', '’'], '`': ['‘', '’'],
 };
+
+// In the paper view, ( and [ typed at the caret come in pairs when that is
+// turned on (☰ → Close brackets as you type; off by default, since text
+// rarely wants it), with the rules of srcPair.
+let PAPER_PAIRS = false;
+try { PAPER_PAIRS = localStorage.getItem('paper-pairs') === '1'; } catch (e) { /* storage unavailable */ }
+const PAPER_PAIR = { '(': ')', '[': ']' };
+function setPaperPairs(on) {
+  PAPER_PAIRS = !!on;
+  try { localStorage.setItem('paper-pairs', on ? '1' : ''); } catch (e) { /* storage unavailable */ }
+  const b = document.getElementById('pairsbtn');
+  if (b) { b.setAttribute('aria-pressed', on ? 'true' : 'false'); b.classList.toggle('pressed', !!on); }
+}
+// the characters just before and after a collapsed selection, in its text node
+function caretChars() {
+  const s = getSelection();
+  if (!s.rangeCount || !s.isCollapsed) return null;
+  const n = s.focusNode, o = s.focusOffset;
+  if (n.nodeType !== 3) return { before: '', after: '' };
+  return { before: n.data[o - 1] || '', after: n.data[o] || '' };
+}
+function paperPair(key) {
+  if (!PAPER_PAIRS) return false;
+  const c = caretChars();
+  if (!c) return false;
+  if (PAPER_PAIR[key]) {
+    if (c.after && !/[\s)\],.;:\u00a0]/.test(c.after)) return false;
+    document.execCommand('insertText', false, key + PAPER_PAIR[key]);
+    getSelection().modify('move', 'backward', 'character');
+    return true;
+  }
+  if (')]'.includes(key) && c.after === key) { getSelection().modify('move', 'forward', 'character'); return true; }
+  return false;
+}
+function paperPairBackspace() {
+  if (!PAPER_PAIRS) return false;
+  const c = caretChars();
+  if (!c || !PAPER_PAIR[c.before] || c.after !== PAPER_PAIR[c.before]) return false;
+  const s = getSelection();
+  s.modify('move', 'backward', 'character');
+  s.modify('extend', 'forward', 'character');
+  s.modify('extend', 'forward', 'character');
+  document.execCommand('delete');
+  return true;
+}
 
 // Wrap the selection in open … close; the selection stays on the wrapped
 // text, so that another key wraps it again.
@@ -5922,6 +5968,7 @@ async function cutRegionOrLine() {
   if (s.isCollapsed) selectLine();
   if (document.execCommand('cut')) return;
   snapshot();
+  killRecord(s.toString());
   try { await navigator.clipboard.writeText(s.toString()); } catch (e) { /* clipboard refused */ }
   deleteKeepingEnvs(selRange());
   markEditedSoon();
@@ -6067,7 +6114,8 @@ const TEXT_KEYS = {
 document.addEventListener('keydown', (e) => {
   const k = keyName(e);
   const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) && !e.target.closest('.seg');
-  if (inField && !['C-s', 'C-S', 'C-f', 'Escape'].includes(k) && !(GLOBAL_KEYS[k] && GLOBAL_KEYS[k].cancels)) {
+  const inSourceText = SRC.on && e.target.id === 'srcta' && GLOBAL_KEYS[k] && GLOBAL_KEYS[k].inSource;
+  if (inField && !inSourceText && !['C-s', 'C-S', 'C-f', 'Escape'].includes(k) && !(GLOBAL_KEYS[k] && GLOBAL_KEYS[k].cancels)) {
     // the source view's text keeps its own keys too, but switches back
     if (SRC.on && e.target.id === 'srcta' && (USER_KEYS.source || ['C-M-e']).includes(k)) { e.preventDefault(); toggleSource(false); }
     // and opens the file in the user's own editor
@@ -6105,6 +6153,7 @@ document.addEventListener('keydown', (e) => {
     if (!getSelection().isCollapsed) { e.preventDefault(); mathAtSelection(); return; }
     if (closeMathAtCaret()) e.preventDefault();
   }
+  if (!e.ctrlKey && !e.altKey && !e.metaKey && ((e.key === 'Backspace' && paperPairBackspace()) || (e.key.length === 1 && paperPair(e.key)))) { e.preventDefault(); return; }
   if (TEXT_KEYS[k]) { e.preventDefault(); TEXT_KEYS[k](); return; }
   // the browser's own bold, italic, underline would bypass the editor (and
   // keep working after the shortcut is moved to another key)
@@ -6204,6 +6253,8 @@ function openPalette(opts) {
 
 function closePalette() {
   $('#palette').hidden = true; PAL.opts = null; PAL.busy = false;
+  for (const p of ['top', 'left', 'transform']) $('#palette').style[p] = '';   // (placed at a word by the spelling list)
+  MC.hold = false;
   clearTimeout(PAL.timer);
   if (PAL.abort) { PAL.abort.abort(); PAL.abort = null; }
 }
@@ -6279,6 +6330,7 @@ function insertAtSaved(src) {
 
 $('#pal-q').addEventListener('input', refreshPalette);
 $('#pal-q').addEventListener('keydown', (e) => {
+  if (PAL.opts && PAL.opts.onKey && PAL.opts.onKey(e)) { e.preventDefault(); return; }
   if (e.key === 'ArrowDown') { e.preventDefault(); PAL.active = Math.min(PAL.active + 1, PAL.items.length - 1); drawPalette(); }
   else if (e.key === 'ArrowUp') { e.preventDefault(); PAL.active = Math.max(PAL.active - 1, 0); drawPalette(); }
   else if (e.key === 'Enter') { e.preventDefault(); choose(e.ctrlKey || e.metaKey); }
@@ -6812,6 +6864,9 @@ function setColourBlind(on) {
   try { localStorage.setItem('colourblind', on ? '1' : ''); } catch (e) { /* storage unavailable */ }
 }
 {
+  setPaperPairs(PAPER_PAIRS);
+  const p = document.getElementById('pairsbtn');
+  if (p) p.addEventListener('click', () => { setPaperPairs(!PAPER_PAIRS); toast(PAPER_PAIRS ? 'Brackets close as you type' : 'Brackets no longer close as you type'); });
   const b = document.getElementById('cbmode');
   if (b) b.addEventListener('click', () => { setColourBlind(!document.documentElement.dataset.cb); toast(document.documentElement.dataset.cb ? 'Colour-blind palette on' : 'Colour-blind palette off'); });
   let on = false;
@@ -9074,6 +9129,11 @@ const ACTION_DEFS = [
     else toast('Put the cursor in a figure or table for that', 'error');
   }],
   ['colourblind', 'Colour-blind palette on or off', 'global', ['C-M-k'], () => setColourBlind(!document.documentElement.dataset.cb)],
+  ['spellfix', 'Spelling: correct the misspelled word at or before the cursor (pressed again: the next suggestion)', 'text', ['C-.'], () => spellFix()],
+  ['spelllist', 'Spelling: the suggestions for the misspelled word at or before the cursor (pressed again: the word before)', 'text', ['C-,'], () => spellList()],
+  ['yank', 'Paste one of the last copies and cuts (the kill ring)', 'global', ['C-V'], () => killRingPalette()],
+  ['latexindent', 'latexindent: indent the file (in the source view the file shown, in the paper the file of the block at the cursor)', 'global', ['C-C C-F'], () => latexindentFile()],
+  ['pairs', 'Close brackets as you type in the paper view, on or off (the source view always does)', 'global', [], () => { setPaperPairs(!PAPER_PAIRS); toast(PAPER_PAIRS ? 'Brackets close as you type' : 'Brackets no longer close as you type'); }],
   ['linestart', 'Start of line', 'text', ['C-a'], () => getSelection().modify('move', 'backward', 'lineboundary')],
   ['lineend', 'End of line', 'text', ['C-e'], () => getSelection().modify('move', 'forward', 'lineboundary')],
   ['selstart', 'Select to start of line', 'text', ['C-A'], () => getSelection().modify('extend', 'backward', 'lineboundary')],
@@ -9484,6 +9544,8 @@ function cancelKey() {
 }
 // the cancel key works in fields too (the find bar, the palette)
 for (const [id, , , , fn] of ACTION_DEFS) if (id === 'cancel') fn.cancels = true;
+// (and the kill ring's key works in the source view's text too)
+for (const [id, , , , fn] of ACTION_DEFS) if (id === 'yank') fn.inSource = true;
 
 // ------------------------------------------------------------ prefix keys
 //
@@ -9777,7 +9839,7 @@ function mcCaretBox(r) {
 function mcDraw() {
   if (!mcActive()) return;
   // a render, the figure viewer or a dialog: back to one cursor
-  if (MC.cursors.some((c) => !c.ed.isConnected) || topDialog() || !$('#figview').hidden || SRC.on) { mcClear(); return; }
+  if (MC.cursors.some((c) => !c.ed.isConnected) || (topDialog() && !MC.hold) || !$('#figview').hidden || SRC.on) { mcClear(); return; }
   let layer = document.getElementById('mc-layer');
   if (!layer) { layer = el('div'); layer.id = 'mc-layer'; document.body.append(layer); }
   const sel = [];
@@ -9877,6 +9939,7 @@ function mcType(text) {
       if (!s.isCollapsed) { mathAtSelection(); return; }
       if (closeMathAtCaret()) return;
     }
+    if (paperPair(text)) return;
     if (!s.isCollapsed) {
       const r = s.getRangeAt(0).cloneRange();
       if (unpairedEnvChips(envChipsIn(r)).length) { deleteKeepingEnvs(r); s.removeAllRanges(); s.addRange(r); }
@@ -9903,6 +9966,7 @@ function mcDelete(back, unit = 'character') {
   const stops = (m) => `${key} stops at the ${envOf(m)[1] === 'begin' ? 'start' : 'end'} of ${envName(m)}`;
   mcEach((c) => {
     const s = getSelection();
+    if (s.isCollapsed && back && unit === 'character' && paperPairBackspace()) return;
     if (s.isCollapsed) {
       const nb = neighbours(s.getRangeAt(0));
       const n = back ? nb.before : nb.after;
@@ -9964,6 +10028,7 @@ function mcClipboard(e, cut, line) {
   e.clipboardData.setData('text/plain', got.map((p) => p.plain).join('\n'));
   e.clipboardData.setData(LATEX_MIME, got.map((p) => p.latex).join('\n'));
   MC.kill = { plain: got.map((p) => p.plain), latex: got.map((p) => p.latex) };
+  killRecord(got.map((p) => p.plain).join('\n'), got.map((p) => p.latex).join('\n'));
   if (!cut) { mcShowPrimary(); toast(`Copied the text at ${got.length} cursors`); return; }
   const at = new Map(got.map((p) => [p.c, p]));
   mcEach((c) => {
@@ -10099,7 +10164,7 @@ document.addEventListener('mousedown', (e) => {
     mcDraw();
     return;
   }
-  if (mcActive() && !(e.target.closest && e.target.closest('#findbar, #whichkey'))) mcClear();
+  if (mcActive() && !(e.target.closest && e.target.closest('#findbar, #whichkey, #palette'))) mcClear();
 }, true);
 for (const type of ['mouseup', 'click']) {
   document.addEventListener(type, (e) => {
@@ -11063,6 +11128,9 @@ function buildSourceView() {
       return;
     }
     if (SOURCE_KEYS[k] && !ta.readOnly) { e.preventDefault(); e.stopPropagation(); SOURCE_KEYS[k](); setTimeout(() => ta.dispatchEvent(new Event('keyup')), 0); return; }
+    // brackets typed at the caret come in pairs (and Backspace takes an empty pair)
+    if (!ta.readOnly && !e.ctrlKey && !e.altKey && !e.metaKey &&
+        ((e.key === 'Backspace' && srcPairBackspace(ta)) || (e.key.length === 1 && srcPair(ta, e.key)))) { e.preventDefault(); return; }
     // a bracket or $ typed over a selection wraps it, as in the page
     const pair = { '{': '}', '(': ')', '[': ']', $: '$' }[e.key];
     if (pair && !ta.readOnly && !e.ctrlKey && !e.altKey && !e.metaKey && ta.selectionStart !== ta.selectionEnd) {
@@ -11466,7 +11534,36 @@ function srcReplace(ta, a, b, text) {
   ta.setSelectionRange(a, b);
   if (!document.execCommand('insertText', false, text)) { ta.setRangeText(text, a, b, 'end'); ta.dispatchEvent(new Event('input')); }
 }
-async function srcClip(text) { try { await navigator.clipboard.writeText(text); } catch (e) { /* clipboard refused */ } }
+// Brackets typed at the caret come in pairs, as with Emacs's
+// electric-pair-mode: ( [ { insert their closing one after the caret (after a
+// backslash, the escaped one: \( gives \(\)), when what follows is a space,
+// the end of the line or a closing bracket or punctuation; a closing bracket
+// typed before the same one steps over it; Backspace between an empty pair
+// takes both.  ta is the text area, or the copy of its text that multiple
+// cursors edit.
+const SRC_PAIRS = { '(': ')', '[': ']', '{': '}' };
+function srcPair(ta, key) {
+  const a = ta.selectionStart, v = ta.value;
+  if (a !== ta.selectionEnd) return false;
+  if (SRC_PAIRS[key]) {
+    if (v[a] !== undefined && !/[\s)\]},.;:]/.test(v[a])) return false;
+    const esc = v[a - 1] === '\\' && v[a - 2] !== '\\';
+    srcReplace(ta, a, a, key + (esc ? '\\' : '') + SRC_PAIRS[key]);
+    ta.setSelectionRange(a + 1, a + 1);
+    return true;
+  }
+  if (')]}'.includes(key) && v[a] === key) { ta.setSelectionRange(a + 1, a + 1); return true; }
+  return false;
+}
+function srcPairBackspace(ta) {
+  const a = ta.selectionStart, v = ta.value;
+  if (a !== ta.selectionEnd || !a) return false;
+  if (SRC_PAIRS[v[a - 1]] && v[a] === SRC_PAIRS[v[a - 1]]) { srcReplace(ta, a - 1, a + 1, ''); return true; }
+  if (v[a - 2] === '\\' && SRC_PAIRS[v[a - 1]] && v.slice(a, a + 2) === '\\' + SRC_PAIRS[v[a - 1]]) { srcReplace(ta, a - 2, a + 2, ''); return true; }
+  return false;
+}
+async function srcClip(text) {
+  killRecord(text); try { await navigator.clipboard.writeText(text); } catch (e) { /* clipboard refused */ } }
 const SOURCE_ACTIONS = {
   gotoLine(line) {
     const ta = srcTa();
@@ -11693,6 +11790,7 @@ function smcLoad(st) {
 function smcType(ch) {
   smcEach((ta) => {
     const a = ta.selectionStart, b = ta.selectionEnd;
+    if (srcPair(ta, ch)) return;
     const pair = { '{': '}', '(': ')', '[': ']', $: '$' }[ch];
     if (pair && a !== b) {
       const inner = ta.value.slice(a, b);
@@ -11708,6 +11806,7 @@ function smcDelete(back, word) {
   smcEach((ta) => {
     const v = ta.value, a = ta.selectionStart, b = ta.selectionEnd;
     if (a !== b) { srcReplace(ta, a, b, ''); return; }
+    if (back && !word && srcPairBackspace(ta)) return;
     if (back) {
       let i = a - 1;
       if (word) { i = a; while (i > 0 && !SMC_WORD.test(v[i - 1]) && v[i - 1] !== '\n') i--; while (i > 0 && SMC_WORD.test(v[i - 1])) i--; if (i === a) i = a - 1; }
@@ -11759,6 +11858,7 @@ function smcCopy(cut, clipboardData) {
   const ps = smcPieces();
   const text = ps.map((p) => p.text).join('\n');
   SMC.kill = ps.map((p) => p.text);
+  killRecord(text);
   if (clipboardData) clipboardData.setData('text/plain', text); else srcClip(text);
   if (!cut) { toast(`Copied the text at ${ps.length} cursors`); return; }
   const at = new Map(ps.map((p) => [p.c, p]));
@@ -12062,7 +12162,7 @@ addEventListener('compositionend', (e) => {
 // C-S-click: the browser moves the caret there (extending the selection),
 // which becomes a cursor of its own; any other click goes back to one cursor
 document.addEventListener('mousedown', (e) => {
-  if (e.button !== 0 || e.target.id !== 'srcta') { if (smcActive() && e.button === 0 && !(e.target.closest && e.target.closest('#whichkey'))) smcClear(); return; }
+  if (e.button !== 0 || e.target.id !== 'srcta') { if (smcActive() && e.button === 0 && !(e.target.closest && e.target.closest('#whichkey, #palette'))) smcClear(); return; }
   const ta = e.target;
   if (!(e.ctrlKey && e.shiftKey && !e.altKey)) { if (smcActive()) smcClear(); return; }
   if (ta.readOnly) return;
@@ -12075,6 +12175,436 @@ document.addEventListener('mousedown', (e) => {
     smcShow();
   }, 0), { once: true, capture: true });
 }, true);
+
+// ---- spelling keys, as flyspell: C-. corrects the misspelled word at or
+// before the caret with the first suggestion (pressed again at once, the
+// next one, and at the end the word as it was), C-, lists the suggestions at
+// the word.  The words are those of the caret's block (never in a formula, a
+// reference or another chip).  The Electron window's own spell checker
+// answers when it has its dictionary; else hunspell on the server.  Words
+// added go to the paper's dictionary, .paper-editor/words.txt.
+const SPELL = { dict: null, cache: new Map(), cycle: null };
+const SPELL_WORD = /\p{L}+(?:['’]\p{L}+)*/gu;
+async function spellDict() {
+  if (!SPELL.dict) {
+    try { SPELL.dict = new Set(((await (await fetch('/api/spell/words')).json()).words) || []); } catch (e) { SPELL.dict = new Set(); }
+  }
+  return SPELL.dict;
+}
+function shellSpell() {
+  const s = window.__shellSpell;
+  try { return s && s.misspelled('recieve') ? s : null; } catch (e) { return null; }
+}
+// word -> its suggestions, for the misspelled ones
+async function spellCheck(words) {
+  const dict = await spellDict();
+  const ask = [...new Set(words)].filter((w) => w.length > 1 && !dict.has(w) && !dict.has(w.toLowerCase()) && !SPELL.cache.has(w));
+  const sh = shellSpell();
+  if (sh) for (const w of ask) SPELL.cache.set(w, sh.misspelled(w) ? (sh.suggestions(w) || []) : null);
+  else if (ask.length) {
+    const r = await fetch('/api/spell', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
+      body: JSON.stringify({ words: ask, lang: (DOC.config && DOC.config.spell_lang) || 'en-GB' }) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || 'error ' + r.status);
+    for (const w of ask) SPELL.cache.set(w, d.misspelled[w] || null);
+  }
+  const out = new Map();
+  for (const w of words) if (!dict.has(w) && !dict.has(w.toLowerCase()) && SPELL.cache.get(w)) out.set(w, SPELL.cache.get(w));
+  return out;
+}
+async function spellAdd(word) {
+  (await spellDict()).add(word);
+  SPELL.cache.delete(word);
+  const sh = shellSpell();
+  if (sh) sh.add(word);
+  await fetch('/api/spell/add', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN }, body: JSON.stringify({ word }) }).catch(() => {});
+}
+// the words of the caret's block up to the caret (the one it is in counts),
+// nearest first, as offsets in the block (see mcOff)
+function spellWordsBefore() {
+  const s = getSelection();
+  if (!s.rangeCount) return null;
+  const ed = hostOf(s.focusNode);
+  if (!mcUsable(ed)) return null;
+  const caret = mcOff(ed, s.focusNode, s.focusOffset);
+  const words = [];
+  for (const m of mcText(ed).matchAll(SPELL_WORD)) if (m.index <= caret) words.push({ start: m.index, end: m.index + m[0].length, word: m[0] });
+  return { ed, caret, words: words.reverse() };
+}
+async function spellFirstBad(here, before = Infinity) {
+  const words = here.words.filter((w) => w.start < before).slice(0, 300);
+  let bad;
+  try { bad = await spellCheck(words.map((w) => w.word)); } catch (e) { banner('Spelling suggestions need hunspell, or the Electron window: ' + e.message); return undefined; }
+  const w = words.find((x) => bad.has(x.word));
+  return w ? { ...w, sugg: bad.get(w.word) } : null;
+}
+// replace start..end of the block with text, the caret kept where it was
+// (moved with the text after it); returns the caret's new offset
+function spellReplace(ed, start, end, text, caret) {
+  const a = mcPoint(ed, start), b = mcPoint(ed, end);
+  ed.focus({ preventScroll: true });
+  getSelection().setBaseAndExtent(a[0], a[1], b[0], b[1]);
+  SNAP_HOLD = true;
+  try { document.execCommand('insertText', false, text); } finally { SNAP_HOLD = false; }
+  clearTimeout(typingSnap); typingSnap = null; typingIn = null;   // what is typed next is a step of its own
+  const c = caret >= end ? caret + text.length - (end - start) : Math.min(caret, start + text.length);
+  const p = mcPoint(ed, c);
+  getSelection().setBaseAndExtent(p[0], p[1], p[0], p[1]);
+  markEditedSoon();
+  return c;
+}
+async function spellFix() {
+  const here = spellWordsBefore();
+  if (!here) { toast('Put the cursor in the text first', 'error'); return; }
+  const cy = SPELL.cycle;
+  if (cy && cy.ed === here.ed && cy.caret === here.caret && Date.now() - cy.t < 10000 && mcText(cy.ed).slice(cy.start, cy.start + cy.current.length) === cy.current) {
+    cy.idx = (cy.idx + 1) % (cy.sugg.length + 1);
+    const next = cy.idx < cy.sugg.length ? cy.sugg[cy.idx] : cy.orig;
+    cy.caret = spellReplace(cy.ed, cy.start, cy.start + cy.current.length, next, cy.caret);
+    cy.current = next; cy.t = Date.now();
+    toast(cy.idx < cy.sugg.length ? `${cy.orig} → ${next}` : `${cy.orig}, as it was`);
+    return;
+  }
+  SPELL.cycle = null;
+  const bad = await spellFirstBad(here);
+  if (bad === undefined) return;
+  if (!bad) { toast('No misspelled word before the cursor in this paragraph'); return; }
+  if (!bad.sugg.length) { toast(`No suggestion for “${bad.word}”`); return; }
+  snapshot();
+  const caret = spellReplace(here.ed, bad.start, bad.end, bad.sugg[0], here.caret);
+  SPELL.cycle = { ed: here.ed, start: bad.start, orig: bad.word, current: bad.sugg[0], sugg: bad.sugg, idx: 0, caret, t: Date.now() };
+  toast(`${bad.word} → ${bad.sugg[0]}`);
+}
+async function spellList(before) {
+  const here = spellWordsBefore();
+  if (!here) { toast('Put the cursor in the text first', 'error'); return; }
+  SPELL.cycle = null;
+  const bad = await spellFirstBad(here, before);
+  if (bad === undefined) return;
+  if (!bad) { toast(before !== undefined ? 'No other misspelled word before it in this paragraph' : 'No misspelled word before the cursor in this paragraph'); return; }
+  const back = () => { const p = mcPoint(here.ed, here.caret); here.ed.focus({ preventScroll: true }); getSelection().setBaseAndExtent(p[0], p[1], p[0], p[1]); };
+  openPalette({
+    title: `Spelling: “${bad.word}”`, placeholder: 'Filter the suggestions (1 to 9 pick one)', delay: 0,
+    empty: 'No suggestion',
+    search: async (q) => [...bad.sugg.filter((x) => x.toLowerCase().includes(q.toLowerCase())).map((x) => ({ s: x })), { add: true }],
+    view: (it) => it.add ? { main: `Add “${escHtml(bad.word)}” to the paper's dictionary`, sub: '.paper-editor/words.txt' }
+      : { main: escHtml(it.s), badges: PAL.items.indexOf(it) < 9 ? [{ text: String(PAL.items.indexOf(it) + 1) }] : [] },
+    pick: async (it) => {
+      closePalette();
+      back();
+      if (it.add) { await spellAdd(bad.word); toast(`“${bad.word}” is in the paper's dictionary`, 'ok'); return; }
+      snapshot();
+      spellReplace(here.ed, bad.start, bad.end, it.s, here.caret);
+      toast(`${bad.word} → ${it.s}`);
+    },
+    onKey: (e) => {
+      if (/^[1-9]$/.test(e.key) && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        const i = +e.key - 1;
+        if (PAL.items[i] && !PAL.items[i].add) { PAL.active = i; choose(); }
+        return true;
+      }
+      if ((USER_KEYS.spelllist || ['C-,']).includes(keyName(e))) { closePalette(); back(); spellList(bad.start); return true; }
+      return false;
+    },
+  });
+  // the list at the word, below it (or above, near the bottom of the window)
+  const pal = $('#palette');
+  if (pal.hidden) return;
+  const r = mcRange({ ed: here.ed, a: bad.start, f: bad.end }).getBoundingClientRect();
+  const h = pal.offsetHeight || 300;
+  pal.style.transform = 'none';
+  pal.style.top = (r.bottom + 6 + h < innerHeight ? r.bottom + 6 : Math.max(8, r.top - h - 6)) + 'px';
+  pal.style.left = Math.max(8, Math.min(r.left, innerWidth - pal.offsetWidth - 8)) + 'px';
+}
+
+// ---- the kill ring: the last 30 copies and cuts, of the paper and of the
+// source view, newest first; C-S-v (consult-yank-pop) picks one in the
+// palette and pastes it as a paste would (formulas and all, at every cursor).
+const KILLS = [];
+function killRecord(plain, latex = '') {
+  if (!plain || !plain.trim()) return;
+  const i = KILLS.findIndex((k) => k.plain === plain && k.latex === latex);
+  if (i >= 0) KILLS.splice(i, 1);
+  KILLS.unshift({ plain, latex, at: Date.now() });
+  if (KILLS.length > 30) KILLS.length = 30;
+}
+// after the handlers of the page have put their text on the clipboard
+for (const type of ['copy', 'cut']) {
+  document.addEventListener(type, (e) => {
+    const t = e.target;
+    if (t.tagName === 'INPUT') return;
+    if (t.tagName === 'TEXTAREA') { if (!e.defaultPrevented) killRecord(t.value.slice(t.selectionStart, t.selectionEnd)); return; }
+    if (e.defaultPrevented && e.clipboardData) killRecord(e.clipboardData.getData('text/plain'), e.clipboardData.getData(LATEX_MIME));
+    else if (!e.defaultPrevented) killRecord(getSelection().toString());
+  });
+}
+const ago = (t) => { const m = Math.round((Date.now() - t) / 60000); return m < 1 ? 'just now' : m < 60 ? m + ' min ago' : Math.round(m / 60) + ' h ago'; };
+function killRingPalette() {
+  if (!KILLS.length) { toast('Nothing copied or cut yet'); return; }
+  const ta = $('#srcta');
+  const inSrc = SRC.on && document.activeElement === ta;
+  if (inSrc && ta.readOnly) { toast('Preview only: turn it off to edit here'); return; }
+  const at = inSrc ? [ta.selectionStart, ta.selectionEnd] : null;
+  MC.hold = mcActive();    // the cursors stay while the palette is open
+  openPalette({
+    title: 'Paste one of the last copies and cuts', placeholder: 'Words of the text', anywhere: inSrc, delay: 0,
+    empty: 'No copy or cut has these words.',
+    search: async (q) => { const ws = q.toLowerCase().split(/\s+/).filter(Boolean); return KILLS.filter((k) => ws.every((w) => k.plain.toLowerCase().includes(w))); },
+    view: (k) => ({ main: escHtml(k.plain.length > 160 ? k.plain.slice(0, 157) + '…' : k.plain).replace(/\n/g, ' <span class="sub">⏎</span> '),
+      sub: ago(k.at) + (k.latex ? ' · with its LaTeX' : '') }),
+    pick: (k) => {
+      const saved = PAL.savedRange;
+      closePalette();
+      killRecord(k.plain, k.latex);
+      if (inSrc) {
+        ta.focus();
+        ta.setSelectionRange(...at);
+        if (smcActive()) smcPaste(k.plain); else srcReplace(ta, at[0], at[1], k.plain);
+        return;
+      }
+      if (!saved) return;
+      const host = editableAt(saved);
+      if (host) host.focus();
+      const s = getSelection(); s.removeAllRanges(); s.addRange(saved);
+      if (mcActive()) mcShowPrimary();
+      const dt = new DataTransfer();
+      dt.setData('text/plain', k.plain);
+      if (k.latex) dt.setData(LATEX_MIME, k.latex);
+      (host || document.activeElement).dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+    },
+  });  if ($('#palette').hidden) MC.hold = false;
+}
+
+// ---- completion in the source view (as corfu): after \ and a letter the
+// macros of the preamble, the commands the paper uses and common ones; after
+// \begin{ the environments (the \end comes with the choice); in \cref{...}
+// and the like the labels; in \cite{...} the keys of the .bib files.  Up and
+// Down choose, Enter or Tab take one, Escape (or any other key that leaves
+// the word) closes the list.
+const COMP = { open: false, items: [], active: 0, from: 0, kind: '', seq: 0, cache: null };
+const COMMON_MACROS = ['section', 'subsection', 'subsubsection', 'paragraph', 'label', 'cref', 'Cref', 'ref', 'eqref', 'cite', 'citep', 'citet',
+  'emph', 'textbf', 'textit', 'texttt', 'textsc', 'footnote', 'item', 'begin', 'end', 'includegraphics', 'caption', 'centering',
+  'mathsf', 'mathcal', 'mathbb', 'mathbf', 'mathrm', 'frac', 'sum', 'prod', 'left', 'right', 'leq', 'geq', 'neq', 'cdot', 'ldots',
+  'cdots', 'gets', 'leftarrow', 'rightarrow', 'Rightarrow', 'Leftrightarrow', 'mapsto', 'in', 'notin', 'subseteq', 'cup', 'cap',
+  'land', 'lor', 'neg', 'forall', 'exists', 'top', 'bot', 'oplus', 'otimes', 'sample', 'text', 'url', 'href', 'input', 'newcommand',
+  'renewcommand', 'usepackage', 'noindent', 'medskip', 'smallskip', 'bigskip', 'vspace', 'hspace', 'quad', 'qquad'];
+const COMMON_ENVS = ['itemize', 'enumerate', 'description', 'figure', 'table', 'tabular', 'equation', 'equation*', 'align', 'align*',
+  'gather', 'multline', 'theorem', 'lemma', 'definition', 'corollary', 'proposition', 'proof', 'remark', 'example', 'abstract',
+  'center', 'quote', 'minipage', 'lstlisting', 'verbatim', 'tikzpicture', 'array', 'cases', 'pmatrix'];
+// what is being typed at the caret, if it is something to complete
+function compContext(ta) {
+  const a = ta.selectionStart;
+  if (a !== ta.selectionEnd) return null;
+  const v = ta.value, line = v.slice(v.lastIndexOf('\n', a - 1) + 1, a);
+  let m;
+  if ((m = /\\begin\{([A-Za-z*]*)$/.exec(line))) return { kind: 'env', from: a - m[1].length, q: m[1] };
+  if ((m = /\\(?:[cC]ref|[cC]pageref|[vV]ref|ref|eqref|autoref|pageref|nameref|labelcref)\{(?:[^{}]*,)?\s*([^{},\s]*)$/.exec(line))) return { kind: 'label', from: a - m[1].length, q: m[1] };
+  if ((m = /\\[A-Za-z]*cite[A-Za-z]*\*?(?:\[[^\]]*\])*\{(?:[^{}]*,)?\s*([^{},\s]*)$/.exec(line))) return { kind: 'cite', from: a - m[1].length, q: m[1] };
+  if ((m = /(\\+)([A-Za-z@]+)$/.exec(line)) && m[1].length % 2 === 1) return { kind: 'macro', from: a - m[2].length, q: m[2] };
+  return null;
+}
+// the macros and environments of the paper, counted (read again when the files change)
+function compNames() {
+  const stamp = Object.values(FILES).reduce((n, f) => n + (f.text || '').length, 0) + ':' + Object.keys(FILES).length;
+  if (COMP.cache && COMP.cache.stamp === stamp) return COMP.cache;
+  const macros = new Map(), envs = new Map();
+  const bump = (map, k, n = 1) => map.set(k, (map.get(k) || 0) + n);
+  for (const f of Object.values(FILES)) {
+    for (const m of (f.text || '').matchAll(/\\([A-Za-z@]+)/g)) bump(macros, m[1]);
+    for (const m of (f.text || '').matchAll(/\\begin\{([A-Za-z*]+)\}/g)) bump(envs, m[1]);
+  }
+  for (const k of Object.keys(DOC.macros || {})) bump(macros, k.replace(/^\\/, ''), 5);
+  for (const k of COMMON_MACROS) bump(macros, k, 0.5);
+  // the paper's own first, then its theorem kinds, then common ones
+  for (const k of Object.keys(DOC.theorems || {})) bump(envs, k, 0.6);
+  for (const k of COMMON_ENVS) bump(envs, k, 0.5);
+  envs.delete('document');
+  macros.delete('begin'); macros.delete('end');
+  for (const k of ['begin', 'end']) macros.set(k, 0.4);
+  COMP.cache = { stamp, macros, envs };
+  return COMP.cache;
+}
+// names matching q: those that start with it first, the most used first
+function compRank(map, q) {
+  const ql = q.toLowerCase();
+  return [...map.entries()].filter(([k]) => k.toLowerCase().includes(ql) && k !== q)
+    .sort((x, y) => (y[0].toLowerCase().startsWith(ql) - x[0].toLowerCase().startsWith(ql)) || (y[1] - x[1]) || x[0].localeCompare(y[0]))
+    .slice(0, 12).map(([k]) => ({ name: k, sub: '' }));
+}
+async function compItems(c) {
+  if (c.kind === 'macro') {
+    const items = compRank(compNames().macros, c.q);
+    for (const it of items) { const d = (DOC.macros || {})['\\' + it.name]; if (d) it.sub = d.slice(0, 40); }
+    return items;
+  }
+  if (c.kind === 'env') return compRank(compNames().envs, c.q);
+  if (c.kind === 'label') {
+    const ql = c.q.toLowerCase();
+    return collectLabels().filter((l) => l.key.toLowerCase().includes(ql) && l.key !== c.q)
+      .sort((x, y) => y.key.toLowerCase().startsWith(ql) - x.key.toLowerCase().startsWith(ql)).slice(0, 12)
+      .map((l) => ({ name: l.key, sub: `${l.name} ${l.num}${l.text ? ' · ' + l.text.slice(0, 50) : ''}` }));
+  }
+  // cite: the .bib files (what is cited already, before anything is typed)
+  if (!c.q) return Object.keys(DOC.bib || {}).slice(0, 12).map((k) => ({ name: k, sub: cleanTex(DOC.bib[k]).slice(0, 60) }));
+  const r = await fetch('/api/bib?q=' + encodeURIComponent(c.q)).catch(() => null);
+  const d = r && r.ok ? await r.json().catch(() => []) : [];
+  return d.filter((e) => e.key !== c.q).slice(0, 12).map((e) => ({ name: e.key, sub: cleanTex(`${e.title || ''} ${e.year || ''}`).slice(0, 60) }));
+}
+function compBox() {
+  let b = document.getElementById('comp');
+  if (!b) { b = el('div'); b.id = 'comp'; b.setAttribute('role', 'listbox'); document.body.append(b); }
+  return b;
+}
+function compClose() {
+  COMP.open = false; COMP.items = []; COMP.seq++;
+  const b = document.getElementById('comp');
+  if (b) b.hidden = true;
+}
+// where the caret of the source text is drawn
+function srcCaretBox(off) {
+  const ta = $('#srcta'), v = ta.value, rows = $('#srchl').children;
+  if (rows.length) {
+    const p = smcPoint(rows, smcStarts(v.slice(0, off + 1)), off);
+    if (p) { const r = document.createRange(); r.setStart(...p); return mcCaretBox(r); }
+  }
+  const cs = getComputedStyle(ta), lh = parseFloat(cs.lineHeight) || 18, tb = ta.getBoundingClientRect();
+  const line = v.slice(0, off).split('\n').length - 1, col = off - (v.lastIndexOf('\n', off - 1) + 1);
+  return { x: tb.left + parseFloat(cs.paddingLeft) + col * 7.8 - ta.scrollLeft, top: tb.top + parseFloat(cs.paddingTop) + line * lh - ta.scrollTop, h: lh };
+}
+function compDraw() {
+  const b = compBox();
+  b.textContent = '';
+  COMP.items.forEach((it, i) => {
+    const row = el('div', 'comp-item' + (i === COMP.active ? ' active' : ''));
+    row.setAttribute('role', 'option');
+    row.append(el('span', 'comp-name', (COMP.kind === 'macro' ? '\\' : '') + it.name), el('span', 'comp-sub', it.sub || ''));
+    row.onmousedown = (e) => { e.preventDefault(); COMP.active = i; compAccept(); };
+    b.append(row);
+  });
+  const box = srcCaretBox(COMP.from);
+  b.hidden = false;
+  const h = b.offsetHeight;
+  b.style.left = Math.max(4, Math.min(box.x - 4, innerWidth - b.offsetWidth - 4)) + 'px';
+  b.style.top = (box.top + box.h + 2 + h < innerHeight ? box.top + box.h + 2 : Math.max(4, box.top - h - 2)) + 'px';
+}
+async function compUpdate(opening) {
+  // (after the code that typed: a bracket pair puts the caret between its brackets after inserting them)
+  await null;
+  const ta = $('#srcta');
+  if (!ta || !SRC.on || ta.readOnly || smcActive() || document.activeElement !== ta) { compClose(); return; }
+  const c = compContext(ta);
+  if (!c || (!COMP.open && !opening) || (c.kind === 'macro' && !c.q)) { compClose(); return; }
+  const seq = ++COMP.seq;
+  const items = await compItems(c);
+  if (seq !== COMP.seq) return;
+  if (!items.length) { compClose(); return; }
+  const same = COMP.open && COMP.kind === c.kind && COMP.from === c.from && COMP.items[COMP.active];
+  const keep = same ? items.findIndex((it) => it.name === COMP.items[COMP.active].name) : -1;
+  Object.assign(COMP, { open: true, items, kind: c.kind, from: c.from, active: Math.max(0, keep) });
+  compDraw();
+}
+function compAccept() {
+  const it = COMP.items[COMP.active], ta = $('#srcta');
+  if (!it) { compClose(); return; }
+  const a = ta.selectionStart, v = ta.value;
+  if (COMP.kind === 'env') {
+    // \begin{name} … \end{name}, the caret on the line between them
+    const close = v[a] === '}' ? 1 : 0;
+    const ind = /^[ \t]*/.exec(v.slice(v.lastIndexOf('\n', a - 1) + 1))[0];
+    srcReplace(ta, COMP.from, a + close, `${it.name}}\n${ind}\n${ind}\\end{${it.name}}`);
+    const at = COMP.from + it.name.length + 2 + ind.length;
+    ta.setSelectionRange(at, at);
+  } else srcReplace(ta, COMP.from, a, it.name);
+  compClose();
+}
+document.addEventListener('input', (e) => {
+  if (e.target.id !== 'srcta' || SRC.quiet || SMC.shadow) return;
+  compUpdate(e.inputType === 'insertText');
+}, true);
+addEventListener('keydown', (e) => {
+  if (!COMP.open || e.target.id !== 'srcta') return;
+  const stop = () => { e.preventDefault(); e.stopImmediatePropagation(); };
+  const n = COMP.items.length;
+  if (e.key === 'ArrowDown' && !e.ctrlKey && !e.altKey) { stop(); COMP.active = (COMP.active + 1) % n; compDraw(); }
+  else if (e.key === 'ArrowUp' && !e.ctrlKey && !e.altKey) { stop(); COMP.active = (COMP.active + n - 1) % n; compDraw(); }
+  else if ((e.key === 'Enter' || e.key === 'Tab') && !e.ctrlKey && !e.altKey && !e.shiftKey) { stop(); compAccept(); }
+  else if (e.key === 'Escape') { stop(); compClose(); }
+  else if (/^(ArrowLeft|ArrowRight|Home|End|PageUp|PageDown)$/.test(e.key) || e.ctrlKey || e.altKey) compClose();
+}, true);
+document.addEventListener('mousedown', (e) => { if (COMP.open && !(e.target.closest && e.target.closest('#comp'))) compClose(); }, true);
+document.addEventListener('focusout', (e) => { if (COMP.open && e.target.id === 'srcta') setTimeout(() => { if (document.activeElement && document.activeElement.id !== 'srcta') compClose(); }, 0); }, true);
+// (typing scrolls the text now and then: the list follows the caret)
+document.addEventListener('scroll', () => { if (COMP.open) requestAnimationFrame(() => { if (COMP.open) compDraw(); }); }, true);
+
+// ---- latexindent: a file through latexindent (on the server), as with
+// Emacs's C-c f.  In the source view the changed lines go into the text one
+// by one (Chrome is slow to insert many lines at once), and one Ctrl+Z takes
+// them all back; in the paper it is one step of the paper's undo.
+async function latexindentFile() {
+  let name, text;
+  if (SRC.on) {
+    name = SRC.name;
+    if (SRC.preview || $('#srcta').readOnly) { toast('Preview only: turn it off to change the file here'); return; }
+    text = $('#srcta').value;
+  } else {
+    const seg = caretSeg();
+    name = seg && seg.file;
+    if (!name) { toast('Put the cursor in the text first', 'error'); return; }
+    commit();
+    text = FILES[name].text;
+  }
+  if (!/\.tex$/.test(name || '')) { toast('latexindent is for .tex files'); return; }
+  const r = await fetch('/api/latexindent', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
+    body: JSON.stringify({ text }) }).catch(() => null);
+  const d = r ? await r.json().catch(() => ({})) : {};
+  if (!r || !r.ok) { banner('latexindent did not run: ' + (d.error || 'no answer from the editor')); return; }
+  if (d.text === text) { toast(`latexindent changed nothing in ${name}`); return; }
+  if (SRC.on) {
+    if (SRC.name !== name || $('#srcta').value !== text) { toast('The text changed while latexindent ran: run it again'); return; }
+    srcSetText(d.text);
+  } else {
+    commit();
+    if (FILES[name].text !== text) { toast('The text changed while latexindent ran: run it again'); return; }
+    snapshot();
+    const y = viewAnchor();
+    FILES[name].text = d.text;
+    render();
+    restoreAnchor(y);
+  }
+  toast(`${name}: indented by latexindent (Ctrl+Z takes it back)`, 'ok');
+}
+// The source view's text becomes `out`: the lines that differ are replaced
+// one by one (when the number of lines is the same), as one step of undo.
+function srcSetText(out) {
+  const ta = $('#srcta'), v = ta.value;
+  const a = v.split('\n'), b = out.split('\n');
+  const caretLine = v.slice(0, ta.selectionStart).split('\n').length - 1;
+  const caretCol = ta.selectionStart - (v.lastIndexOf('\n', ta.selectionStart - 1) + 1);
+  const starts = [0];
+  for (let i = 0; i < a.length - 1; i++) starts.push(starts[i] + a[i].length + 1);
+  const ops = [];
+  if (a.length === b.length) {
+    for (let i = a.length - 1; i >= 0; i--) if (a[i] !== b[i]) ops.push([starts[i], starts[i] + a[i].length, b[i]]);
+  } else {
+    let p = 0;
+    while (p < v.length && p < out.length && v[p] === out[p]) p++;
+    let q = 0;
+    while (q < v.length - p && q < out.length - p && v[v.length - 1 - q] === out[out.length - 1 - q]) q++;
+    ops.push([p, v.length - q, out.slice(p, out.length - q)]);
+  }
+  SRC.quiet = true;
+  try { for (const [x, y, t] of ops) srcReplace(ta, x, y, t); } finally { SRC.quiet = false; }
+  if (ta.value !== out) { ta.setRangeText(out, 0, ta.value.length); SMC.undo = []; }
+  else { SMC.undo.push({ n: ops.length, at: ta.value, cursors: null, after: null }); SMC.redo = []; }
+  // the caret stays on its line, moved with the line's indentation
+  if (a.length === b.length) {
+    const ind = (l) => /^[ \t]*/.exec(l)[0].length;
+    const ns = b.slice(0, caretLine).reduce((n, l) => n + l.length + 1, 0);
+    const col = Math.max(0, Math.min(b[caretLine].length, caretCol + ind(b[caretLine]) - ind(a[caretLine])));
+    ta.setSelectionRange(ns + col, ns + col);
+  }
+  ta.dispatchEvent(new Event('input'));
+}
 
 // Saving the files of the source view that are not part of the document.
 // ---- files from the source view: new, rename, delete
