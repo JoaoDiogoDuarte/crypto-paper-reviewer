@@ -310,6 +310,7 @@ under ⋯. In narrow windows both show icons only; hovering a button names it.
 | `Ctrl+Alt+Left`, `Ctrl+Alt+Right` | previous, next sentence |
 | `Ctrl+Alt+S` | split the section at the cursor |
 | `Ctrl+Alt+A` | add a block after the one at the cursor |
+| `Alt+O` | the contents sidebar: the headings (Contents) or the theorems, lemmas and definitions with their labels (Results), filtered by words in any order; Enter or a click goes there, `Alt+←` comes back; in the source view, the headings of the file and their lines |
 | `Ctrl+Alt+↑` / `Ctrl+Alt+↓` | move the section at the cursor up / down |
 | `Ctrl+Alt+J` | merge the heading at the cursor into the previous one of its level: its text follows, its label moves to that heading, and a box keeps it one level down; sections in files of their own can merge their files too |
 | `Ctrl+Alt+Shift+J` | merge the next heading of this level into the one at the cursor |

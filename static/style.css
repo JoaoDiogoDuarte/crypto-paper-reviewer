@@ -1436,3 +1436,28 @@ html.modal-open body::before {
 .gline.gbox-begin:focus-within, .gline.gbox-end:focus-within { border-width: 3px; }
 .gline .gcomment-edit { outline: none; min-width: 2em; display: inline-block; }
 .gline .gcomment-edit:focus { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+
+/* The contents sidebar: beside the page when the window is wide enough, over
+   it otherwise. */
+#sidebar { position: fixed; left: 0; bottom: 0; top: var(--chrome-height, 90px); z-index: 30; width: 17em;
+  display: flex; flex-direction: column; background: var(--mac-chrome, var(--bg)); border-right: 1px solid var(--line);
+  box-shadow: 4px 0 18px rgba(0,0,0,.12); font: 13px/1.4 system-ui, sans-serif; }
+#sidebar[hidden] { display: none; }
+@media (min-width: 1100px) {
+  body.sidebar { padding-left: 17em; }
+  #sidebar { top: 0; box-shadow: none; }
+}
+.sb-tabs { display: flex; gap: .3em; padding: .5em .6em 0; }
+.sb-tabs button { flex: 1; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--muted); padding: .35em; cursor: pointer; font: inherit; }
+.sb-tabs button[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
+#sb-filter { margin: .5em .6em; padding: .3em .5em; font: inherit; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); }
+#sb-list { flex: 1; overflow: auto; padding: 0 .3em 1em; }
+.sb-item { display: flex; gap: .45em; padding: .22em .45em; border-radius: 5px; cursor: pointer; }
+.sb-item:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.sb-item.sel { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.sb-item.current { font-weight: 600; box-shadow: inset 2px 0 0 var(--accent); }
+.sb-item .sb-num { color: var(--muted); min-width: 2.2em; }
+.sb-item .sb-key { color: var(--muted); font: 11px ui-monospace, monospace; margin-left: auto; align-self: center; }
+.sb-item.l1 { padding-left: 1.4em; } .sb-item.l2 { padding-left: 2.4em; } .sb-item.l3 { padding-left: 3.4em; }
+.sb-empty { color: var(--muted); padding: .6em; }
+body.sidebar #srcoutline { display: none; }

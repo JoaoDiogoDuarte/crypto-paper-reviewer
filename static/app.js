@@ -2038,6 +2038,7 @@ function editedFiles() {
 
 function markEdited() {
   flushEdits();
+  refreshSidebarSoon();
   countWords();
   const files = editedFiles().concat(SRC ? extraEdited() : []);
   $('#dirty').textContent = files.length ? files.length + ' file' + (files.length > 1 ? 's' : '') + ' edited' : '';
@@ -8796,6 +8797,7 @@ const ACTION_DEFS = [
   ['src-unindent', 'Source: unindent the region, or the line', 'source', ['S-Tab'], () => SOURCE_ACTIONS.unindent()],
   ['src-newline', 'Source: new line, indented as this one', 'source', ['Enter'], () => SOURCE_ACTIONS.newline()],
   ['src-goto', 'Source: go to line', 'source', ['M-g'], () => SOURCE_ACTIONS.gotoLine()],
+  ['sidebar', 'Contents sidebar: open it, go to its filter, or close it', 'global', ['M-o'], () => { if (sidebarOpen() && !$('#sidebar').contains(document.activeElement)) $('#sb-filter').focus({ preventScroll: true }); else toggleSidebar(); }],
   ['cancel', 'Cancel: close the menu or window on top, or drop the selection (as Emacs C-g)', 'global', ['C-g'], () => cancelKey()],
   ['src-comment', 'Source: comment the region (or line) out with %, or back in', 'source', ['C-/'], () => SOURCE_ACTIONS.toggleComment()],
   ['duplicate', 'Duplicate the region, or the line', 'text', ['C-p'], () => duplicate()],
@@ -8873,6 +8875,163 @@ function announce(msg) {
   r.textContent = '';
   requestAnimationFrame(() => { r.textContent = msg; });
 }
+
+// ------------------------------------------------------- contents sidebar
+//
+// The headings of the paper (Contents) or its theorems, lemmas, definitions
+// and the like (Results), filtered by words in any order.  A click or Enter
+// goes there (Alt+Left comes back), and the section in view is marked.  In
+// the source view it lists the headings of the file shown, and goes to
+// their line.
+// var and function: markEdited() may run before these lines do
+var SIDEBAR = { tab: 'contents', all: [], items: [], sel: -1, timer: null };
+function sidebarOpen() { return !$('#sidebar').hidden; }
+const SIDEBAR_DOCKED = () => matchMedia('(min-width: 1100px)').matches;
+function toggleSidebar(on = !sidebarOpen(), focus = true) {
+  $('#sidebar').hidden = !on;
+  document.body.classList.toggle('sidebar', on);
+  $('#sidebarbtn').setAttribute('aria-pressed', String(on));
+  try { localStorage.setItem('sidebar', on ? '1' : '0'); } catch (e) { /* storage unavailable */ }
+  if (!on) return;
+  refreshSidebar();
+  if (focus) $('#sb-filter').focus({ preventScroll: true });
+}
+function refreshSidebarSoon() {
+  if (!SIDEBAR || !sidebarOpen()) return;
+  clearTimeout(SIDEBAR.timer);
+  SIDEBAR.timer = setTimeout(refreshSidebar, 250);
+}
+const THM_NAME = (env) => ((DOC.theorems || {})[env] || {}).name || env.charAt(0).toUpperCase() + env.slice(1);
+// The title of \paragraph{...} at the start of a source text.
+function paragraphTitle(src) {
+  const m = /^\s*\\paragraph\*?\{/.exec(src);
+  if (!m) return null;
+  const end = L.groupEnd(src, m[0].length - 1);
+  return end < 0 ? null : plainOfLatex(src.slice(m[0].length, end - 1)).trim();
+}
+function paperItems(tab) {
+  const out = [];
+  for (const seg of ORDER) {
+    if (seg.removed || !seg.el || !seg.el.isConnected || !seg.edit || seg.edit.tagName === 'TEXTAREA') continue;
+    if (tab === 'contents') {
+      if (seg.kind === 'heading' && seg.parts) {
+        const num = ((seg.el.querySelector('.num') || {}).textContent || '').replace(/\.$/, '');
+        out.push({ level: { part: 0, chapter: 0, section: 0, subsection: 1, subsubsection: 2 }[seg.parts.level] || 0, num, text: seg.edit.textContent.trim(), seg, anchor: seg.el });
+      } else if (seg.kind === 'para') {
+        const t = paragraphTitle(seg.src);
+        if (t !== null) out.push({ level: 3, num: '', text: t, seg, anchor: seg.el });
+      }
+      continue;
+    }
+    for (const c of seg.edit.querySelectorAll('.chip.thmhead')) {
+      const src = c.dataset.src || '';
+      const env = (/\\begin\{([^}]*)\}/.exec(src) || [])[1] || '';
+      const head = (c.firstChild && c.firstChild.nodeType === 3 ? c.firstChild.data : c.textContent).replace(/[\s(.]+$/, '');
+      const title = ((c.querySelector('.thmtitle') || {}).textContent || '').trim();
+      let key = (/\\label\{([^}]*)\}/.exec(src) || [])[1];
+      if (!key) { const i = seg.src.indexOf(src); const m = i >= 0 && /^\s*\\label\{([^}]*)\}/.exec(seg.src.slice(i + src.length)); key = m ? m[1] : ''; }
+      out.push({ level: 0, num: '', text: head + (title ? ` (${title})` : ''), key, env, seg, chip: c, anchor: c });
+    }
+  }
+  return out;
+}
+function sourceItems(tab) {
+  const ta = $('#srcta');
+  if (!ta) return [];
+  const out = [];
+  const re = /^\s*\\(part|chapter|section|subsection|subsubsection|paragraph)\*?\s*(?:\[[^\]]*\])?\{(.*)/;
+  const thm = /^\s*\\begin\{([A-Za-z]+\*?)\}(?:\[([^\]]*)\])?\s*(?:\\label\{([^}]*)\})?/;
+  const level = { part: 0, chapter: 0, section: 0, subsection: 1, subsubsection: 2, paragraph: 3 };
+  ta.value.split('\n').forEach((l, i) => {
+    let m;
+    if (tab === 'contents' && (m = re.exec(l))) out.push({ level: level[m[1]], num: '', text: plainOfLatex(m[2].replace(/\}[^}]*$/, '')).trim(), line: i + 1 });
+    else if (tab === 'results' && (m = thm.exec(l)) && L.THM_ENVS.has(m[1].replace(/\*$/, ''))) out.push({ level: 0, num: '', text: THM_NAME(m[1].replace(/\*$/, '')) + (m[2] ? ` (${plainOfLatex(m[2])})` : ''), key: m[3] || '', line: i + 1 });
+  });
+  return out;
+}
+function refreshSidebar() {
+  clearTimeout(SIDEBAR.timer);
+  if (!sidebarOpen() || !DOC) return;
+  SIDEBAR.all = SRC.on ? sourceItems(SIDEBAR.tab) : paperItems(SIDEBAR.tab);
+  for (const it of SIDEBAR.all) it.hay = `${it.num} ${it.text} ${it.key || ''} ${it.env || ''}`.toLowerCase();
+  for (const b of document.querySelectorAll('.sb-tabs button')) b.setAttribute('aria-selected', String(b.dataset.tab === SIDEBAR.tab));
+  drawSidebar();
+}
+function drawSidebar() {
+  const list = $('#sb-list');
+  const words = $('#sb-filter').value.toLowerCase().split(/\s+/).filter(Boolean);
+  SIDEBAR.items = SIDEBAR.all.filter((it) => words.every((w) => it.hay.includes(w)));
+  list.textContent = '';
+  if (!SIDEBAR.items.length) {
+    list.append(el('div', 'sb-empty', SIDEBAR.all.length ? 'Nothing matches the filter' : SIDEBAR.tab === 'results' ? 'No theorems, lemmas or definitions' : 'No headings'));
+  }
+  SIDEBAR.items.forEach((it, i) => {
+    const row = el('div', 'sb-item l' + it.level);
+    row.setAttribute('role', 'option');
+    row.append(el('span', 'sb-num', it.num), el('span', 'sb-text', it.text));
+    if (it.key) row.append(el('span', 'sb-key', it.key));
+    row.onclick = () => { SIDEBAR.sel = i; goSidebar(it); };
+    it.row = row;
+    list.append(row);
+  });
+  SIDEBAR.sel = Math.min(SIDEBAR.sel, SIDEBAR.items.length - 1);
+  markSidebar();
+}
+function markSidebar() {
+  SIDEBAR.items.forEach((it, i) => it.row.classList.toggle('sel', i === SIDEBAR.sel));
+  const s = SIDEBAR.items[SIDEBAR.sel];
+  if (s) s.row.scrollIntoView({ block: 'nearest' });
+  markCurrentSection();
+}
+// the last item whose place starts above a line just below the bars
+function markCurrentSection() {
+  if (!sidebarOpen() || SRC.on) return;
+  const line = chromeBottom() + 80;
+  let cur = null;
+  for (const it of SIDEBAR.items) {
+    if (!it.anchor || !it.anchor.isConnected) continue;
+    if (it.anchor.getBoundingClientRect().top <= line) cur = it; else break;
+  }
+  if (!cur) cur = SIDEBAR.items.find((it) => it.anchor && it.anchor.isConnected) || null;   // above the first one
+  for (const it of SIDEBAR.items) it.row.classList.toggle('current', it === cur);
+}
+function goSidebar(it) {
+  if (!it) return;
+  if (it.line) { SOURCE_ACTIONS.gotoLine(it.line); return; }
+  if (!it.seg || !it.seg.edit || !it.seg.edit.isConnected) { toast('That place is gone; the list is drawn again'); refreshSidebar(); return; }
+  navPush();
+  const ed = it.seg.edit;
+  const r = document.createRange();
+  if (it.chip && it.chip.isConnected) r.setStartAfter(it.chip); else { r.selectNodeContents(ed); }
+  r.collapse(true);
+  ed.focus({ preventScroll: true });
+  const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
+  revealChanged((it.chip || it.seg.el).getBoundingClientRect(), it.seg);
+  // over the page (a narrow window), the sidebar makes way
+  if (!SIDEBAR_DOCKED()) toggleSidebar(false);
+}
+$('#sidebarbtn').onclick = () => toggleSidebar();
+for (const b of document.querySelectorAll('.sb-tabs button')) b.onclick = () => { SIDEBAR.tab = b.dataset.tab; SIDEBAR.sel = -1; refreshSidebar(); $('#sb-filter').focus({ preventScroll: true }); };
+$('#sb-filter').addEventListener('input', () => { SIDEBAR.sel = 0; drawSidebar(); });
+$('#sb-filter').addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    const n = SIDEBAR.items.length;
+    if (!n) return;
+    SIDEBAR.sel = SIDEBAR.sel < 0 ? 0 : (SIDEBAR.sel + (e.key === 'ArrowDown' ? 1 : -1) + n) % n;
+    markSidebar();
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    goSidebar(SIDEBAR.items[Math.max(0, SIDEBAR.sel)]);
+  } else if (e.key === 'Escape' && e.target.value) {
+    e.preventDefault(); e.stopPropagation();
+    e.target.value = ''; drawSidebar();
+  }
+});
+let sidebarScroll = 0;
+addEventListener('scroll', () => { if (!sidebarScroll) sidebarScroll = requestAnimationFrame(() => { sidebarScroll = 0; markCurrentSection(); }); }, { passive: true });
+// open as it was left (after the script has run: DOC and SRC exist then)
+setTimeout(() => { try { if (localStorage.getItem('sidebar') === '1') toggleSidebar(true, false); } catch (e) { /* storage unavailable */ } }, 0);
 
 // the block the caret is in, for the block actions above
 function caretSeg() {
@@ -9945,6 +10104,7 @@ function fillSourceOutline() {
     if (m) items.push([i + 1, indent[m[1]] + plainOfLatex(m[2].replace(/\}[^}]*$/, '')).slice(0, 70)]);
     else if (/^\s*@\w+\s*\{\s*([^,\s]+)/.test(l) && /\.bib$/.test(SRC.name || '')) items.push([i + 1, /\{\s*([^,\s]+)/.exec(l)[1]]);
   });
+  refreshSidebarSoon();
   const key = JSON.stringify(items);
   if (sel.dataset.key === key) return;
   sel.dataset.key = key;
@@ -10083,6 +10243,7 @@ async function toggleSource(on = !SRC.on) {
     || ORDER.filter((s) => s.file === name && s.el && s.line && s.line <= line).pop()) : null;
   const screenY = segOfLine ? ta.getBoundingClientRect().top + srcLineTop(segOfLine.line) - ta.scrollTop : null;
   SRC.on = false;
+  refreshSidebarSoon();
   document.body.classList.remove('sourcemode');
   $('#srcview').hidden = true;
   $('#sourcebtn').setAttribute('aria-pressed', 'false');

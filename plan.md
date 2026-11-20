@@ -14,6 +14,7 @@ and the editor's keymap (`ACTION_DEFS`, `TEXT_KEYS`, `GLOBAL_KEYS`), find
 1. Prefix keys, which-key hint, `C-g`/`M-g` swap, `en-GB` spell checking.
    Small, and later steps need prefix keys. Done 2026-11-20 (section 1).
 2. Contents sidebar (Contents and Results tabs, filter, current section).
+   Done 2026-11-20 (section 2).
 3. Label rename from the Results tab.
 4. Literal maths search, plus a consult-style result list for `C-f` and `C-S-f`.
 5. Multiple cursors: paper view, then source view.
@@ -246,6 +247,22 @@ fallback is `C-c C-a`, `C-c C-c` and so on.
 - Rebuilt after `render()` and, debounced, after `markEdited`.
 - In the source view the same sidebar replaces the `#srcoutline` dropdown
   and jumps to the source line.
+
+### Done (2026-11-20)
+
+`toggleSidebar`, `paperItems`, `sourceItems` in `static/app.js`; the
+**Contents** button and `Alt+O`. Departures from the list above:
+
+- The key is `Alt+O`, not `C-c o`: a `C-c` chord would take Ctrl+C from
+  copying everywhere outside fields. **Keys…** can record `C-c o`.
+- Docked beside the page at 1100px and wider (the page moves right),
+  over the page below that, where a jump closes it.
+- The section in view is the last one whose heading is above a line 80px
+  below the bars (else the first). A scroll handler finds it, not an
+  IntersectionObserver.
+- Results in the source view are the theorem-like `\begin` lines of the
+  file, with their labels.
+- Tests: `node tests/e2e.js sidebar`.
 
 ---
 

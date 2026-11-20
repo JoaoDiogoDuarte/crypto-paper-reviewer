@@ -1113,6 +1113,53 @@ done.`));
     }
   },
 
+  async 'sidebar: contents, filter, a jump there and back'(env, page) {
+    try {
+      await page.key('o', { alt: true });
+      await page.waitFor(`!$('#sidebar').hidden && document.activeElement === $('#sb-filter')`, 3000, 'the sidebar and its filter');
+      const rows = await page.eval(`JSON.stringify([...document.querySelectorAll('#sb-list .sb-item')].map((r) => [r.className.match(/l\\d/)[0], r.querySelector('.sb-text').textContent]))`);
+      eq(rows, JSON.stringify([['l0', 'Introduction'], ['l0', 'Related work'], ['l0', 'Body'], ['l1', 'Details'], ['l0', 'Conclusion']]), 'the headings, by level');
+      await page.type('det');
+      eq(await page.eval(`document.querySelectorAll('#sb-list .sb-item').length`), 1, 'the filter');
+      await page.key('Enter');
+      await page.waitFor(`caretSeg() && caretSeg().src.includes('Details')`, 3000, 'the caret in the heading');
+      eq(await page.eval(`NAV.back.length > 0`), true, 'the way back is kept');
+      // the section in view is marked
+      const current = `(document.querySelector('#sb-list .sb-item.current .sb-text') || {}).textContent`;
+      await page.eval(`(() => { toggleSidebar(true, false); $('#sb-filter').value = ''; drawSidebar(); scrollTo(0, 0); markCurrentSection(); })()`);
+      eq(await page.eval(current), 'Introduction', 'the current section at the top');
+      await page.eval(`(() => { ORDER.find((s) => s.kind === 'heading' && s.src.includes('Details')).el.scrollIntoView({ block: 'start' }); markCurrentSection(); })()`);
+      eq(await page.eval(current), 'Details', 'the current section further down');
+    } finally {
+      await page.eval(`toggleSidebar(false)`);
+    }
+  },
+
+  async 'sidebar: results with their numbers, titles and labels, and the source view'(env, page) {
+    env.write('main.tex', ['\\documentclass{article}', '\\usepackage{amsthm}', '\\newtheorem{lemma}{Lemma}', '\\newtheorem{theorem}{Theorem}', '\\begin{document}', '',
+      '\\section{Games}', 'Text.', '', '\\begin{lemma}[Hybrid two]\\label{lem:h2}', 'A claim.', '\\end{lemma}', '',
+      '\\subsection{Main}', '\\begin{theorem}', 'Another claim.', '\\end{theorem}', '', '\\end{document}', ''].join('\n'));
+    await page.eval('load(true)');
+    await page.waitFor(`document.querySelector('#doc .chip.thmhead')`, 8000, 'the lemma');
+    try {
+      await page.eval(`(() => { toggleSidebar(true); $('#sb-tab-results').click(); })()`);
+      const rows = await page.eval(`JSON.stringify([...document.querySelectorAll('#sb-list .sb-item')].map((r) => [r.querySelector('.sb-text').textContent, (r.querySelector('.sb-key') || {}).textContent || '']))`);
+      eq(rows, JSON.stringify([['Lemma 1 (Hybrid two)', 'lem:h2'], ['Theorem 1', '']]), 'the results');
+      await page.eval(`$('#sb-filter').value = 'h2'; $('#sb-filter').dispatchEvent(new Event('input'))`);
+      await page.key('Enter');
+      await page.waitFor(`caretSeg() && caretSeg().src.includes('A claim.')`, 3000, 'the caret in the lemma');
+      // the source view: the headings of the file, and their lines
+      await page.eval(`(() => { toggleSidebar(true, false); $('#sb-filter').value = ''; $('#sb-tab-contents').click(); toggleSource(true); })()`);
+      await page.waitFor(`SRC.on && $('#srcta') && $('#srcta').value.includes('Games')`, 4000, 'the source view');
+      await page.waitFor(`SIDEBAR.all.length === 2 && SIDEBAR.all.every((it) => it.line)`, 3000, 'the two headings of the file');
+      await page.eval(`[...document.querySelectorAll('#sb-list .sb-item')].find((r) => r.textContent.includes('Main')).click()`);
+      eq(await page.eval(`(() => { const ta = $('#srcta'); return ta.value.slice(0, ta.selectionStart).split('\\n').length; })()`), 14, 'the line of Main');
+      await page.eval('toggleSource(false)');
+    } finally {
+      await page.eval(`toggleSidebar(false)`);
+    }
+  },
+
   async 'a caption or heading never gets a blank line'(env, page) {
     env.write('main.tex', [
       '\\documentclass{article}', '\\begin{document}',
