@@ -1908,10 +1908,12 @@ done.`));
     // (a wheel, as the reader's own scroll, ends the hold on the place after the reload)
     // (again until it holds: the blocks out of the window get their measured
     // heights in the frames after a scroll, which moves what is below them)
-    for (let i = 0; i < 20; i++) {
+    // (twice in a row, 100 ms apart)
+    for (let i = 0, still = 0; i < 40 && still < 2; i++) {
       const off = await page.eval(`(() => { dispatchEvent(new WheelEvent('wheel')); getSelection().removeAllRanges(); const s = ORDER.find((x) => x.src.includes('number 40 ')); const d = s.el.getBoundingClientRect().top - chromeBottom() - 30; window.scrollBy(0, d); return Math.abs(d); })()`);
       await page.eval(`new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))`);
-      if (off < 2) break;
+      await sleep(100);
+      still = off < 2 ? still + 1 : 0;
     }
     const y0 = await page.eval(`Math.round(ORDER.find((x) => x.src.includes('number 40 ')).el.getBoundingClientRect().top)`);
     await page.eval('toggleSource(true)');
