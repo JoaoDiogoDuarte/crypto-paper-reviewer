@@ -8950,6 +8950,7 @@ const ACTION_DEFS = [
   ['src-unindent', 'Source: unindent the region, or the line', 'source', ['S-Tab'], () => SOURCE_ACTIONS.unindent()],
   ['src-newline', 'Source: new line, indented as this one', 'source', ['Enter'], () => SOURCE_ACTIONS.newline()],
   ['src-goto', 'Source: go to line', 'source', ['M-g'], () => SOURCE_ACTIONS.gotoLine()],
+  ['src-delete', 'Source: delete the file shown (to the editor\'s trash)', 'source', [], () => srcDelete()],
   ['findsource', 'Find in the source of every .tex and .bib file of the paper', 'global', ['C-F'], () => sourceSearch()],
   ['sidebar', 'Contents sidebar: open it, go to its filter, or close it', 'global', ['M-o'], () => { if (sidebarOpen() && !$('#sidebar').contains(document.activeElement)) $('#sb-filter').focus({ preventScroll: true }); else toggleSidebar(); }],
   ['cancel', 'Cancel: close the menu or window on top, or drop the selection (as Emacs C-g)', 'global', ['C-g'], () => cancelKey()],
@@ -10436,7 +10437,17 @@ function drawSourceFiles() {
       if (edited) b.classList.add('edited');
       if (f.name === SRC.name) { b.classList.add('current'); b.setAttribute('aria-current', 'true'); }
       b.onclick = () => openSourceFile(f.name);
-      nav.append(b);
+      const row = el('div', 'srcrow');
+      row.append(b);
+      // every file but the main one can go to the trash from here
+      if (f.name !== DOC.main) {
+        const del = el('button', 'srcfile-del', '✕');
+        del.title = `Delete ${f.name}: move it to the editor's trash (.paper-editor/trash)`;
+        del.setAttribute('aria-label', `Delete ${f.name}`);
+        del.onclick = (e) => { e.stopPropagation(); srcDelete(f.name); };
+        row.append(del);
+      }
+      nav.append(row);
     }
   }
 }
@@ -10702,12 +10713,62 @@ async function srcRename() {
   }
   await renameFilePrompt(name);
 }
-async function srcDelete() {
-  const name = SRC.name;
+// The \bibliography and \addbibresource that name a .bib file, by file.
+const bibEntry = (b) => (b.trim().endsWith('.bib') ? b.trim() : b.trim() + '.bib');
+function bibNamers(name) {
+  const out = [];
+  for (const [n, f] of Object.entries(FILES)) {
+    const t = typeof f.text === 'string' ? f.text.replace(/(^|[^\\])%.*$/gm, '$1') : '';
+    if ([...t.matchAll(/\\bibliography\s*\{([^}]*)\}/g)].some((m) => m[1].split(',').map(bibEntry).includes(name)) ||
+        [...t.matchAll(/\\addbibresource(?:\[[^\]]*\])?\s*\{([^}]*)\}/g)].some((m) => m[1].trim() === name)) out.push(n);
+  }
+  return out;
+}
+// Take a .bib out of every \bibliography list (the command goes when it
+// names nothing else) and every \addbibresource of it.
+function unnameBib(name) {
+  for (const f of Object.values(FILES)) {
+    if (typeof f.text !== 'string') continue;
+    f.text = f.text
+      .replace(/\\bibliography\s*\{([^}]*)\}[ \t]*\n?/g, (m, list) => {
+        const keep = list.split(',').filter((b) => bibEntry(b) !== name);
+        return keep.length ? m.replace(list, keep.map((b) => b.trim()).join(',')) : '';
+      })
+      .replace(/\\addbibresource(?:\[[^\]]*\])?\s*\{([^}]*)\}[ \t]*\n?/g, (m, b) => (b.trim() === name ? '' : m));
+  }
+}
+
+// The file shown in the source view takes the text changed under it (even
+// with the focus in it, where refreshSourceView leaves it alone), so that
+// the next flush does not write the old text back.
+function syncSourceText() {
+  if (!SRC.on || !SRC.name || !srcDoc(SRC.name)) return;
+  commit();
+  const ta = $('#srcta'), a = ta.selectionStart, top = ta.scrollTop;
+  if (ta.value === FILES[SRC.name].text) return;
+  ta.value = FILES[SRC.name].text;
+  ta.scrollTop = top; ta.setSelectionRange(a, a);
+  refreshSourceView();
+}
+
+async function srcDelete(name = SRC.name) {
   if (!name || name === DOC.main) return;
   flushSource();
+  commit();
   const inp = inputSegOf(name);
-  if (inp) {
+  const namers = name.endsWith('.bib') ? bibNamers(name) : [];
+  if (namers.length) {
+    if (!confirm(`${name} is named by \\bibliography in ${namers.join(', ')}. Take it out of that list, save, and move ${name} to the editor's trash?\n\nCitations of its entries will show ?; the trash (.paper-editor/trash) and History keep it.`)) return;
+    snapshot();
+    unnameBib(name);
+    const y = viewAnchor();
+    render();
+    restoreAnchor(y);
+    syncSourceText();
+    await save();
+    commit();
+    if (namers.some((n) => FILES[n] && FILES[n].text !== FILES[n].disk)) { toast(`Not deleted: ${namers.join(', ')} could not be saved`, 'error'); return; }
+  } else if (inp) {
     if (!confirm(`${name} is read by ${inp.file}. Take its \\input out of ${inp.file}, save, and move ${name} to the editor's trash?\n\nIts text leaves the paper; the trash (.paper-editor/trash) and History keep it.`)) return;
     structural(() => {
       const segs = FILES[inp.file].segs, i = segs.indexOf(inp);
@@ -10715,6 +10776,7 @@ async function srcDelete() {
       if (segs[i - 1] && segs[i - 1].kind === 'gap') segs[i - 1].removed = true;
       else if (segs[i + 1] && segs[i + 1].kind === 'gap') segs[i + 1].removed = true;
     });
+    syncSourceText();
     await save();
     if (inputSegOf(name)) { toast(`Not deleted: ${inp.file} could not be saved`, 'error'); return; }
   } else if (!confirm(`Move ${name} to the editor's trash (.paper-editor/trash)?`)) return;
@@ -10728,8 +10790,10 @@ async function srcDelete() {
     delete SRC.extra[name];
     toast(`${name} moved to ${res.trash}`, 'ok');
   }
+  const wasOpen = name === SRC.name;
   await srcReloadFiles();
-  if (SRC.on) await openSourceFile(DOC.main);
+  if (SRC.on && wasOpen) await openSourceFile(DOC.main);
+  else drawSourceFiles();
 }
 
 async function saveExtra(batch) {

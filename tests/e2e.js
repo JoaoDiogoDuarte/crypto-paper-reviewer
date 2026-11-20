@@ -1643,6 +1643,31 @@ done.`));
     eq(await page.eval(`$('#srcdelete').disabled && $('#srcrename').disabled`), true, 'main file buttons off');
   },
 
+  async 'source view: delete from the file list, a .bib named by \\bibliography too'(env, page) {
+    await page.eval(`window.confirm = () => true`);
+    await page.eval('toggleSource(true)');
+    await page.waitFor(`SRC.on && SRC.name === DOC.main && document.querySelector('#srcfiles .srcrow')`, 4000, 'the source view');
+    const del = (name) => page.eval(`[...document.querySelectorAll('#srcfiles .srcrow')].find((r) => r.querySelector('.srcfile').textContent === ${JSON.stringify(name)}).querySelector('.srcfile-del').click()`);
+    eq(await page.eval(`[...document.querySelectorAll('#srcfiles .srcrow')].filter((r) => r.querySelector('.srcfile-del')).map((r) => r.querySelector('.srcfile').textContent).includes('main.tex')`), false, 'no ✕ on the main file');
+    // a file not shown: the view stays on main.tex
+    await del('other.tex');
+    await page.waitFor(`!SRC.files.some((f) => f.name === 'other.tex')`, 6000, 'other.tex gone from the list');
+    eq(await page.eval('SRC.name'), 'main.tex', 'still on main.tex');
+    eq(fs.existsSync(path.join(env.paper, 'other.tex')), false, 'other.tex moved away');
+    // the .bib: out of \bibliography, saved, then to the trash
+    await del('refs.bib');
+    await page.waitFor(`!SRC.files.some((f) => f.name === 'refs.bib')`, 8000, 'refs.bib gone from the list');
+    hasNot(env.read('main.tex'), '\\bibliography{refs}', '\\bibliography taken out');
+    has(env.read('main.tex'), '\\bibliographystyle{plain}\n\\end{document}', 'the rest stays');
+    eq(fs.existsSync(path.join(env.paper, 'refs.bib')), false, 'refs.bib moved away');
+    if (!fs.readdirSync(path.join(env.state, 'trash')).some((f) => f.endsWith('refs.bib'))) throw new Error('refs.bib is not in the trash');
+    // a file read by \input, from the list while main.tex is shown: the \input goes
+    await del('sections/body.tex');
+    await page.waitFor(`!SRC.files.some((f) => f.name === 'sections/body.tex')`, 8000, 'body.tex gone from the list');
+    hasNot(env.read('main.tex'), '\\input{sections/body}', 'its input taken out');
+    eq(await page.eval(`$('#srcta').value.includes('sections/body')`), false, 'the view shows main.tex without it');
+  },
+
   async 'drafts: unsaved edits survive a reload and come back on Restore'(env, page) {
     await page.select('brown');
     await page.type('red');
