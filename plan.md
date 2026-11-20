@@ -12,7 +12,7 @@ and the editor's keymap (`ACTION_DEFS`, `TEXT_KEYS`, `GLOBAL_KEYS`), find
 
 0. Electron shell, evaluated before any new feature (section 0).
 1. Prefix keys, which-key hint, `C-g`/`M-g` swap, `en-GB` spell checking.
-   Small, and later steps need prefix keys.
+   Small, and later steps need prefix keys. Done 2026-11-20 (section 1).
 2. Contents sidebar (Contents and Results tabs, filter, current section).
 3. Label rename from the Results tab.
 4. Literal maths search, plus a consult-style result list for `C-f` and `C-S-f`.
@@ -33,9 +33,9 @@ undo reverses each batch.
 
 1. Maths search: does `$x$` find formulas that contain `x` as a token
    (proposed), or only formulas equal to `x`?
-2. Move go to line to `M-g` and make `C-g` cancel?
+2. Move go to line to `M-g` and make `C-g` cancel? Yes, decided 2026-11-20.
 3. Sidebar on the left or the right? List figures, tables and equations from
-   the start?
+   the start? Left, headings only at first. Decided 2026-11-20.
 4. Electric pairs in the paper view: on or off by default?
 5. Merging: into the previous section by default, as Combine does now, with
    "into the next" only on a key. Decided 2026-11-19.
@@ -204,6 +204,22 @@ tempel and Easycrypt snippets, `C-<tab>` (Chrome keeps Ctrl+Tab).
 Chrome may keep `Ctrl+Shift+C` for DevTools even in the app window. Test
 whether `preventDefault` takes it before relying on the `C-S-c` prefix. The
 fallback is `C-c C-a`, `C-c C-c` and so on.
+
+### Done (2026-11-20)
+
+- `C-g` (action `cancel`) closes the popover, menu, dialog or find bar on
+  top, else drops the selection. It works from fields too. In the source
+  view it never leaves the view (Escape still does). Go to line is `M-g`.
+- Chords: a key written `"C-c C-a"` in `keys.json`, or recorded in **Keys…**
+  as presses less than a second apart. After the first key a hint
+  (`#whichkey`, bottom left) lists the next keys and their actions. `C-g` or
+  Escape drops the chord, and an unbound chord says so in a toast. A key
+  that is bound alone and also starts a chord is marked as a clash in
+  **Keys…**. No default action has a chord yet: the multiple-cursor keys of
+  section 5 will be the first, after the `C-S-c` test above.
+- `#doc` has `lang="en-GB"`, from the config key `spell_lang`. The Electron
+  window already used `en-GB`.
+- Tests: `node tests/e2e.js 'keys: '`.
 
 ---
 

@@ -154,7 +154,7 @@ under ⋯. In narrow windows both show icons only; hovering a button names it.
   A bar beside the line numbers marks the lines changed since the last save
   (green added, orange changed, a red notch where lines were taken out);
   **Go to…** lists the file's headings (or a `.bib`'s entries) to jump to;
-  `Ctrl+G` (or a click on the line and column) goes to a line; `Ctrl+/`
+  `Alt+G` (or a click on the line and column) goes to a line; `Ctrl+/`
   comments the region out with `%` or back in; a bracket or `$` typed over a
   selection wraps it.
 - **Chips.** Maths, references, citations and any LaTeX the editor does not
@@ -365,7 +365,8 @@ defaults of the others), and these are the defaults:
       "bib_add_to": null,
       "build": null,
       "code_envs": ["ecblock"],
-      "external_editor": null
+      "external_editor": null,
+      "spell_lang": "en-GB"
     }
 
 | Key | Meaning |
@@ -379,6 +380,7 @@ defaults of the others), and these are the defaults:
 | `build` | the build command, run in the main file's directory (default: `make` if there is a `Makefile`, otherwise `latexmk -pdf -synctex=1`) |
 | `code_envs` | more environments to show as editable code boxes |
 | `external_editor` | the command of **Open in your editor**, a list in which `{file}`, `{line}` and `{col}` are replaced, e.g. `["code", "-g", "{file}:{line}:{col}"]` (default: `emacsclient -n -a emacs +{line}:{col} {file}`, else VS Code, else the system's opener) |
+| `spell_lang` | the language the spelling of the text is checked in, such as `en-US` (the browser needs that dictionary; the Electron window has `en-GB` and the system's languages) |
 
 Metadata you correct in **Paper…** is kept in `.paper-editor/metadata.json`,
 with earlier versions. It never rewrites your `\author` lines.

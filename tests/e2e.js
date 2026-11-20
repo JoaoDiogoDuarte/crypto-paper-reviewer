@@ -1060,6 +1060,59 @@ done.`));
     await mergeAnswer(page, 'Cancel');
   },
 
+  async 'keys: C-g cancels, M-g goes to a line, the text is checked in en-GB'(env, page) {
+    eq(await page.eval(`$('#doc').lang`), 'en-GB', 'the spelling language');
+    // C-g drops a selection in the paper
+    await selectSpan(page, 'quick', 'brown');
+    await page.key('g', { ctrl: true });
+    eq(await page.eval(`getSelection().isCollapsed`), true, 'the selection is dropped');
+    // and closes the find bar, from its field
+    await page.key('f', { ctrl: true });
+    await page.waitFor(`!$('#findbar').hidden`, 2000, 'the find bar');
+    await page.key('g', { ctrl: true });
+    await page.waitFor(`$('#findbar').hidden`, 2000, 'the find bar closed');
+    // in the source view: M-g goes to a line, C-g drops the selection and stays
+    await page.eval('toggleSource(true)');
+    await page.waitFor(`SRC.on && $('#srcta') && $('#srcta').value.length > 0`, 4000, 'the source view');
+    await page.eval(`(() => { window.prompt = () => '3'; const ta = $('#srcta'); ta.focus(); ta.setSelectionRange(0, 5); })()`);
+    await page.key('g', { ctrl: true });
+    eq(await page.eval(`(() => { const ta = $('#srcta'); return JSON.stringify([SRC.on, ta.selectionStart === ta.selectionEnd]); })()`), '[true,true]', 'C-g stays in the source view');
+    await page.key('g', { alt: true });
+    eq(await page.eval(`(() => { const ta = $('#srcta'); return ta.value.slice(0, ta.selectionStart).split('\\n').length; })()`), 3, 'M-g went to line 3');
+    await page.eval('toggleSource(false)');
+  },
+
+  async 'keys: a chord shows what can follow, and runs its action'(env, page) {
+    await page.eval(`(() => { USER_KEYS = { save: ['C-c C-s'], undo: ['C-c u'] }; applyKeymap(); })()`);
+    try {
+      await typeAt(page, 'lazy dog.', ' Chord');
+      await page.key('c', { ctrl: true });
+      await page.waitFor(`!$('#whichkey').hidden`, 2000, 'the hint');
+      const hint = await page.eval(`$('#whichkey').textContent`);
+      has(hint, 'Ctrl+S', 'the next key');
+      has(hint, 'Save', 'what it does');
+      has(hint, 'Undo', 'the other action');
+      await page.key('s', { ctrl: true });
+      await page.waitFor(`$('#whichkey').hidden`, 2000, 'the hint closed');
+      await page.waitFor(`FILES['main.tex'].disk.includes('lazy dog. Chord')`, 6000, 'the save');
+      has(env.read('main.tex'), 'lazy dog. Chord', 'saved by the chord');
+      // C-g in the middle of a chord drops it
+      await page.key('c', { ctrl: true });
+      await page.waitFor(`!$('#whichkey').hidden`, 2000, 'the hint');
+      await page.key('g', { ctrl: true });
+      eq(await page.eval(`JSON.stringify([$('#whichkey').hidden, PREFIX])`), '[true,null]', 'the chord is dropped');
+      // Keys… records two presses less than a second apart as a chord
+      await page.eval(`(() => { openKeys(); [...document.querySelectorAll('#keys-list .keyrow')].find((r) => r.firstChild.textContent === 'Find').querySelector('button').click(); })()`);
+      await page.key('x', { ctrl: true });
+      await page.key('f', { ctrl: true });
+      await page.waitFor(`!RECORDING`, 3000, 'the recording to end');
+      eq(await page.eval(`JSON.stringify(KEYS_DRAFT.find)`), '["C-x C-f"]', 'the chord recorded');
+      await page.eval(`$('#keys-close').click()`);
+    } finally {
+      await page.eval(`(() => { USER_KEYS = {}; applyKeymap(); })()`);
+    }
+  },
+
   async 'a caption or heading never gets a blank line'(env, page) {
     env.write('main.tex', [
       '\\documentclass{article}', '\\begin{document}',

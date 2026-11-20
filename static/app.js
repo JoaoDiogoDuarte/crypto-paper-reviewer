@@ -214,6 +214,7 @@ async function load(keepScroll, discard = []) {
   restoreEditorState(caret);
   if (keepScroll) restoreAnchor(y);
   setBuild(DOC.build);
+  $('#doc').lang = (DOC.config && DOC.config.spell_lang) || 'en-GB';
   showWhere();
   refreshSourceView();
   if (new URLSearchParams(location.search).has('selftest')) selfTest();
@@ -5917,7 +5918,7 @@ const TEXT_KEYS = {
 document.addEventListener('keydown', (e) => {
   const k = keyName(e);
   const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) && !e.target.closest('.seg');
-  if (inField && !['C-s', 'C-S', 'C-f', 'Escape'].includes(k)) {
+  if (inField && !['C-s', 'C-S', 'C-f', 'Escape'].includes(k) && !(GLOBAL_KEYS[k] && GLOBAL_KEYS[k].cancels)) {
     // the source view's text keeps its own keys too, but switches back
     if (SRC.on && e.target.id === 'srcta' && (USER_KEYS.source || ['C-M-e']).includes(k)) { e.preventDefault(); toggleSource(false); }
     // and opens the file in the user's own editor
@@ -8794,7 +8795,8 @@ const ACTION_DEFS = [
   ['src-indent', 'Source: indent the region (or type two spaces)', 'source', ['Tab'], () => SOURCE_ACTIONS.indent()],
   ['src-unindent', 'Source: unindent the region, or the line', 'source', ['S-Tab'], () => SOURCE_ACTIONS.unindent()],
   ['src-newline', 'Source: new line, indented as this one', 'source', ['Enter'], () => SOURCE_ACTIONS.newline()],
-  ['src-goto', 'Source: go to line', 'source', ['C-g'], () => SOURCE_ACTIONS.gotoLine()],
+  ['src-goto', 'Source: go to line', 'source', ['M-g'], () => SOURCE_ACTIONS.gotoLine()],
+  ['cancel', 'Cancel: close the menu or window on top, or drop the selection (as Emacs C-g)', 'global', ['C-g'], () => cancelKey()],
   ['src-comment', 'Source: comment the region (or line) out with %, or back in', 'source', ['C-/'], () => SOURCE_ACTIONS.toggleComment()],
   ['duplicate', 'Duplicate the region, or the line', 'text', ['C-p'], () => duplicate()],
   ['expand', 'Expand the selection', 'text', ['C-+', 'C-='], () => expandRegion()],
@@ -8902,6 +8904,77 @@ function applyKeymap() {
 const CODE_KEYS = {};
 fetch('/api/keys').then((r) => r.json()).then((k) => { USER_KEYS = k || {}; applyKeymap(); }).catch(applyKeymap);
 
+// C-g, as in Emacs: closes what is on top (a popover, a menu, a dialog, the
+// find bar), else drops the selection.  In the source view it never leaves
+// the view, which Escape does.
+function cancelKey() {
+  if (PREFIX) { dropPrefix(); return; }
+  if (document.querySelector('.popover:not([hidden])')) { closePopovers(); return; }
+  if (SRC.on) {
+    if (!$('#palette').hidden) { closePalette(); return; }
+    if (!$('#external').hidden) { $('#external-later').click(); return; }
+    if (!$('#askbox').hidden) { [...$('#ask-actions').children].pop().click(); return; }
+    const ta = $('#srcta');
+    if (ta) ta.setSelectionRange(ta.selectionEnd, ta.selectionEnd);
+    return;
+  }
+  if (topDialog() || ['#findbar', '#drawer', '#menu', '#banner'].some((id) => $(id) && !$(id).hidden)) { closeCurrentMenu(); return; }
+  const sel = getSelection();
+  if (sel.rangeCount && !sel.isCollapsed) sel.collapseToEnd();
+}
+// the cancel key works in fields too (the find bar, the palette)
+for (const [id, , , , fn] of ACTION_DEFS) if (id === 'cancel') fn.cancels = true;
+
+// ------------------------------------------------------------ prefix keys
+//
+// A key written "C-c C-a" (in keys.json, or recorded as two presses in
+// Keys…) is a chord: after its first key, a hint lists the keys that can
+// follow and what they do; C-g or Escape drops it.
+let PREFIX = null;
+const prettyChord = (k) => k.split(' ').map(prettyKey).join(' ');
+const KEY_MAPS = () => [GLOBAL_KEYS, TEXT_KEYS, SOURCE_KEYS, CODE_KEYS];
+const isPrefix = (p) => KEY_MAPS().some((m) => Object.keys(m).some((k) => k.startsWith(p + ' ')));
+function keyLabel(k) {
+  const d = ACTION_DEFS.find(([id, , , defaults]) => (USER_KEYS[id] || defaults).includes(k));
+  return d ? d[1] : '';
+}
+function showPrefixHint(p) {
+  const box = $('#whichkey');
+  box.textContent = '';
+  box.append(el('b', '', prettyChord(p) + ' …'));
+  const next = [...new Set(KEY_MAPS().flatMap((m) => Object.keys(m)).filter((k) => k.startsWith(p + ' ')))].sort();
+  for (const k of next) {
+    const row = el('div', 'wk-row');
+    row.append(el('kbd', '', prettyChord(k.slice(p.length + 1))), el('span', '', keyLabel(k)));
+    box.append(row);
+  }
+  box.hidden = false;
+}
+function dropPrefix() { PREFIX = null; $('#whichkey').hidden = true; }
+document.addEventListener('keydown', (e) => {
+  if (RECORDING || ['Control', 'Alt', 'Shift', 'Meta'].includes(e.key)) return;
+  const t = e.target;
+  // fields of their own (the find bar, the palette) keep their keys
+  if (/^(INPUT|SELECT)$/.test(t.tagName) || (t.tagName === 'TEXTAREA' && t.id !== 'srcta' && !t.closest('#doc .seg'))) return;
+  const k = keyName(e);
+  if (!PREFIX) {
+    if (!isPrefix(k)) return;
+    e.preventDefault(); e.stopImmediatePropagation();
+    PREFIX = k;
+    showPrefixHint(k);
+    return;
+  }
+  e.preventDefault(); e.stopImmediatePropagation();
+  const full = PREFIX + ' ' + k;
+  if (isPrefix(full)) { PREFIX = full; showPrefixHint(full); return; }
+  dropPrefix();
+  if ((k === 'C-g' || k === 'Escape') && !KEY_MAPS().some((m) => m[full])) return;
+  const inText = t.isContentEditable && segOf(t);
+  const fn = (t.id === 'srcta' && SOURCE_KEYS[full]) || (inText && TEXT_KEYS[full]) ||
+    (t.tagName === 'TEXTAREA' && t.closest('#doc .seg') && CODE_KEYS[full]) || GLOBAL_KEYS[full];
+  if (fn) fn(); else toast(`${prettyChord(full)} does nothing here`);
+}, true);
+
 // "C-M-r" -> "Ctrl+Alt+R"
 const prettyKey = (k) => k.replace(/^((?:[CMS]-)*)(.+)$/, (_, mods, key) =>
   mods.replace(/C-/g, 'Ctrl+').replace(/M-/g, 'Alt+').replace(/S-/g, 'Shift+') +
@@ -8920,7 +8993,9 @@ function drawKeys() {
   // a key clashes with another of the same place, or with a global one
   const used = {};
   for (const [id, , scope, d] of ACTION_DEFS) for (const k of current(id, d)) (used[k] = used[k] || []).push(scope);
-  const clash = (k, scope) => { const u = used[k] || []; return u.filter((x) => x === scope).length > 1 || (scope === 'global' ? u.length > 1 : u.includes('global')); };
+  // a key that also starts a chord never runs alone
+  const starts = (k) => Object.keys(used).some((o) => o.startsWith(k + ' '));
+  const clash = (k, scope) => { const u = used[k] || []; return starts(k) || u.filter((x) => x === scope).length > 1 || (scope === 'global' ? u.length > 1 : u.includes('global')); };
   for (const [id, label, scope, d] of ACTION_DEFS) {
     const keys = current(id, d);
     const row = el('div', 'keyrow');
@@ -8928,26 +9003,39 @@ function drawKeys() {
     if (RECORDING === id) row.classList.add('recording');
     row.append(el('span', '', label));
     const ks = el('span', 'keys');
-    if (RECORDING === id) ks.textContent = 'press a key…';
-    else keys.forEach((k) => ks.append(el('kbd', '', prettyKey(k))));
+    if (RECORDING === id) ks.textContent = 'press a key (or two, for a chord)…';
+    else keys.forEach((k) => ks.append(el('kbd', '', prettyChord(k))));
     const ch = el('button', '', 'Change');
     ch.onclick = () => { RECORDING = id; drawKeys(); };
     row.append(ks, ch);
     list.append(row);
   }
 }
+// a key, or keys pressed less than a second apart (a chord such as C-c C-a)
+let REC_KEYS = [], REC_TIMER = null;
 document.addEventListener('keydown', (e) => {
   if (!RECORDING) return;
   e.preventDefault(); e.stopImmediatePropagation();
   if (['Control', 'Alt', 'Shift', 'Meta'].includes(e.key)) return;
-  if (e.key !== 'Escape') KEYS_DRAFT[RECORDING] = [keyName(e)];
-  RECORDING = null;
-  drawKeys();
+  clearTimeout(REC_TIMER);
+  if (e.key === 'Escape') { REC_KEYS = []; RECORDING = null; drawKeys(); return; }
+  REC_KEYS.push(keyName(e));
+  const ks = document.querySelector('#keys-list .keyrow.recording .keys');
+  if (ks) ks.textContent = prettyChord(REC_KEYS.join(' ')) + ' …';
+  REC_TIMER = setTimeout(finishRecording, 1000);
 }, true);
+// the keys pressed so far become the shortcut (Save does not wait the second)
+function finishRecording() {
+  clearTimeout(REC_TIMER);
+  if (RECORDING && REC_KEYS.length) KEYS_DRAFT[RECORDING] = [REC_KEYS.join(' ')];
+  REC_KEYS = []; RECORDING = null;
+  drawKeys();
+}
 $('#keysbtn').onclick = openKeys;
 $('#keys-close').onclick = () => { RECORDING = null; $('#keysbox').hidden = true; };
 $('#keys-reset').onclick = () => { KEYS_DRAFT = {}; drawKeys(); try { localStorage.removeItem('mutedHouse'); } catch (e) { /* storage unavailable */ } };
 $('#keys-save').onclick = async () => {
+  finishRecording();
   await fetch('/api/keys', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
     body: JSON.stringify(KEYS_DRAFT) });
   USER_KEYS = KEYS_DRAFT;
@@ -9637,7 +9725,7 @@ function buildSourceView() {
     <div id="srcmain">
       <div id="srchead"><b id="srcname"></b><span id="srcstate" class="small"></span><span class="spacer"></span>
         <select id="srcoutline" title="Go to a heading of this file" aria-label="Headings of this file"></select>
-        <span id="srcpos" class="small" title="Go to line (Ctrl+G)"></span>
+        <span id="srcpos" class="small" title="Go to line (Alt+G)"></span>
         <button id="srcrename" title="Rename this file (every \\input of it, or \\bibliography naming it, is updated)">Rename…</button>
         <button id="srcdelete" title="Move this file to the editor's trash (.paper-editor/trash)">Delete…</button>
         <button id="srcwrapbtn" title="Wrap long lines" aria-pressed="true">Wrap</button>

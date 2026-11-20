@@ -65,6 +65,8 @@ DEFAULT_CONFIG = {
     # {file}, {line} and {col} are replaced, e.g. ["code", "-g", "{file}:{line}:{col}"]
     # (default: emacsclient, else VS Code, else the system's opener)
     'external_editor': None,
+    # the language the browser checks the spelling of the paper's text in
+    'spell_lang': 'en-GB',
 }
 
 
