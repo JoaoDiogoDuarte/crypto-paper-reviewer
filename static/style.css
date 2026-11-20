@@ -39,10 +39,12 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
   box-shadow: 0 8px 26px rgba(0,0,0,.2); font: 14px/1.4 system-ui, sans-serif; }
 #whichkey { position: fixed; z-index: 40; left: 1em; bottom: 1em; min-width: 14em; max-width: min(36em, 90vw); padding: .6em .8em;
   background: var(--bg); border: 1px solid var(--accent); border-radius: 8px; box-shadow: 0 8px 26px rgba(0,0,0,.2);
-  font: 13px/1.5 system-ui, sans-serif; }
-#whichkey b { display: block; margin-bottom: .3em; }
-#whichkey .wk-row { display: flex; gap: .8em; }
-#whichkey .wk-row kbd { min-width: 5em; }
+  font: 13px/1.5 system-ui, sans-serif;
+  /* two columns: the keys never wrap, and the labels start at one line */
+  display: grid; grid-template-columns: max-content minmax(0, 1fr); column-gap: .8em; row-gap: .25em; align-items: baseline; }
+#whichkey b { grid-column: 1 / -1; margin-bottom: .1em; }
+#whichkey .wk-row { display: contents; }
+#whichkey .wk-row kbd { white-space: nowrap; }
 #askbox { z-index: 36; top: 5em; left: 50%; transform: translateX(-50%); width: min(38em, 92vw); font: 14px/1.4 system-ui, sans-serif; }
 #ask-text { margin: .4em 0 .7em; white-space: pre-line; }
 #ask-option { display: block; margin: 0 0 .7em; }
