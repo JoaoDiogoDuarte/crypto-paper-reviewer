@@ -1469,5 +1469,8 @@ body.sidebar #srcoutline { display: none; }
 .srcrow { display: flex; align-items: center; }
 .srcrow .srcfile { flex: 1; min-width: 0; }
 .srcfile-del { border: 0; background: none; color: var(--muted); padding: .1em .4em; border-radius: 5px; cursor: pointer; visibility: hidden; }
-.srcrow:hover .srcfile-del, .srcfile-del:focus-visible { visibility: visible; }
+.srcfile-ren { border: 0; background: none; color: var(--muted); padding: .1em .4em; border-radius: 5px; cursor: pointer; visibility: hidden; }
+.srcrow:hover .srcfile-del, .srcfile-del:focus-visible, .srcrow:hover .srcfile-ren, .srcfile-ren:focus-visible { visibility: visible; }
+.srcfile-ren:hover { color: var(--fg); background: var(--chip); }
+.srcfile-edit { flex: 1; min-width: 0; font: 12px ui-monospace, monospace; padding: .15em .4em; }
 .srcfile-del:hover { color: #c0392b; background: var(--chip); }

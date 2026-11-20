@@ -1643,6 +1643,39 @@ done.`));
     eq(await page.eval(`$('#srcdelete').disabled && $('#srcrename').disabled`), true, 'main file buttons off');
   },
 
+  async 'source view: rename from the file list, in place'(env, page) {
+    await page.eval('toggleSource(true)');
+    await page.waitFor(`SRC.on && SRC.name === DOC.main && document.querySelector('#srcfiles .srcrow')`, 4000, 'the source view');
+    const rowOf = (name) => `[...document.querySelectorAll('#srcfiles .srcrow')].find((r) => r.querySelector('.srcfile') && r.querySelector('.srcfile').textContent === ${JSON.stringify(name)})`;
+    const field = `document.querySelector('#srcfiles .srcfile-edit')`;
+    const answer = (value, key) => page.eval(`(() => { const f = ${field}; f.value = ${JSON.stringify(value)}; f.dispatchEvent(new KeyboardEvent('keydown', { key: ${JSON.stringify(key)}, bubbles: true })); })()`);
+    // a double-click opens the field, with the bare name selected; Esc keeps the name
+    await page.eval(`${rowOf('sections/body.tex')}.querySelector('.srcfile').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
+    await page.waitFor(`!!${field}`, 2000, 'the field');
+    eq(await page.eval(`(() => { const f = ${field}; return f.value.slice(f.selectionStart, f.selectionEnd); })()`), 'body', 'the bare name selected');
+    await answer('sections/other-name.tex', 'Escape');
+    await page.waitFor(`!${field} && !!${rowOf('sections/body.tex')}`, 2000, 'the list as it was');
+    // a .tex read by \input, while main.tex is shown
+    await page.eval(`${rowOf('sections/body.tex')}.querySelector('.srcfile').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
+    await page.waitFor(`!!${field}`, 2000, 'the field');
+    await answer('sections/core.tex', 'Enter');
+    await page.waitFor(`!!${rowOf('sections/core.tex')}`, 8000, 'the new name in the list');
+    eq(fs.existsSync(path.join(env.paper, 'sections/core.tex')) && !fs.existsSync(path.join(env.paper, 'sections/body.tex')), true, 'the file renamed');
+    has(env.read('main.tex'), '\\input{sections/core}', 'the \\input follows');
+    eq(await page.eval('SRC.name'), 'main.tex', 'the view stays on main.tex');
+    eq(await page.eval(`$('#srcta').value.includes('\\\\input{sections/core}')`), true, 'and shows the new \\input');
+    // the .bib, with the ✎ button
+    await page.eval(`${rowOf('refs.bib')}.querySelector('.srcfile-ren').click()`);
+    await page.waitFor(`!!${field}`, 2000, 'the field');
+    await answer('library.bib', 'Enter');
+    await page.waitFor(`!!${rowOf('library.bib')}`, 8000, 'library.bib in the list');
+    has(env.read('main.tex'), '\\bibliography{library}', '\\bibliography follows');
+    // saving afterwards keeps both changes
+    await page.save();
+    has(env.read('main.tex'), '\\input{sections/core}', 'still there after a save');
+    await page.eval('toggleSource(false)');
+  },
+
   async 'source view: delete from the file list, a .bib named by \\bibliography too'(env, page) {
     await page.eval(`window.confirm = () => true`);
     await page.eval('toggleSource(true)');

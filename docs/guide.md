@@ -138,7 +138,9 @@ under ⋯. In narrow windows both show icons only; hovering a button names it.
 - **Source view.** **Source** in the toolbar (`Ctrl+Alt+E`) shows the `.tex`
   and `.bib` files of the folder with line numbers and colours, at the line
   of the block the cursor was in; a list on the left switches files (the
-  document's own, other `.tex` files, the bibliographies); the ✕ beside a
+  document's own, other `.tex` files, the bibliographies); the ✎ beside a
+  file, a double-click or `F2` on it renames it in place (every `\input` of
+  it, or `\bibliography` naming it, follows; `Esc` keeps the name); the ✕ beside a
   file (or **Delete…** above the text) moves it to the editor's trash, after
   taking its `\input`, or its name in `\bibliography`, out of the paper and
   saving (the main file stays). A file of the

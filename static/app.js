@@ -2640,32 +2640,52 @@ async function renameFilePrompt(name) {
   if (name === DOC.main) { toast('The main file is renamed outside the editor', 'error'); return; }
   const ext = name.endsWith('.bib') ? '.bib' : '.tex';
   const to = (prompt(`Rename ${name} to (a ${ext} path inside the paper's folder):`, name) || '').trim();
-  if (!to || to === name) return;
+  await renameFile(name, to);
+}
+// Rename a file of the paper (every \input of it, or \bibliography naming
+// it, follows); true when it was renamed.
+async function renameFile(name, to) {
+  if (name === DOC.main) { toast('The main file is renamed outside the editor', 'error'); return false; }
+  const ext = name.endsWith('.bib') ? '.bib' : '.tex';
+  to = (to || '').trim();
+  if (!to || to === name) return false;
   const dest = checkNewName(to, ext);
-  if (!dest) return;
+  if (!dest) return false;
+  flushSource();
+  if (SRC.extra && SRC.extra[name] && SRC.extra[name].text !== SRC.extra[name].disk) {
+    if (!confirm(`${name} has unsaved edits: save them first, then rename?`)) return false;
+    await save();
+  }
+  const shown = SRC.on && SRC.name === name;
   if (isNewFile(name)) {
     structural(() => renameNewFile(name, dest), false);
     toast(`Renamed to ${dest} (not saved yet)`, 'ok');
     refreshFiles();
-    return;
+    if (SRC.on) { await srcReloadFiles(); if (shown) await openSourceFile(dest); else drawSourceFiles(); }
+    return true;
   }
   // a file on disk: its readers must be saved, then the server renames it
   // and rewrites their \input
   if (editedFiles().length) {
-    if (!confirm('Renaming writes to disk at once, so your edits are saved first. Save and rename?')) return;
+    if (!confirm('Renaming writes to disk at once, so your edits are saved first. Save and rename?')) return false;
     await save();
-    if (editedFiles().length) { toast('Not renamed: some files could not be saved', 'error'); return; }
+    if (editedFiles().length) { toast('Not renamed: some files could not be saved', 'error'); return false; }
   }
   const batch = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
   const r = await fetch('/api/file/rename', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN }, body: JSON.stringify({ from: name, to: dest, batch }) });
   const res = await r.json().catch(() => ({}));
-  if (!r.ok) { banner(`Renaming ${name} failed: ${res.error || r.status}`); return; }
+  if (!r.ok) { banner(`Renaming ${name} failed: ${res.error || r.status}`); return false; }
   delete FILES[name];
   if (SRC.extra) delete SRC.extra[name];
   await load(true);
   toast(`Renamed to ${dest}${res.changed.length ? '; updated ' + res.changed.join(', ') : ''}`, 'ok');
   refreshFiles();
-  if (SRC.on) { await srcReloadFiles(); await openSourceFile(dest); }
+  if (SRC.on) {
+    await srcReloadFiles();
+    if (shown) await openSourceFile(dest);
+    else { syncSourceText(); drawSourceFiles(); }
+  }
+  return true;
 }
 
 // ---- the Files window
@@ -10439,8 +10459,16 @@ function drawSourceFiles() {
       b.onclick = () => openSourceFile(f.name);
       const row = el('div', 'srcrow');
       row.append(b);
-      // every file but the main one can go to the trash from here
+      // every file but the main one can be renamed (✎, a double-click or F2
+      // on it) or go to the trash (✕) from here
       if (f.name !== DOC.main) {
+        const ren = el('button', 'srcfile-ren', '✎');
+        ren.title = `Rename ${f.name} (every \\input of it, or \\bibliography naming it, follows)`;
+        ren.setAttribute('aria-label', `Rename ${f.name}`);
+        ren.onclick = (e) => { e.stopPropagation(); renameInList(row, f.name); };
+        row.append(ren);
+        b.ondblclick = (e) => { e.preventDefault(); renameInList(row, f.name); };
+        b.addEventListener('keydown', (e) => { if (e.key === 'F2') { e.preventDefault(); renameInList(row, f.name); } });
         const del = el('button', 'srcfile-del', '✕');
         del.title = `Delete ${f.name}: move it to the editor's trash (.paper-editor/trash)`;
         del.setAttribute('aria-label', `Delete ${f.name}`);
@@ -10706,11 +10734,6 @@ async function srcNewFile() {
 async function srcRename() {
   const name = SRC.name;
   if (!name || name === DOC.main) return;
-  flushSource();
-  if (SRC.extra[name] && SRC.extra[name].text !== SRC.extra[name].disk) {
-    if (!confirm(`${name} has unsaved edits: save them first, then rename?`)) return;
-    await save();
-  }
   await renameFilePrompt(name);
 }
 // The \bibliography and \addbibresource that name a .bib file, by file.
@@ -10749,6 +10772,32 @@ function syncSourceText() {
   ta.value = FILES[SRC.name].text;
   ta.scrollTop = top; ta.setSelectionRange(a, a);
   refreshSourceView();
+}
+
+// A field in place of the file's name in the list: Enter renames, Esc keeps.
+function renameInList(row, name) {
+  const input = el('input', 'srcfile-edit');
+  input.value = name;
+  input.spellcheck = false;
+  input.setAttribute('aria-label', `New name for ${name}`);
+  row.replaceChildren(input);
+  input.focus();
+  // the name without the folder and the extension is selected
+  const from = name.lastIndexOf('/') + 1, to = name.lastIndexOf('.') > from ? name.lastIndexOf('.') : name.length;
+  input.setSelectionRange(from, to);
+  let done = false;
+  const finish = async (ok) => {
+    if (done) return;
+    done = true;
+    if (ok && input.value.trim() !== name) { input.disabled = true; if (await renameFile(name, input.value)) return; }
+    drawSourceFiles();
+  };
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+  });
+  input.addEventListener('blur', () => finish(false));
 }
 
 async function srcDelete(name = SRC.name) {
