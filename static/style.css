@@ -37,6 +37,9 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
 #external { position: fixed; z-index: 35; top: 5em; left: 50%; transform: translateX(-50%); width: min(38em, 92vw);
   padding: .8em 1em; background: var(--bg); border: 1px solid var(--accent); border-radius: 6px;
   box-shadow: 0 8px 26px rgba(0,0,0,.2); font: 14px/1.4 system-ui, sans-serif; }
+#askbox { z-index: 36; top: 5em; left: 50%; transform: translateX(-50%); width: min(38em, 92vw); font: 14px/1.4 system-ui, sans-serif; }
+#ask-text { margin: .4em 0 .7em; white-space: pre-line; }
+#ask-option { display: block; margin: 0 0 .7em; }
 #external-files { margin: .4em 0 .7em; color: var(--muted); max-height: 8em; overflow: auto; }
 .external-actions { display: flex; flex-wrap: wrap; gap: .4em; }
 #openbox { position: fixed; z-index: 35; top: 5em; left: 50%; transform: translateX(-50%); width: min(38em, 92vw);
@@ -566,7 +569,7 @@ body.diffing #diffbtn {
 #findbar label { display: inline-flex; align-items: center; gap: .25em; }
 
 /* Unified, softly raised sheets and utility windows. */
-#figview, #paperbox, #historybox, #keysbox, #helpbox, #openbox, #newbox, #external, #palette {
+#figview, #paperbox, #historybox, #keysbox, #helpbox, #openbox, #newbox, #external, #askbox, #palette {
   background: var(--mac-window);
   border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
   border-radius: 12px;
@@ -613,12 +616,12 @@ body.diffing #diffbtn {
   border-radius: 8px;
   border-color: var(--mac-control-border);
 }
-#openbox, #newbox, #external {
+#openbox, #newbox, #external, #askbox {
   border-color: color-mix(in srgb, var(--accent) 24%, var(--line));
   border-radius: 12px;
 }
 #openbox, #newbox { padding: 1em 1.1em; }
-#external { padding: 1em 1.1em; }
+#external, #askbox { padding: 1em 1.1em; }
 #helpbox {
   padding: 1em 1.3em;
   font: 14px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
@@ -777,7 +780,7 @@ button.flash { animation: press-flash .45s ease-out; }
 @media (prefers-reduced-motion: reduce) { button.flash { animation: none; outline: 2px solid var(--accent); } .toast { transition: none; } }
 
 /* Windows are opaque: the paper never shows through their bars. */
-#figview, #paperbox, #historybox, #keysbox, #helpbox, #openbox, #newbox, #external, #palette {
+#figview, #paperbox, #historybox, #keysbox, #helpbox, #openbox, #newbox, #external, #askbox, #palette {
   background: var(--mac-chrome); backdrop-filter: none; -webkit-backdrop-filter: none;
 }
 #diffmap { top: calc(var(--chrome-height, 90px) + 10px); }
@@ -1269,7 +1272,7 @@ svg.ic { fill: currentColor; }
 .xclose:hover { background: color-mix(in srgb, var(--fg) 9%, transparent); color: var(--fg); border-color: transparent; }
 .xclose .ic { width: 16px; height: 16px; }
 .xclose.corner { position: absolute; top: .45em; right: .45em; z-index: 2; }
-#helpbox, #external, #openbox, #newbox { position: fixed; }
+#helpbox, #external, #askbox, #openbox, #newbox { position: fixed; }
 #helpbox { padding-top: 2.4em; }
 #external, #openbox, #newbox { padding-right: 2.8em; }
 #banner .banner-close.xclose { width: 24px; height: 24px; }

@@ -145,6 +145,12 @@
     <button id="external-later">Later</button>
   </div>
 </div>
+<div id="askbox" hidden role="dialog" aria-labelledby="ask-title">
+  <b id="ask-title"></b>
+  <div id="ask-text"></div>
+  <label id="ask-option" hidden><input type="checkbox" id="ask-check"> <span id="ask-check-label"></span></label>
+  <div class="external-actions" id="ask-actions"></div>
+</div>
 <div id="openbox" role="dialog" aria-modal="true" aria-labelledby="open-title" hidden>
   <b id="open-title">Open a paper</b>
   <div id="open-recent-wrap"><div class="open-sub">Recent papers</div><div id="open-recent" role="list"></div></div>
@@ -281,7 +287,7 @@
     <li>Click maths, a reference or any grey chip to edit its LaTeX; <kbd>Ctrl</kbd>+<kbd>Enter</kbd> applies.</li>
     <li><kbd>Ctrl</kbd>+click a reference or citation: go to it (Lemma 4, the equation, the reference entry); <kbd>Alt</kbd>+<kbd>←</kbd> goes back.</li>
     <li>Hover a block and use <b>＋</b> to add a paragraph, heading or displayed maths after it, or <b>✕</b> to delete a heading.</li>
-    <li>Heading tools move sections up or down and combine a section with the one before it; put the cursor in a section and use <b>Split section</b> to divide it.</li>
+    <li>Heading tools move sections up or down and merge a heading into the one before it of its level (<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>J</kbd>); put the cursor in a section and use <b>Split section</b> to divide it.</li>
     <li><b>To file</b> (heading tools, <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Y</kbd>) moves a section into <code>sections/&lt;name&gt;.tex</code>, read with <code>\input</code> where it was. <b>☰ → Files…</b> (<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>N</kbd>) makes one file per section at once, new section files, images, and renames or includes files. When the sections live in <code>sections/</code>, a section split off or added inside one gets a file of its own, and Up/Down move whole section files.</li>
     <li>Drop or paste an image into the text: it is copied to <code>figures/</code> and placed in a figure after that block.</li>
     <li>Listings read from files (<code>\lstinputlisting</code>, and macros around it such as <code>\ecsnippet{File.ec}{name}</code>) show the code, highlighted with the paper's <code>\lstdefinelanguage</code>; <b>LaTeX</b> in the block's tools shows the command.</li>

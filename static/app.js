@@ -63,7 +63,7 @@ function syncModal() {
 const FOCUSABLE = 'input:not([type=hidden]):not([disabled]), select:not([disabled]), textarea:not([disabled]), button:not([disabled]), [href], [tabindex]:not([tabindex="-1"]), [contenteditable="true"]';
 const shown = (n) => !!(n.offsetWidth || n.offsetHeight || n.getClientRects().length);
 function topDialog() {
-  const open = [...Object.keys(MODALS), 'external', 'palette'].map((id) => document.getElementById(id)).filter((e) => e && !e.hidden);
+  const open = [...Object.keys(MODALS), 'external', 'askbox', 'palette'].map((id) => document.getElementById(id)).filter((e) => e && !e.hidden);
   return open.length ? open[open.length - 1] : null;
 }
 const DIALOG_FOCUS = new Map();   // dialog -> what had the focus before it opened
@@ -94,7 +94,7 @@ document.addEventListener('keydown', (e) => {
     all[e.shiftKey ? (i <= 0 ? all.length - 1 : i - 1) : (i < 0 || i === all.length - 1 ? 0 : i + 1)].focus();
   }
 }, true);
-for (const id of [...Object.keys(MODALS), 'external']) {
+for (const id of [...Object.keys(MODALS), 'external', 'askbox']) {
   const e = document.getElementById(id);
   if (!e) continue;
   e.setAttribute('aria-modal', 'true');
@@ -792,8 +792,8 @@ function renderHeading(seg, ctx) {
   down.title = 'Move this section down (Ctrl+Alt+Down)';
   down.onclick = (e) => { e.stopPropagation(); moveSection(cur(e), 1); };
   const merge = el('button', '', 'Merge');
-  merge.title = 'Combine this section with the previous one (Ctrl+Alt+J)';
-  merge.onclick = (e) => { e.stopPropagation(); const sg = cur(e); if (confirm('Combine this section with the previous one?' + labelWarning(sg))) structural(() => removeSeg(sg)); };
+  merge.title = 'Merge with the previous heading of this level (Ctrl+Alt+J; into this one from the next: Ctrl+Alt+Shift+J)';
+  merge.onclick = (e) => { e.stopPropagation(); mergeHeading(cur(e)); };
   const tofile = el('button', '', 'To file');
   tofile.title = 'Move this section into a file of its own under sections/ (Ctrl+Alt+Y)';
   tofile.onclick = (e) => { e.stopPropagation(); splitToFile(cur(e)); };
@@ -811,6 +811,216 @@ function labelWarning(seg) {
   for (const f of Object.values(FILES)) for (const m of (f.text || '').matchAll(/\\(?:[cC]ref|v?ref|autoref|eqref|nameref|pageref)\*?\{([^}]*)\}/g))
     n += m[1].split(',').filter((k) => keys.includes(k.trim())).length;
   return n ? `\n\nIts label (${keys.join(', ')}) is referenced ${n} time${n === 1 ? '' : 's'}; those references will show ?? (Undo brings it back).` : '';
+}
+
+// ------------------------------------------------------ the question box
+//
+// A question with several answers (confirm() has two): resolves to the
+// label of the button pressed, or null on Esc, and to whether the optional
+// box was ticked.
+function ask({ title, text, option, buttons }) {
+  const box = $('#askbox');
+  $('#ask-title').textContent = title;
+  $('#ask-text').textContent = text || '';
+  $('#ask-option').hidden = !option;
+  $('#ask-check').checked = false;
+  $('#ask-check-label').textContent = option || '';
+  const acts = $('#ask-actions');
+  acts.textContent = '';
+  return new Promise((resolve) => {
+    const done = (choice) => { box.hidden = true; box.removeEventListener('keydown', keys, true); resolve({ choice, option: !!option && $('#ask-check').checked }); };
+    const keys = (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(null); } };
+    for (const label of buttons) {
+      const b = el('button', '', label);
+      b.onclick = (e) => { e.stopPropagation(); done(label); };
+      acts.append(b);
+    }
+    box.addEventListener('keydown', keys, true);
+    box.hidden = false;
+  });
+}
+
+// --------------------------------------------------------- merging headings
+//
+// Merging heading H into the previous heading P of the same level: H's
+// heading goes, its text and its children follow P's last child, and its
+// \label moves to P's heading, so references to H print P's number.  With
+// the option, H stays as a heading one level down, and so does everything
+// under it.  When H is a file of its own read right after P's, the files
+// can be merged too: H's file goes to the trash on the next save.
+const LEVELS = ['part', 'chapter', 'section', 'subsection', 'subsubsection', 'paragraph'];
+const TRASH_ON_SAVE = new Set();   // files merged into another: trashed on save if nothing reads them
+
+// The headings of the document in reading order (a file's at its \input).
+function documentHeadings() {
+  const out = [], seen = new Set();
+  const visit = (name) => {
+    if (seen.has(name) || !FILES[name] || !FILES[name].segs) return;
+    seen.add(name);
+    for (const s of FILES[name].segs) {
+      if (s.removed) continue;
+      if (s.kind === 'heading' && headingRank(s) !== null) out.push(s);
+      else if (s.kind === 'input' && s.input) visit(s.input);
+    }
+  };
+  visit(DOC.main);
+  return out;
+}
+const headingTitle = (seg) => plainOfLatex((L.headingParts(segSource(seg, [])) || {}).title || '');
+// The heading H merges into, or the reason it cannot.
+function mergeTarget(h) {
+  const heads = documentHeadings();
+  const i = heads.indexOf(h), rank = headingRank(h);
+  if (i < 0 || rank === null) return { why: 'Put the cursor in a heading for that' };
+  for (let j = i - 1; j >= 0; j--) {
+    const r = headingRank(heads[j]);
+    if (r < rank) return { why: `This is the first ${LEVELS[rank]} of its ${LEVELS[r]}: there is no ${LEVELS[rank]} before it to merge into` };
+    if (r === rank) return { into: heads[j] };
+  }
+  return { why: `This is the first ${LEVELS[rank]} of the document: there is nothing before it to merge into` };
+}
+// The heading after H of its level, in the same parent, if any.
+function nextSameLevel(h) {
+  const heads = documentHeadings();
+  const i = heads.indexOf(h), rank = headingRank(h);
+  for (let j = i + 1; j < heads.length; j++) {
+    const r = headingRank(heads[j]);
+    if (r < rank) return null;
+    if (r === rank) return heads[j];
+  }
+  return null;
+}
+const noComments = (src) => src.replace(/(^|[^\\])%.*$/gm, '$1');
+// The \label of a heading: on its line, or alone at the start of the block
+// after it.  Returns the labels and the block that holds the second kind.
+function headingLabels(h) {
+  const keys = [...h.src.matchAll(/\\label\{([^}]*)\}/g)].map((m) => m[0]);
+  const segs = FILES[h.file].segs;
+  let k = segs.indexOf(h) + 1;
+  while (segs[k] && (segs[k].kind === 'gap' || segs[k].removed)) k++;
+  const after = segs[k] && segs[k].kind === 'para' && /^\s*\\label\{[^}]*\}/.exec(segs[k].src);
+  return { labels: after ? [...keys, after[0].trim()] : keys, after: after ? segs[k] : null };
+}
+// How the files can be merged: { how: 'inline', inp } when P is in the file
+// that reads H's file, { how: 'append', inp, from, between } when P's file
+// is read just before it, or { why } when they cannot.
+function fileMerge(h, p) {
+  if (h.file === p.file) return null;
+  if (!sectionIsWholeFile(h)) return { why: `${h.file} holds more than this ${LEVELS[headingRank(h)]}, so only the heading can go` };
+  const inp = inputSegOf(h.file);
+  if (!inp) return { why: `${h.file} is not read by \\input` };
+  if (inp.file === p.file) return { how: 'inline', inp };
+  const pin = inputSegOf(p.file);
+  const segs = FILES[inp.file].segs;
+  if (!pin || pin.file !== inp.file || segs.indexOf(pin) > segs.indexOf(inp)) return { why: `${p.file} and ${h.file} are not read one after the other` };
+  const tail = FILES[p.file].segs.slice(FILES[p.file].segs.indexOf(p));
+  if (fixedIn(tail)) return { why: `${p.file} ends with the bibliography, \\appendix or the end of the document` };
+  const from = segs.indexOf(pin) + 1, to = segs.indexOf(inp);
+  const between = segs.slice(from, to).filter((s) => !s.removed && s.kind !== 'gap');
+  if (fixedIn(between)) return { why: `the bibliography, \\appendix or the end of the document is between the two files` };
+  return { how: 'append', inp, from, to, between: between.map((s) => s.src).join('\n\n').trim() };
+}
+// One level down: \section to \subsection, ..., \subsubsection to \paragraph.
+function demoteHeadings(segs, seen = new Set()) {
+  for (const s of segs) {
+    if (s.removed) continue;
+    if (s.kind === 'heading') s.src = s.src.replace(/^\\(part|chapter|section|subsection|subsubsection)(?![A-Za-z])/, (_, l) => '\\' + LEVELS[LEVELS.indexOf(l) + 1]);
+    else if (s.kind === 'input' && s.input && FILES[s.input] && FILES[s.input].segs && !seen.has(s.input)) { seen.add(s.input); demoteHeadings(FILES[s.input].segs, seen); }
+  }
+}
+
+async function mergeHeading(h, direction = -1) {
+  if (!h || h.kind !== 'heading') { toast('Put the cursor in a heading for that', 'error'); return; }
+  if (direction > 0) {
+    const n = nextSameLevel(h);
+    if (!n) { toast(`This is the last ${LEVELS[headingRank(h)]} of its part of the document: there is nothing after it to merge`, 'error'); return; }
+    h = n;
+  }
+  const t = mergeTarget(h);
+  if (!t.into) { toast(t.why, 'error'); return; }
+  const p = t.into, rank = headingRank(h);
+  if (h.file === p.file) {
+    const segs = FILES[h.file].segs;
+    if (fixedIn(segs.slice(segs.indexOf(p) + 1, segs.indexOf(h)))) { toast('The bibliography, \\appendix or the end of the document lies between the two headings', 'error'); return; }
+  }
+  commit();
+  const hTitle = headingTitle(h), pTitle = headingTitle(p);
+  const { labels, after } = headingLabels(h);
+  const keys = labels.map((l) => /\{([^}]*)\}/.exec(l)[1]);
+  let refs = 0;
+  for (const f of Object.values(FILES)) for (const m of (f.text || '').matchAll(/\\(?:[cC]ref|v?ref|autoref|nameref|pageref)\*?\{([^}]*)\}/g))
+    refs += m[1].split(',').filter((k) => keys.includes(k.trim())).length;
+  const lines = [];
+  if (refs) lines.push(`${refs} reference${refs === 1 ? '' : 's'} to ${keys.join(', ')} will print the number of "${pTitle}" (unless "${hTitle}" is kept as a ${LEVELS[rank + 1]}).`);
+  const fm = fileMerge(h, p);
+  if (fm) {
+    lines.push(`The two are in different files (${p.file} and ${h.file}).`);
+    if (fm.why) lines.push(`The files cannot be merged: ${fm.why}.`);
+    else if (fm.between) lines.push(`Between the two files there is:\n${fm.between.slice(0, 300)}\nMerging the files puts it before the text of "${hTitle}".`);
+    else if (fm.how === 'append') lines.push(`Merging the files appends ${h.file} to ${p.file}; ${h.file} goes to the editor's trash on saving.`);
+    else lines.push(`Merging the files puts the text of ${h.file} where it is read in ${p.file}; ${h.file} goes to the editor's trash on saving.`);
+    if (/^\\include\{/.test(fm.inp ? fm.inp.src.trim() : '') && !fm.why) lines.push('It is read by \\include: the page break before it goes away if the files are merged.');
+  }
+  const canKeep = rank + 1 < LEVELS.length;
+  if (!canKeep) lines.push(`"${hTitle}" cannot stay as a heading: there is no level below \\${LEVELS[rank]}.`);
+  const buttons = fm ? [...(fm.why ? [] : ['Also merge the files']), 'Keep the files', 'Cancel'] : ['Merge', 'Cancel'];
+  const a = await ask({
+    title: `Merge "${hTitle}" into "${pTitle}"`,
+    text: lines.join('\n\n'),
+    option: canKeep ? `Keep "${hTitle}" as a ${LEVELS[rank + 1]} of "${pTitle}"` : null,
+    buttons,
+  });
+  if (!a.choice || a.choice === 'Cancel') return;
+  const files = a.choice === 'Also merge the files';
+  structural(() => {
+    // with the files merged, H's file is read for its text and then left as
+    // it is on disk (it is not saved, only moved to the trash)
+    const hsegs = FILES[h.file].segs;
+    const kept = files ? hsegs.map((s) => [s, s.src, s.removed]) : null;
+    if (a.option) {
+      // H stays, one level down, with everything under it
+      if (fm && sectionIsWholeFile(h)) demoteHeadings(FILES[h.file].segs);
+      else { const segs = FILES[h.file].segs, i = segs.indexOf(h); demoteHeadings(segs.slice(i, sectionEnd(segs, i, rank))); }
+    } else {
+      // its labels go to P's heading line, and the heading goes
+      if (after) after.src = after.src.replace(/^\s*\\label\{[^}]*\}[ \t]*\n?/, '');
+      if (labels.length) p.src = p.src.replace(/\s*$/, '') + labels.join('');
+      removeSeg(h);
+    }
+    if (!files) return;
+    const body = hsegs.filter((s) => !s.removed).map((s) => s.src).join('').trim();
+    for (const [s, src, removed] of kept) { s.src = src; s.removed = removed; }
+    if (fm.how === 'inline') fm.inp.src = body;
+    else {
+      const segs = FILES[fm.inp.file].segs;
+      for (let i = fm.from; i <= fm.to; i++) segs[i].removed = true;
+      const psegs = FILES[p.file].segs;
+      for (let i = psegs.length - 1; i >= 0 && (psegs[i].removed || psegs[i].kind === 'gap'); i--) psegs[i].removed = true;
+      psegs.push({ kind: 'gap', src: '\n\n', file: p.file }, { kind: 'para', src: (fm.between ? fm.between + '\n\n' : '') + body + '\n', file: p.file });
+    }
+    // H's file is no longer read; the save moves it to the trash (an Undo
+    // before that reads it again)
+    TRASH_ON_SAVE.add(h.file);
+  });
+  toast(files ? `Merged into "${pTitle}", with the files; save to write it` : `Merged into "${pTitle}"; Ctrl+Z undoes it`, 'ok');
+}
+
+// After a save: the files merged into another and read by nothing go to the
+// editor's trash (History and the trash keep them).
+async function trashMerged(batch) {
+  if (!TRASH_ON_SAVE.size) return;
+  const reach = reachableFiles();
+  for (const name of [...TRASH_ON_SAVE]) {
+    if (reach.has(name) || !FILES[name]) { TRASH_ON_SAVE.delete(name); continue; }
+    if (isNewFile(name)) { delete FILES[name]; TRASH_ON_SAVE.delete(name); continue; }
+    const r = await fetch('/api/file/trash', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN }, body: JSON.stringify({ name, batch }) });
+    const res = await r.json().catch(() => ({}));
+    if (!r.ok) { banner(`Could not move ${name} to the trash: ${res.error || r.status}`); continue; }
+    TRASH_ON_SAVE.delete(name);
+    delete FILES[name];
+    if (DOC.files) delete DOC.files[name];
+    toast(`${name} moved to ${res.trash}`, 'ok');
+  }
 }
 
 // Every block the Add menu makes can be deleted: a heading (the text under
@@ -3450,6 +3660,7 @@ async function saveOnce() {
     saved++;
   }
   saved += await saveExtra(batch);
+  if (!conflicts.length) await trashMerged(batch);
   // the blocks take the source just saved (with or without the house rules,
   // as chosen), so that the page and the file agree; typing that happened
   // while the save was on its way stays an edit
@@ -5653,6 +5864,7 @@ function keyName(e) {
 function closeCurrentMenu() {
   if (SRC.on && $('#palette').hidden && $('#external').hidden) { toggleSource(false); return; }
   if (!$('#external').hidden) { $('#external-later').click(); return; }
+  if (!$('#askbox').hidden) { const c = [...$('#ask-actions').children].pop(); if (c) c.click(); return; }
   if (!$('#openbox').hidden) { $('#open-cancel').click(); return; }
   if (!$('#newbox').hidden) { $('#new-cancel').click(); return; }
   if (!$('#historybox').hidden) { $('#historybox').hidden = true; return; }
@@ -8541,10 +8753,8 @@ const ACTION_DEFS = [
   ['prevblock', 'Previous block', 'global', ['M-ArrowUp'], () => stepBlock(-1, false)],
   ['moveup', 'Move the section at the cursor up', 'text', ['C-M-ArrowUp'], () => { const s = headingSegAtCaret(); if (s) moveSection(s, -1); }],
   ['movedown', 'Move the section at the cursor down', 'text', ['C-M-ArrowDown'], () => { const s = headingSegAtCaret(); if (s) moveSection(s, 1); }],
-  ['combine', 'Combine the section at the cursor with the previous one', 'text', ['C-M-j'], () => {
-    const s = headingSegAtCaret();
-    if (s && confirm('Combine this section with the previous one?' + labelWarning(s))) structural(() => removeSeg(s));
-  }],
+  ['combine', 'Merge the heading at the cursor with the previous one of its level', 'text', ['C-M-j'], () => { const s = headingSegAtCaret(); if (s) mergeHeading(s); }],
+  ['combinenext', 'Merge the next heading of this level into the one at the cursor', 'text', ['C-M-J'], () => { const s = headingSegAtCaret(); if (s) mergeHeading(s, 1); }],
   ['revertblock', 'Revert the block at the cursor to the last save (in the diff: the current change)', 'text', ['C-M-Backspace'], () => {
     if (DIFF.on) { const m = DIFF.marks[DIFF.cur]; if (m && m.diffRevert) m.diffRevert(); else toast('Step to a change first (Ctrl+Alt+] )'); return; }
     const s = caretSeg();

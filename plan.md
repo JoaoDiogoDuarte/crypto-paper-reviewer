@@ -20,7 +20,8 @@ and the editor's keymap (`ACTION_DEFS`, `TEXT_KEYS`, `GLOBAL_KEYS`), find
 6. Kill ring, source-view completion and electric pairs, latexindent,
    spelling keys `C-,` and `C-.` (section 6b).
 7. One sentence per line on save (section 7). Done 2026-11-19.
-8. Merging sections, subsections and subsubsections (section 8).
+8. Merging sections, subsections and subsubsections (section 8). Done
+   2026-11-20, with the departures listed at the end of section 8.
 9. Deleting text before the abstract must not break the PDF (section 9).
    Steps 1 and 2 done 2026-11-19, step 3 (the general check) 2026-11-20.
 
@@ -657,6 +658,23 @@ the files back (the trash keeps H's file). A save that fails on one file
 - A file with two sections: only "Keep the files" is offered.
 - References: `\Cref{sec:b}` prints P's number after the next build (checked
   in the `.aux` of a real build in the intensive run).
+
+### Done (2026-11-20)
+
+`mergeHeading` in `static/app.js`, a question box (`ask`, `#askbox`), the
+**Merge** button on every heading, Ctrl+Alt+J and Ctrl+Alt+Shift+J.
+Tests: `node tests/e2e.js merge`. Departures from the plan above:
+
+- `\paragraph` is not a heading block in the editor (`headingParts` does
+  not read it), so a `\paragraph` cannot be merged. Keeping a
+  `\subsubsection` one level down does make it a `\paragraph`.
+- There is no heading menu, so no menu entry. The button and the keys are
+  the only ways in.
+- A label alone at the start of the block after the heading also moves.
+- The save is not all or nothing. When a file of the merge is changed on
+  disk, the other files are saved, and H's file is not moved to the trash
+  until a save with no conflict.
+- The `.aux` check of `\Cref` in a real build is not in the tests.
 
 ## 9. Deleting before the abstract breaks the PDF
 

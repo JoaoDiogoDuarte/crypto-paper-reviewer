@@ -434,6 +434,23 @@ async function fakeSpeech(page) {
   eq(await page.eval(`$('#voice').value`), 'browser|Fake', 'fake voice selected');
 }
 
+// Merging headings: a paper from these files, a merge asked for, the question answered.
+async function mergeFresh(env, page, files) {
+  for (const [n, t] of Object.entries(files)) env.write(n, t);
+  await page.eval('load(true)');
+  const first = Object.values(files).map((t) => /\\(?:sub)*section\{([^}]*)\}/.exec(t)).find(Boolean);
+  await page.waitFor(`ORDER.some((s) => s.kind === 'heading' && s.src.includes(${JSON.stringify(first[1])}))`, 8000, 'the headings');
+}
+async function mergeStart(page, title, question = true) {
+  await page.eval(`(mergeHeading(ORDER.find((s) => s.kind === 'heading' && !s.removed && (L.headingParts(s.src) || {}).title === ${JSON.stringify(title)})), 0)`);
+  if (question) await page.waitFor(`!$('#askbox').hidden`, 3000, 'the question');
+  else await sleep(200);
+}
+async function mergeAnswer(page, label, keepAsSub = false) {
+  await page.eval(`(() => { $('#ask-check').checked = ${keepAsSub}; [...$('#ask-actions').children].find((b) => b.textContent === ${JSON.stringify(label)}).click(); })()`);
+  await sleep(150);
+}
+
 const TESTS = {
   async 'load: nothing edited, save writes nothing'(env, page) {
     eq(await dirty(page), 0, 'edited files after load');
@@ -961,6 +978,86 @@ done.`));
     await page.save();
     has(env.read('main.tex'), 'Plain words\n', 'a plain deletion is kept');
     has(env.read('main.tex'), '\\maketitle', 'the title stays');
+  },
+
+  async 'merge: two sections of one file, then undo'(env, page) {
+    const src = ['\\documentclass{article}', '\\begin{document}', '',
+      '\\section{Alpha}\\label{sec:a}', 'Alpha text.', '', '\\subsection{A one}', 'A one text.', '',
+      '\\section{Beta}\\label{sec:b}', 'Beta text.', '', '\\subsection{B one}', 'B one text.', '',
+      'See \\Cref{sec:b}.', '', '\\end{document}', ''].join('\n');
+    await mergeFresh(env, page, { 'main.tex': src });
+    await mergeStart(page, 'Beta');
+    has(await page.eval(`$('#ask-text').textContent`), '1 reference to sec:b', 'the question names the reference');
+    await mergeAnswer(page, 'Merge');
+    await page.save();
+    let text = env.read('main.tex');
+    has(text, '\\section{Alpha}\\label{sec:a}\\label{sec:b}\n', 'the label moves to the first heading');
+    hasNot(text, '\\section{Beta}', 'the heading goes');
+    if (!/A one text\.\n\nBeta text\.\n\n\\subsection\{B one\}/.test(text)) throw new Error('the text does not follow in order:\n' + text);
+    await page.select('Alpha text.', 'end');
+    await page.key('z', { ctrl: true });
+    await page.save();
+    eq(env.read('main.tex'), src, 'one undo restores the file');
+    // kept as a subsection: everything under it goes one level down
+    await mergeStart(page, 'Beta');
+    await mergeAnswer(page, 'Merge', true);
+    await page.save();
+    text = env.read('main.tex');
+    has(text, '\\subsection{Beta}\\label{sec:b}\nBeta text.\n\n\\subsubsection{B one}', 'one level down');
+    has(text, '\\section{Alpha}\\label{sec:a}\n', 'the first heading keeps its own label only');
+  },
+
+  async 'merge: refused for the first heading of a level'(env, page) {
+    const src = ['\\documentclass{article}', '\\begin{document}', '', '\\section{Alpha}', 'Alpha text.', '',
+      '\\section{Beta}', 'Beta text.', '', '\\subsection{B one}', 'B one text.', '', '\\end{document}', ''].join('\n');
+    await mergeFresh(env, page, { 'main.tex': src });
+    await mergeStart(page, 'Alpha', false);
+    await mergeStart(page, 'B one', false);
+    eq(await page.eval(`$('#askbox').hidden`), true, 'no question');
+    eq(await page.eval(`FILES['main.tex'].text`), src, 'nothing changes');
+  },
+
+  async 'merge: sections in their own files'(env, page) {
+    const main = ['\\documentclass{article}', '\\begin{document}', '', '\\input{sections/a}', '\\input{sections/b}', '', '\\end{document}', ''].join('\n');
+    const a = '\\section{Ay}\nAy text.\n', b = '\\section{Bee}\\label{sec:b}\nBee text.\n';
+    const files = { 'main.tex': main, 'sections/a.tex': a, 'sections/b.tex': b };
+    await mergeFresh(env, page, files);
+    await mergeStart(page, 'Bee');
+    await mergeAnswer(page, 'Also merge the files');
+    // undo before saving brings all of it back
+    await page.select('Ay text.', 'end');
+    await page.key('z', { ctrl: true });
+    await page.save();
+    for (const [n, t] of Object.entries(files)) eq(env.read(n), t, `undo: ${n}`);
+    await mergeStart(page, 'Bee');
+    await mergeAnswer(page, 'Also merge the files');
+    await page.save();
+    await page.waitFor(`!FILES['sections/b.tex']`, 6000, 'b.tex trashed');
+    eq(env.read('sections/a.tex'), '\\section{Ay}\\label{sec:b}\nAy text.\n\nBee text.\n', 'a.tex has both texts');
+    hasNot(env.read('main.tex'), 'sections/b', 'main.tex no longer reads b.tex');
+    eq(fs.existsSync(path.join(env.paper, 'sections/b.tex')), false, 'b.tex moved away');
+    if (!fs.readdirSync(path.join(env.state, 'trash')).some((f) => f.endsWith('b.tex'))) throw new Error('b.tex is not in the trash');
+    // keep the files: only the heading line goes
+    await mergeFresh(env, page, files);
+    await mergeStart(page, 'Bee');
+    await mergeAnswer(page, 'Keep the files');
+    await page.save();
+    eq(env.read('main.tex'), main, 'main.tex unchanged');
+    eq(env.read('sections/a.tex'), '\\section{Ay}\\label{sec:b}\nAy text.\n', 'the label moves');
+    eq(env.read('sections/b.tex').trim(), 'Bee text.', 'b.tex keeps its text');
+    // the previous section in the file that reads b.tex: b.tex's text goes in its place
+    const main2 = main.replace('\\input{sections/a}\n', a + '\n');
+    await mergeFresh(env, page, { 'main.tex': main2, 'sections/b.tex': b });
+    await mergeStart(page, 'Bee');
+    await mergeAnswer(page, 'Also merge the files');
+    await page.save();
+    await page.waitFor(`!FILES['sections/b.tex']`, 6000, 'b.tex trashed');
+    has(env.read('main.tex'), '\\section{Ay}\\label{sec:b}\nAy text.\n\nBee text.\n\n\\end{document}', 'the text is inlined');
+    // a file with two sections: only "Keep the files"
+    await mergeFresh(env, page, { ...files, 'sections/b.tex': b + '\n\\section{Cee}\nCee text.\n' });
+    await mergeStart(page, 'Bee');
+    eq(await page.eval(`[...$('#ask-actions').children].map((x) => x.textContent).join('|')`), 'Keep the files|Cancel', 'only keep');
+    await mergeAnswer(page, 'Cancel');
   },
 
   async 'a caption or heading never gets a blank line'(env, page) {
@@ -2387,24 +2484,29 @@ Object.assign(TESTS, {
     onlyChange(env, 'main.tex', 'encryption schemes.\n\n\\section{Related work}\nOther papers exist.', 'encryption schemes.\n\nOther papers exist.');
   },
 
-  async 'Delete a heading, Combine a section: Ctrl+Z brings each back'(env, page) {
+  async 'Delete a heading, merge a section: Ctrl+Z brings each back'(env, page) {
     await page.click(headBtn('Related work', 'Delete this heading'));
     await page.key('z', { ctrl: true });
     await page.save();
     untouched(env, 'main.tex');
-    await page.click(headBtn('Conclusion', 'Combine this section'));
+    // the section before it is in sections/body.tex: only the heading can go
+    await page.click(headBtn('Conclusion', 'Merge with the previous'));
+    await page.waitFor(`!$('#askbox').hidden`, 3000, 'the question');
+    await mergeAnswer(page, 'Keep the files');
     await page.key('z', { ctrl: true });
     await page.save();
     untouched(env, 'main.tex');
   },
 
-  async 'Combine with the previous section, and saying no changes nothing'(env, page) {
-    page.dialogAnswer = false;
-    await page.click(headBtn('Related work', 'Combine this section'));
-    page.dialogAnswer = true;
+  async 'Merge with the previous section, and Cancel changes nothing'(env, page) {
+    await page.click(headBtn('Related work', 'Merge with the previous'));
+    await page.waitFor(`!$('#askbox').hidden`, 3000, 'the question');
+    await mergeAnswer(page, 'Cancel');
     await page.save();
     untouched(env, 'main.tex');
-    await page.click(headBtn('Related work', 'Combine this section'));
+    await page.click(headBtn('Related work', 'Merge with the previous'));
+    await page.waitFor(`!$('#askbox').hidden`, 3000, 'the question');
+    await mergeAnswer(page, 'Merge');
     await page.save();
     hasNot(env.read('main.tex'), 'Related work', 'the heading is gone');
     has(env.read('main.tex'), 'Other papers exist.', 'its text stays');
