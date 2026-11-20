@@ -6,6 +6,10 @@
 //
 // With --probe instead of a URL it opens a hidden test page, presses keys the
 // browser reserves and prints which of them reached the page, then quits.
+// With --test-window (and --remote-debugging-port=N) it opens one window that
+// is never shown, drawn offscreen, for tests/electron_test.js to drive: it
+// shows no dialog (a prompt is cancelled, leaving with unsaved edits is
+// allowed), and has a profile and a process of its own.
 'use strict';
 const path = require('path');
 const os = require('os');
@@ -13,11 +17,12 @@ const { app, BrowserWindow, Menu, shell, dialog, session, ipcMain, screen } = re
 
 const args = process.argv.slice(app.isPackaged ? 1 : 2).filter((a) => !a.startsWith('--') || a === '--probe');
 const probe = args.includes('--probe');
+const testWindow = process.argv.includes('--test-window');
 const url = args.find((a) => /^https?:\/\//.test(a));
 
 // a profile of its own, apart from the Chrome app window's
 const config = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
-app.setPath('userData', path.join(config, 'paper-editor', probe ? 'electron-probe' : 'electron-profile'));
+app.setPath('userData', path.join(config, 'paper-editor', probe ? 'electron-probe' : testWindow ? 'electron-test' : 'electron-profile'));
 app.setName('Crypto Paper Reviewer');
 
 // No application menu: its accelerators (Ctrl+W closes, Ctrl+R reloads,
@@ -27,7 +32,8 @@ Menu.setApplicationMenu(null);
 // One process per profile: Chromium does not share a profile between two
 // processes (the second one's local storage and settings would not hold), so
 // a second ./run opens its window in the first process.
-const secondary = !probe && !process.argv.includes('--smoke') && !app.requestSingleInstanceLock({ url });
+// (a test window never joins the user's: its page would open in their editor)
+const secondary = !probe && !testWindow && !process.argv.includes('--smoke') && !app.requestSingleInstanceLock({ url });
 if (secondary) app.quit();
 else {
   app.on('second-instance', (e, argv, cwd, extra) => {
@@ -61,7 +67,9 @@ function makeWindow(target, show = true) {
     icon: path.join(__dirname, 'icon.png'),   // made from static/icon.svg: Electron reads no SVG
     autoHideMenuBar: true,
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, spellcheck: true, plugins: true,
-      preload: path.join(__dirname, 'preload.js') },
+      preload: path.join(__dirname, 'preload.js'),
+      // the test window is never shown, but paints and runs its timers as a shown one
+      ...(testWindow ? { offscreen: true, backgroundThrottling: false } : {}) },
   });
   const wc = win.webContents;
   // the PDF opens in a window of its own; other sites in the system browser
@@ -78,6 +86,7 @@ function makeWindow(target, show = true) {
   });
   // Electron closes a window with unsaved edits without asking; Chrome asks
   wc.on('will-prevent-unload', (e) => {
+    if (testWindow) { e.preventDefault(); return; }
     const choice = dialog.showMessageBoxSync(win, {
       type: 'question', buttons: ['Leave', 'Stay'], defaultId: 1, cancelId: 1,
       message: 'Leave the editor?', detail: 'Changes you made may not be saved.',
@@ -135,6 +144,7 @@ o.onclick=()=>done('ok:'+v.value);c.onclick=()=>done('cancel');
 addEventListener('keydown',(e)=>{if(e.key==='Enter'){e.preventDefault();done('ok:'+v.value)}else if(e.key==='Escape'){e.preventDefault();done('cancel')}});
 </script>`;
 function askText(parent, message, value, done) {
+  if (testWindow) { done(null); return; }
   const box = new BrowserWindow({
     parent, modal: true, show: false, width: 560, height: 200, useContentSize: true,
     resizable: false, minimizable: false, maximizable: false, autoHideMenuBar: true, title: 'Crypto Paper Reviewer',
@@ -250,6 +260,7 @@ app.whenReady().then(() => {
   if (secondary) return;
   session.defaultSession.setSpellCheckerLanguages(['en-GB']);
   if (probe) { runProbe(); return; }
+  if (testWindow) { makeWindow('about:blank', false); return; }
   if (process.argv.includes('--smoke') && url) { runSmoke(url); return; }
   if (!url) { console.error('usage: electron shell/ <editor URL> | --probe'); app.exit(2); return; }
   makeWindow(url);

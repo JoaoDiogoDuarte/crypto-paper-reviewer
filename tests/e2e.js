@@ -194,7 +194,8 @@ class Page {
   async key(key, mods = {}) {
     const m = (mods.alt ? 1 : 0) | (mods.ctrl ? 2 : 0) | (mods.shift ? 8 : 0);
     const named = { Enter: [13, 'Enter', '\r'], Backspace: [8, 'Backspace', ''], Escape: [27, 'Escape', ''],
-      ArrowLeft: [37, 'ArrowLeft', ''], ArrowRight: [39, 'ArrowRight', ''], ArrowUp: [38, 'ArrowUp', ''], ArrowDown: [40, 'ArrowDown', ''], Delete: [46, 'Delete', ''] };
+      ArrowLeft: [37, 'ArrowLeft', ''], ArrowRight: [39, 'ArrowRight', ''], ArrowUp: [38, 'ArrowUp', ''], ArrowDown: [40, 'ArrowDown', ''], Delete: [46, 'Delete', ''],
+      Home: [36, 'Home', ''], End: [35, 'End', ''], Tab: [9, 'Tab', ''] };
     let code, vk, text;
     if (named[key]) [vk, code, text] = named[key];
     else {
@@ -625,7 +626,8 @@ done.`));
     await page.eval(`$('#external-later').click()`);
     // another file changes on disk: the page reloads, my edit must stay
     env.write('main.tex', MAIN.replace('Final words', 'Last words'));
-    await page.waitFor(`document.querySelector('#doc').innerText.includes('Last words')`, 8000, 'the reload');
+    // (#doc is missing for a moment while the page loads again)
+    await page.waitFor(`!!document.querySelector('#doc') && document.querySelector('#doc').innerText.includes('Last words')`, 8000, 'the reload');
     has(await page.pageText(), 'Detail text mine', 'my unsaved edit');
     // saving it must not silently overwrite the other version: it asks
     await page.save();
@@ -1629,7 +1631,13 @@ done.`));
     const lineOf = (n) => 3 + 2 * n;      // paragraph n is on this line of main.tex
     // the paper with paragraph 40 at the top, the caret elsewhere (off screen)
     // (a wheel, as the reader's own scroll, ends the hold on the place after the reload)
-    await page.eval(`(() => { dispatchEvent(new WheelEvent('wheel')); getSelection().removeAllRanges(); const s = ORDER.find((x) => x.src.includes('number 40 ')); window.scrollBy(0, s.el.getBoundingClientRect().top - chromeBottom() - 30); })()`);
+    // (again until it holds: the blocks out of the window get their measured
+    // heights in the frames after a scroll, which moves what is below them)
+    for (let i = 0; i < 20; i++) {
+      const off = await page.eval(`(() => { dispatchEvent(new WheelEvent('wheel')); getSelection().removeAllRanges(); const s = ORDER.find((x) => x.src.includes('number 40 ')); const d = s.el.getBoundingClientRect().top - chromeBottom() - 30; window.scrollBy(0, d); return Math.abs(d); })()`);
+      await page.eval(`new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))`);
+      if (off < 2) break;
+    }
     const y0 = await page.eval(`Math.round(ORDER.find((x) => x.src.includes('number 40 ')).el.getBoundingClientRect().top)`);
     await page.eval('toggleSource(true)');
     await page.waitFor(`SRC.on && SRC.name === 'main.tex'`, 4000, 'the source view');
