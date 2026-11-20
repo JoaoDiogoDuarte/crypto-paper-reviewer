@@ -1461,3 +1461,4 @@ html.modal-open body::before {
 .sb-item.l1 { padding-left: 1.4em; } .sb-item.l2 { padding-left: 2.4em; } .sb-item.l3 { padding-left: 3.4em; }
 .sb-empty { color: var(--muted); padding: .6em; }
 body.sidebar #srcoutline { display: none; }
+.sb-keyedit { margin-left: auto; width: 9em; font: 11px ui-monospace, monospace; padding: 0 .3em; }

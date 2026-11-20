@@ -1160,6 +1160,46 @@ done.`));
     }
   },
 
+  async 'label rename: from the sidebar, in every file and reference, undone at once'(env, page) {
+    const main = ['\\documentclass{article}', '\\usepackage{amsthm}', '\\usepackage{cleveref}', '\\newtheorem{lemma}{Lemma}', '\\begin{document}', '',
+      '\\section{Games}\\label{sec:games}', 'Text.', '', '\\begin{lemma}[Hybrid two]\\label{lem:h2}', 'A claim.', '\\end{lemma}', '',
+      '\\begin{lemma}\\label{lem:h22}', 'Another.', '\\end{lemma}', '',
+      'By \\cref{lem:h2} and \\Cref{lem:h22, lem:h2}, \\crefrange{sec:games}{lem:h2}, \\hyperref[lem:h2]{this} and \\ref{lem:h22}.', '',
+      '\\input{more}', '', '\\end{document}', ''].join('\n');
+    const more = 'See \\eqref{lem:h2} and \\pageref{lem:h2}.\n';
+    env.write('main.tex', main);
+    env.write('more.tex', more);
+    await page.eval('load(true)');
+    await page.waitFor(`!!(document.querySelector('#doc .chip.thmhead') && FILES['more.tex'])`, 8000, 'the paper');
+    const field = `document.querySelector('#sb-list .sb-keyedit')`;
+    const rename = async (from, to) => {
+      await page.eval(`(() => { toggleSidebar(true); $('#sb-tab-results').click(); const row = [...document.querySelectorAll('#sb-list .sb-item')].find((r) => (r.querySelector('.sb-key') || {}).textContent === ${JSON.stringify(from)}); row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })); })()`);
+      await page.waitFor(`!!${field}`, 2000, 'the field');
+      await page.eval(`(() => { const f = ${field}; f.value = ${JSON.stringify(to)}; f.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); })()`);
+    };
+    try {
+      // refused: a space, or a key in use; nothing changes
+      await rename('lem:h2', 'lem h2');
+      await rename('lem:h2', 'lem:h22');
+      eq(await page.eval(`FILES['main.tex'].text`), main, 'refused keys change nothing');
+      await page.eval(`(() => { const f = ${field}; if (f) f.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); })()`);
+      await rename('lem:h2', 'lem:hybrid2');
+      await page.save();
+      eq(env.read('main.tex'), main.replace('\\label{lem:h2}', '\\label{lem:hybrid2}').replace('\\cref{lem:h2}', '\\cref{lem:hybrid2}')
+        .replace('\\Cref{lem:h22, lem:h2}', '\\Cref{lem:h22, lem:hybrid2}').replace('{sec:games}{lem:h2}', '{sec:games}{lem:hybrid2}')
+        .replace('\\hyperref[lem:h2]', '\\hyperref[lem:hybrid2]'), 'main.tex');
+      eq(env.read('more.tex'), 'See \\eqref{lem:hybrid2} and \\pageref{lem:hybrid2}.\n', 'more.tex');
+      // one undo restores both files
+      await page.select('A claim.', 'end');
+      await page.key('z', { ctrl: true });
+      await page.save();
+      eq(env.read('main.tex'), main, 'undo: main.tex');
+      eq(env.read('more.tex'), more, 'undo: more.tex');
+    } finally {
+      await page.eval(`toggleSidebar(false)`);
+    }
+  },
+
   async 'a caption or heading never gets a blank line'(env, page) {
     env.write('main.tex', [
       '\\documentclass{article}', '\\begin{document}',

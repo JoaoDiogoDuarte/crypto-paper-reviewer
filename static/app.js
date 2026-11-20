@@ -8916,7 +8916,8 @@ function paperItems(tab) {
     if (tab === 'contents') {
       if (seg.kind === 'heading' && seg.parts) {
         const num = ((seg.el.querySelector('.num') || {}).textContent || '').replace(/\.$/, '');
-        out.push({ level: { part: 0, chapter: 0, section: 0, subsection: 1, subsubsection: 2 }[seg.parts.level] || 0, num, text: seg.edit.textContent.trim(), seg, anchor: seg.el });
+        const key = (/\\label\{([^}]*)\}/.exec(seg.src) || [])[1] || '';
+        out.push({ level: { part: 0, chapter: 0, section: 0, subsection: 1, subsubsection: 2 }[seg.parts.level] || 0, num, text: seg.edit.textContent.trim(), key, seg, anchor: seg.el });
       } else if (seg.kind === 'para') {
         const t = paragraphTitle(seg.src);
         if (t !== null) out.push({ level: 3, num: '', text: t, seg, anchor: seg.el });
@@ -9010,6 +9011,87 @@ function goSidebar(it) {
   // over the page (a narrow window), the sidebar makes way
   if (!SIDEBAR_DOCKED()) toggleSidebar(false);
 }
+// ---------------------------------------------------------- label rename
+//
+// A label's key changes in every file of the paper at once: the \label, and
+// every reference to it (\ref, \cref, \Cref, \eqref, \autoref, \nameref,
+// \pageref and their kin, a key inside a list such as \cref{a,k,b}, both
+// keys of \crefrange, \hyperref[k]).  One Ctrl+Z undoes it.
+const REF_CMDS = 'ref|cref|Cref|eqref|autoref|Autoref|nameref|Nameref|pageref|cpageref|Cpageref|labelcref|vref|Vref|vpageref|crefrange|Crefrange|cpagerefrange|Cpagerefrange|namecref|nameCref|lcnamecref';
+function labelKeys() {
+  const keys = new Set();
+  for (const f of Object.values(FILES)) for (const m of (f.text || '').matchAll(/\\label\{([^}]*)\}/g)) keys.add(m[1].trim());
+  return keys;
+}
+function badLabel(key, old) {
+  if (!key) return 'The label is empty';
+  if (/[\s{},%\\#~]/.test(key)) return 'A label cannot hold spaces or { } , % \\ # ~';
+  if (key !== old && labelKeys().has(key)) return `${key} is already a label`;
+  return null;
+}
+function renameLabelIn(text, from, to) {
+  let labels = 0, refs = 0;
+  const one = (k) => (k.trim() === from ? (refs++, k.replace(from, to)) : k);
+  text = text.replace(/\\label\{([^}]*)\}/g, (m, k) => (k.trim() === from ? (labels++, m.replace(from, to)) : m));
+  text = text.replace(new RegExp('(\\\\(?:' + REF_CMDS + ')\\*?\\{)([^}]*)\\}', 'g'), (m, head, list) => head + list.split(',').map(one).join(',') + '}');
+  text = text.replace(/(\\[cC](?:page)?refrange\*?\{[^}]*\})\{([^}]*)\}/g, (m, head, k) => head + '{' + one(k) + '}');
+  text = text.replace(/\\hyperref\[([^\]]*)\]/g, (m, k) => '\\hyperref[' + one(k) + ']');
+  return { text, labels, refs };
+}
+function renameLabel(from, to) {
+  to = (to || '').trim();
+  if (to === from) return true;
+  const bad = badLabel(to, from);
+  if (bad) { toast(bad, 'error'); return false; }
+  snapshot();
+  commit();
+  let labels = 0, refs = 0;
+  for (const f of Object.values(FILES)) {
+    if (typeof f.text !== 'string') continue;
+    const r = renameLabelIn(f.text, from, to);
+    f.text = r.text; labels += r.labels; refs += r.refs;
+  }
+  // the numbers of the last build go with the new key until the next one
+  if (DOC.aux && DOC.aux.labels && DOC.aux.labels[from]) DOC.aux.labels[to] = DOC.aux.labels[from];
+  const y = viewAnchor();
+  render();
+  restoreAnchor(y);
+  refreshSidebar();
+  toast(`Renamed ${from} → ${to}: ${labels} label${labels === 1 ? '' : 's'}, ${refs} reference${refs === 1 ? '' : 's'}`, 'ok');
+  return true;
+}
+// F2 or a double-click on a key in the sidebar: a field in its place
+function editSidebarKey(it) {
+  if (!it || !it.key || !it.row || SRC.on) return;
+  const span = it.row.querySelector('.sb-key');
+  const input = el('input', 'sb-keyedit');
+  input.value = it.key;
+  input.spellcheck = false;
+  input.setAttribute('aria-label', 'New label');
+  span.replaceWith(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = (ok) => {
+    if (done) return;
+    done = true;
+    if (ok && input.value.trim() !== it.key && !renameLabel(it.key, input.value)) { done = false; input.focus(); return; }
+    if (!ok || input.value.trim() === it.key) drawSidebar();
+    $('#sb-filter').focus({ preventScroll: true });
+  };
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+  });
+  input.addEventListener('blur', () => { if (!done) { done = true; drawSidebar(); } });
+}
+$('#sb-list').addEventListener('dblclick', (e) => {
+  const row = e.target.closest('.sb-item');
+  const it = row && SIDEBAR.items.find((x) => x.row === row);
+  if (it && it.key) { e.preventDefault(); editSidebarKey(it); }
+});
+
 $('#sidebarbtn').onclick = () => toggleSidebar();
 for (const b of document.querySelectorAll('.sb-tabs button')) b.onclick = () => { SIDEBAR.tab = b.dataset.tab; SIDEBAR.sel = -1; refreshSidebar(); $('#sb-filter').focus({ preventScroll: true }); };
 $('#sb-filter').addEventListener('input', () => { SIDEBAR.sel = 0; drawSidebar(); });
@@ -9023,6 +9105,10 @@ $('#sb-filter').addEventListener('keydown', (e) => {
   } else if (e.key === 'Enter') {
     e.preventDefault();
     goSidebar(SIDEBAR.items[Math.max(0, SIDEBAR.sel)]);
+  } else if (e.key === 'F2') {
+    e.preventDefault();
+    const it = SIDEBAR.items[Math.max(0, SIDEBAR.sel)];
+    if (it && it.key) editSidebarKey(it); else toast('This entry has no label');
   } else if (e.key === 'Escape' && e.target.value) {
     e.preventDefault(); e.stopPropagation();
     e.target.value = ''; drawSidebar();

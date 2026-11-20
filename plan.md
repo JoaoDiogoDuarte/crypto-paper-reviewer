@@ -15,7 +15,7 @@ and the editor's keymap (`ACTION_DEFS`, `TEXT_KEYS`, `GLOBAL_KEYS`), find
    Small, and later steps need prefix keys. Done 2026-11-20 (section 1).
 2. Contents sidebar (Contents and Results tabs, filter, current section).
    Done 2026-11-20 (section 2).
-3. Label rename from the Results tab.
+3. Label rename from the Results tab. Done 2026-11-20 (section 3).
 4. Literal maths search, plus a consult-style result list for `C-f` and `C-S-f`.
 5. Multiple cursors: paper view, then source view.
 6. Kill ring, source-view completion and electric pairs, latexindent,
@@ -288,6 +288,23 @@ On Enter:
 
 Optional: a command that finds labels whose prefix does not match their
 environment (a lemma labelled `thm:…`) and fixes them in one step.
+
+### Done (2026-11-20)
+
+`renameLabel` and `editSidebarKey` in `static/app.js`. F2 in the sidebar's
+filter, or a double-click on a key, opens the field. Departures:
+
+- Headings show their labels in the Contents tab too, and can be renamed
+  from there.
+- The number of the last build is copied to the new key, so references show
+  their number, not ??, until the next build.
+- More commands are covered than listed: `\Autoref`, `\Nameref`, `\vref`,
+  `\Vref`, `\vpageref`, `\namecref`, `\nameCref`, `\lcnamecref`, both
+  keys of `\crefrange`, `\Crefrange`, `\cpagerefrange`, `\Cpagerefrange`.
+- `~` is refused in a key as well.
+- The optional prefix check is not done.
+- Tests: `node tests/e2e.js 'label rename'` (the double-click path; F2
+  calls the same function).
 
 ---
 
