@@ -1450,6 +1450,7 @@ function renderChip(tok, ctx) {
     c.append(previewTabular(tok.s) || el('code', '', tok.s));
     return c;
   }
+  if (name === 'verbatim' && tok.env === 'tikzpicture') return snippetChip(tok.s, ctx);
   if (name === 'verbatim') return chip('src', tok.s, '[' + tok.env + ']');
   // characters typed into the text are saved as these commands; show them as
   // the characters
@@ -1486,7 +1487,76 @@ function renderChip(tok, ctx) {
       return c;
     }
   }
+  if (!NO_SNIPPET.has(name) && !NO_SNIPPET_RE.test(name)) return snippetChip(tok.s, ctx);
   return chip('src', tok.s, tok.s.length > 40 ? tok.s.slice(0, 38) + '…' : tok.s);
+}
+
+// ------------------------------------------------------------ snippets
+//
+// A command the page does not know (\intlongdivision{230}{17}) or a picture
+// in running text (an inline tikzpicture) is typeset by LaTeX with the
+// paper's preamble and shown as a picture at the size of the text: its height
+// and depth in em, so its baseline sits on the line.  Until the picture is
+// there, and where LaTeX failed or printed nothing, the chip shows the source.
+const NO_SNIPPET = new Set(['input', 'include', 'includeonly', 'let', 'def', 'gdef', 'edef', 'xdef', 'usepackage', 'RequirePackage',
+  'documentclass', 'begin', 'end', 'item', 'caption', 'subcaption', 'part', 'chapter', 'section', 'subsection', 'subsubsection',
+  'paragraph', 'subparagraph', 'hspace', 'vspace', 'hfill', 'hfil', 'vfill', 'quad', 'qquad', 'enspace', 'thinspace', 'par',
+  'indent', 'ignorespaces', 'relax', 'xspace', 'hyphenation', 'index', 'marginpar', 'phantomsection', 'addcontentsline',
+  'nocite', 'tableofcontents', 'listoffigures', 'listoftables', 'printindex', 'footnotemark', 'footnotetext', 'tikzset',
+  'pgfplotsset', 'lstset', 'hypersetup', 'graphicspath', 'theoremstyle', 'allowdisplaybreaks', 'sloppy', 'fussy', 'selectlanguage']);
+const NO_SNIPPET_RE = /^(new|renew|provide|Declare|make|set|add|use|pgf|tikz@)|@/;
+const SNIPPET_ASK = new Set();
+let snippetTimer = null;
+function snippetChip(src, ctx) {
+  const c = chip('src snippet', src, src.length > 40 ? src.slice(0, 38) + '…' : src);
+  if ((ctx.env || []).includes('center')) c.classList.add('snippet-center');
+  const s = (DOC.snips || {})[src];
+  if (s) paintSnippet(c, s);
+  else askSnippet(src);
+  return c;
+}
+function paintSnippet(c, s) {
+  if (s.state === 'ok') {
+    const img = el('img');
+    img.src = s.url; img.alt = c.dataset.src; img.draggable = false;
+    img.style.height = (s.h + s.d) + 'em';
+    img.style.width = s.w + 'em';
+    img.style.verticalAlign = -s.d + 'em';
+    c.textContent = '';
+    c.append(img);
+    c.classList.add('drawn');
+    c.title = c.dataset.src;
+  } else if (s.state === 'error') c.title = 'LaTeX could not typeset this alone: ' + (s.err || '');
+  else if (s.state === 'pending') c.title = 'Being typeset by LaTeX…';
+}
+function askSnippet(src) {
+  SNIPPET_ASK.add(src);
+  clearTimeout(snippetTimer);
+  snippetTimer = setTimeout(askSnippetsNow, 50);
+}
+async function askSnippetsNow() {
+  const srcs = [...SNIPPET_ASK];
+  SNIPPET_ASK.clear();
+  if (!srcs.length || !TOKEN) return;
+  const r = await fetch('/api/snippets', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
+    body: JSON.stringify({ srcs }) }).catch(() => null);
+  if (!r || !r.ok) return;
+  const res = await r.json().catch(() => ({}));
+  DOC.snips = DOC.snips || {};
+  for (const [src, s] of Object.entries(res)) if (s.state !== 'pending') DOC.snips[src] = s;
+  repaintSnippets(res);
+}
+function repaintSnippets(res) {
+  for (const c of document.querySelectorAll('#doc .chip.snippet:not(.drawn)')) {
+    const s = res[c.dataset.src];
+    if (s) paintSnippet(c, s);
+  }
+}
+// after the builder finished a batch: ask again for the ones still waiting
+function refreshSnippets() {
+  const waiting = new Set();
+  for (const c of document.querySelectorAll('#doc .chip.snippet:not(.drawn)')) if (!(DOC.snips || {})[c.dataset.src]) waiting.add(c.dataset.src);
+  for (const src of waiting) askSnippet(src);
 }
 
 // What a use of a text macro of the document prints, as nodes: its body with
@@ -3906,6 +3976,49 @@ async function backupExternal() {
   banner('Your edits were saved in ' + made.join(', ') + ', and the files were reloaded from disk.');
 }
 
+// Merge: your edits and the change on disk, where they touch different
+// lines, as unsaved edits to look over and save.  Where both changed the
+// same lines nothing is merged and the dialog stays.
+async function mergeExternal() {
+  if (!PENDING_EXTERNAL) return;
+  commit(false);
+  const merged = [], failed = [];
+  const results = {};
+  for (const [name] of PENDING_EXTERNAL) {
+    const f = FILES[name];
+    if (!f) continue;
+    const r = await fetch('/api/merge', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },
+      body: JSON.stringify({ name, base: f.base, text: f.text, base_text: f.disk }) }).catch(() => null);
+    const res = r ? await r.json().catch(() => ({})) : { error: 'the editor is not running' };
+    if (!r || !r.ok) { failed.push(`${name}: ${res.error || r.status}`); continue; }
+    if (res.merged === null) {
+      const at = res.conflicts.length > 1 ? 'lines ' + res.conflicts.slice(0, -1).join(', ') + ' and ' + res.conflicts[res.conflicts.length - 1] : 'line ' + res.conflicts[0];
+      failed.push(`${name}: your edits and the change on disk both changed ${at} of the file on disk`);
+      continue;
+    }
+    results[name] = res;
+  }
+  if (Object.keys(results).length) {
+    snapshot();
+    for (const [name, res] of Object.entries(results)) {
+      FILES[name] = { text: res.merged, disk: res.disk, base: res.hash };
+      merged.push(name);
+    }
+    PENDING_EXTERNAL = PENDING_EXTERNAL.filter(([n]) => !results[n]);
+    for (const n of merged) delete IGNORED_EXTERNAL[n];
+    if (!PENDING_EXTERNAL.length) closeExternal();
+    else showExternal([], false);
+    const y = viewAnchor();
+    render();
+    restoreAnchor(y);
+    markEdited();
+    writeDraft();
+    toast(`Merged ${merged.join(', ')} with the version on disk: save to keep it`, 'ok');
+  }
+  if (failed.length) banner('Not merged. ' + failed.join('. ') + '. Choose Reload, Overwrite disk or Save backup instead.');
+}
+
+$('#external-merge').onclick = mergeExternal;
 $('#external-reload').onclick = reloadExternal;
 $('#external-overwrite').onclick = overwriteExternal;
 $('#external-backup').onclick = backupExternal;
@@ -3958,7 +4071,7 @@ async function poll() {
       }
       // the figures are cut after the PDF is built: show the new pictures
       // (an edited game, a table) when they are ready
-      if (s.figver !== undefined && s.figver !== FIGVER) { FIGVER = s.figver; await refreshFigures(); }
+      if (s.figver !== undefined && s.figver !== FIGVER) { FIGVER = s.figver; await refreshFigures(); refreshSnippets(); }
       if (s.code) codeVersion(s.code);
     }
   } catch (e) { /* server restarting */ }
@@ -6029,9 +6142,9 @@ document.addEventListener('keydown', (e) => {
 // outside-change bar, Enter in the open dialog, the figure viewer's tabs.
 document.addEventListener('keydown', (e) => {
   if (e.ctrlKey || e.altKey || e.metaKey || e.target.closest('input, textarea, select')) return;
-  if (!$('#external').hidden && 'robl'.includes(e.key)) {
+  if (!$('#external').hidden && e.key.length === 1 && 'mrobl'.includes(e.key)) {
     e.preventDefault();
-    ({ r: $('#external-reload'), o: $('#external-overwrite'), b: $('#external-backup'), l: $('#external-later') })[e.key].click();
+    ({ m: $('#external-merge'), r: $('#external-reload'), o: $('#external-overwrite'), b: $('#external-backup'), l: $('#external-later') })[e.key].click();
   } else if (!$('#openbox').hidden && /^[1-9]$/.test(e.key) && document.querySelectorAll('#open-recent .open-paper')[+e.key - 1]) {
     // like an editor's start page: the number of a recent paper opens it
     e.preventDefault(); document.querySelectorAll('#open-recent .open-paper')[+e.key - 1].click();

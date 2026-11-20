@@ -341,6 +341,26 @@ def load_aux():
         else:
             v = re.sub(r'\\mbox\s*', '', val).replace('{', '').replace('}', '').strip()
             labels.setdefault(key, {})['v'] = v
+            # without cleveref the kind is the counter of hyperref's anchor
+            # ({1}{2}{title}{theorem.1}{}), which is what \autoref names
+            parts = []
+            try:
+                i = 0
+                while i < len(body) and body[i] == '{' and len(parts) < 4:
+                    g, i = group(body, i)
+                    parts.append(g)
+            except (IndexError, AssertionError):
+                parts = []
+            a = re.match(r'([A-Za-z*]+)\.', parts[3]) if len(parts) > 3 else None
+            if a:
+                kind = a.group(1).rstrip('*')
+                kind = {'Item': 'enumi', 'AMS': 'equation'}.get(kind, kind)
+                labels[key].setdefault('anchor', kind)
+    for lab in labels.values():
+        if 'anchor' in lab:
+            if not lab.get('type'):
+                lab['type'] = lab['anchor']
+            del lab['anchor']
     # \bibcite{key}{1}, or natbib's \bibcite{key}{{1}{2023}{{Author and Writer}}{{}}}
     plain = lambda t: re.sub(r'\\[a-zA-Z]+\s*|[{}]', '', t.replace('~', ' ')).strip()
     for m in re.finditer(r'\\bibcite\{([^}]*)\}', aux):
@@ -1146,6 +1166,163 @@ def build_figures(log):
     log(f'figures: rendered {rendered}/{len(todo)}')
 
 
+# ----------------------------------------------------------------- snippets
+#
+# A command or picture in running text that the page cannot draw itself
+# (\intlongdivision{230}{17}, an inline tikzpicture) is typeset by LaTeX with
+# the paper's preamble, one tight page each, and shown as a picture the size
+# of the text around it.  The page asks for them (/api/snippets); the cache
+# keeps the picture and its size by the source, the preamble and the numbers
+# of the labels it references.
+
+SNIP_PENDING = {}            # key -> source, waiting for the builder
+SNIP_LOCK = threading.Lock()
+
+
+def snip_preamble():
+    main = read(MAIN)
+    cut = main.find('\\begin{document}')
+    return main[:cut] if cut >= 0 else None
+
+
+def snip_key(src, preamble, labels):
+    return fig_key('%snippet-v1 ' + sha(preamble or '') + '\n' + src, labels)
+
+
+def snip_meta(key):
+    p = os.path.join(CACHE, key + '.json')
+    try:
+        with open(p, encoding='utf-8') as f:
+            meta = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if meta.get('state') == 'ok':
+        meta['url'] = '/fig/' + key + '.png'
+    return meta
+
+
+def snip_put(key, meta):
+    tmp = os.path.join(CACHE, key + '.json.tmp')
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(meta, f)
+    os.replace(tmp, os.path.join(CACHE, key + '.json'))
+
+
+def snippets_lookup(srcs):
+    """What is known of each source; unknown ones are queued for the builder."""
+    preamble = snip_preamble()
+    labels = load_aux()['labels']
+    out, queued = {}, False
+    for src in srcs:
+        if preamble is None:
+            out[src] = {'state': 'error', 'err': 'the main file has no \\begin{document}'}
+            continue
+        k = snip_key(src, preamble, labels)
+        meta = snip_meta(k)
+        if meta:
+            out[src] = meta
+            continue
+        with SNIP_LOCK:
+            SNIP_PENDING[k] = src
+        out[src] = {'state': 'pending'}
+        queued = True
+    return out, queued
+
+
+def build_snippets(log):
+    """Typeset the waiting snippets; the number settled (drawn, blank or failed)."""
+    with SNIP_LOCK:
+        todo = list(SNIP_PENDING.items())
+        SNIP_PENDING.clear()
+    if not todo:
+        return 0
+    os.makedirs(CACHE, exist_ok=True)
+    preamble = snip_preamble()
+    labels = load_aux()['labels']
+    # the key again: the preamble or a number may have changed since
+    todo = [(snip_key(src, preamble, labels), src) for _, src in todo]
+    todo = [(k, src) for k, src in todo if not snip_meta(k)]
+    if preamble is None or not todo:
+        return 0
+    env = tex_env(PAPER, os.path.dirname(PAPER), source_root())
+    done = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        tex = os.path.join(tmp, 'snips.tex')
+        cmd = ['latexmk', '-pdf', '-interaction=nonstopmode', '-halt-on-error', '-outdir=' + tmp, tex]
+        deadline = time.time() + 120
+        while True:            # each failed run takes out the snippet that failed
+            if not todo:
+                break
+            if time.time() > deadline:
+                # left for the next time the page asks, not taken for failed
+                log('snippets: %d left for later' % len(todo))
+                return done
+            doc = [preamble, r'\makeatletter'] + aux_label_lines() + [
+                r'\makeatother', r'\usepackage[active,tightpage]{preview}', r'\setlength\PreviewBorder{0pt}',
+                r'\makeatletter\ps@empty\makeatother', r'\begin{document}',
+                r'\makeatletter\@ifpackageloaded{lineno}{\nolinenumbers}{}\makeatother',
+                r'\newsavebox\pesnipbox', r'\typeout{PE-EM=\the\fontdimen6\font}']
+            spans = []
+            for _, src in todo:
+                first = sum(x.count('\n') + 1 for x in doc) + 1
+                doc.append('\\begin{preview}\\sbox\\pesnipbox{%\n' + src + '%\n}\\typeout{PE-SIZE=\\the\\ht\\pesnipbox+'
+                           '\\the\\dp\\pesnipbox x\\the\\wd\\pesnipbox}\\usebox\\pesnipbox\\end{preview}')
+                spans.append((first, first + src.count('\n') + 2))
+            doc.append(r'\end{document}')
+            with open(tex, 'w', encoding='utf-8') as out:
+                out.write('\n'.join(doc) + '\n')
+            for stale in ('snips.pdf', 'snips.aux', 'snips.fdb_latexmk'):
+                if os.path.exists(os.path.join(tmp, stale)):
+                    os.remove(os.path.join(tmp, stale))
+            r = subprocess.run(cmd, cwd=PAPER, env=env, capture_output=True, text=True, errors='replace', timeout=600)
+            debug_capture('snippets', cmd, r, [tex, os.path.join(tmp, 'snips.log')], log)
+            try:
+                with open(os.path.join(tmp, 'snips.log'), encoding='utf-8', errors='replace') as f:
+                    tex_log = f.read()
+            except OSError:
+                tex_log = ''
+            if r.returncode == 0 and os.path.exists(os.path.join(tmp, 'snips.pdf')):
+                break
+            # which snippet stopped LaTeX: the line of the first error
+            err = re.search(r'^! (.*)$', tex_log, re.M)
+            at = re.search(r'^l\.(\d+)', tex_log[err.end():], re.M) if err else None
+            bad = None
+            if at:
+                line = int(at.group(1))
+                bad = next((i for i, (a, b) in enumerate(spans) if a <= line <= b), None)
+            message = err.group(1).strip() if err else tex_error(r)
+            if bad is None:
+                for k, _ in todo:
+                    snip_put(k, {'state': 'error', 'err': message})
+                log('snippets: ' + message)
+                return done + len(todo)
+            snip_put(todo[bad][0], {'state': 'error', 'err': message})
+            del todo[bad]
+            done += 1
+        if not todo:
+            return done
+        em = re.search(r'PE-EM=([\d.]+)pt', tex_log)
+        em = float(em.group(1)) if em else 10.0
+        sizes = {n: tuple(float(x) for x in m) for n, m in enumerate(
+            re.findall(r'PE-SIZE=(-?[\d.]+)pt\+(-?[\d.]+)ptx(-?[\d.]+)pt', tex_log), 1)}
+        pdf = os.path.join(tmp, 'snips.pdf')
+        for n, (k, src) in enumerate(todo, 1):
+            h, d, w = sizes.get(n, (0, 0, 0))
+            done += 1
+            if w <= 0 or h + d <= 0:
+                snip_put(k, {'state': 'blank'})
+                continue
+            out = os.path.join(CACHE, k)
+            png = subprocess.run(['pdftocairo', '-png', '-transp', '-r', '300', '-singlefile', '-f', str(n), '-l', str(n), pdf, out],
+                                 capture_output=True, timeout=120)
+            if png.returncode != 0 or not os.path.isfile(out + '.png'):
+                snip_put(k, {'state': 'error', 'err': 'PNG conversion failed'})
+                continue
+            snip_put(k, {'state': 'ok', 'w': round(w / em, 3), 'h': round(h / em, 3), 'd': round(d / em, 3)})
+    log(f'snippets: {done} settled')
+    return done
+
+
 # ------------------------------------------------------------------ builder
 
 class Builder:
@@ -1159,6 +1336,7 @@ class Builder:
         self.auxver = 1
         self.figver = 1     # counts the figure cuts: they finish after the PDF build
         self.clean = False
+        self.need_build = False
         threading.Thread(target=self.loop, daemon=True).start()
 
     def log(self, msg):
@@ -1167,6 +1345,10 @@ class Builder:
     def request(self, clean=False):
         if clean:
             self.clean = True
+        self.need_build = True
+        self.wanted.set()
+
+    def request_snippets(self):
         self.wanted.set()
 
     # what LaTeX, BibTeX and latexmk write beside the main file; a clean
@@ -1249,20 +1431,32 @@ class Builder:
             self.log(f'figures: {e}')
         self.figver += 1
 
+    def snippets(self):
+        try:
+            if build_snippets(self.log):
+                self.figver += 1
+        except Exception as e:  # a nicety too
+            self.log(f'snippets: {e}')
+            self.figver += 1
+
     def loop(self):
         self.figures()
         while True:
             self.wanted.wait()
-            time.sleep(1.5)  # let several saves in a row share one build
+            # let several saves in a row share one build
+            time.sleep(1.5 if self.need_build else 0.3)
             self.wanted.clear()
-            if self.clean:
-                self.clean = False
-                try:
-                    self.clean_files()
-                except OSError as e:
-                    self.log(f'build: clean failed: {e}')
-            self.build_once()
-            self.figures()
+            if self.need_build:
+                self.need_build = False
+                if self.clean:
+                    self.clean = False
+                    try:
+                        self.clean_files()
+                    except OSError as e:
+                        self.log(f'build: clean failed: {e}')
+                self.build_once()
+                self.figures()
+            self.snippets()
 
 
 BUILDER = None
@@ -1281,6 +1475,7 @@ def doc_payload():
             figs[src] = '/fig/' + k + '.png'
     for name, f in files.items():
         SESSION_START.setdefault(name, f['text'])
+        base_put(f['text'])
     pages = synctex_pages()
     return {'pages': pages, 'pdftext': [] if pages else pdf_page_texts(), 'docclass': docclass(),
             'main': MAIN, 'path': os.path.join(PAPER, MAIN), 'root': source_root(), 'mains': find_mains(PAPER), 'resolve': input_map(), 'files': files, 'aux': BUILDER.aux, 'auxver': BUILDER.auxver,
@@ -2647,6 +2842,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.send(400, {'error': str(e)})
             BUILDER.log(f"added {req.get('key')} to references.bib")
             return self.send(200, {'bib': bib})
+        if urllib.parse.urlparse(self.path).path == '/api/snippets':
+            req = self.json_body() or {}
+            srcs = [x for x in (req.get('srcs') or []) if isinstance(x, str) and 0 < len(x) <= 4000][:300]
+            out, queued = snippets_lookup(srcs)
+            if queued:
+                BUILDER.request_snippets()
+            return self.send(200, out)
+        if urllib.parse.urlparse(self.path).path == '/api/merge':
+            # the page's edits of a file that changed on disk, merged with it
+            req = self.json_body() or {}
+            name, base, text = req.get('name'), req.get('base'), req.get('text')
+            if not isinstance(name, str) or not isinstance(text, str) or name not in paper_files():
+                return self.send(400, {'error': 'not a file of this document'})
+            with PROJECT_LOCK:
+                disk = read(name)
+            start = base_get(base) if isinstance(base, str) else None
+            if start is None and isinstance(req.get('base_text'), str) and sha(req['base_text']) == base:
+                start = req['base_text']
+            if start is None:
+                return self.send(404, {'error': 'the version your edits started from is no longer known'})
+            try:
+                merged, conflicts = merge3(text, start, disk)
+            except (OSError, RuntimeError) as e:
+                return self.send(500, {'error': f'could not merge: {e}'})
+            return self.send(200, {'merged': merged, 'conflicts': conflicts, 'disk': disk, 'hash': sha(disk)})
         if urllib.parse.urlparse(self.path).path == '/api/backup':
             req = self.json_body()
             if not isinstance(req, dict) or not isinstance(req.get('text'), str):
@@ -3161,9 +3381,18 @@ LIFE = {'last': time.time(), 'seen': False}
 
 
 def watch_clients(srv):
+    tick = time.time()
     while True:
         time.sleep(1)
         now = time.time()
+        # the computer slept (or the clock was set): the pages slept too and
+        # were not gone; count their silence from now, not from before
+        if now - tick > 30 or now < tick:
+            for c in CLIENTS:
+                CLIENTS[c] = now
+            LIFE['last'] = now
+            print(time.strftime('%H:%M:%S'), 'woke after %.0f s: keeping the open pages' % (now - tick), flush=True)
+        tick = now
         # a page not heard from for long is gone (a throttled background
         # window still polls about once a minute)
         for c, t in list(CLIENTS.items()):
@@ -3264,6 +3493,78 @@ _history_lock = threading.Lock()
 
 def history_dir():
     return os.path.join(STATE, 'history')
+
+
+# Every version of a file the page was given, by hash: edits made on one of
+# them can later be merged with the file as it is on disk (a draft kept from
+# before a restart, a file changed by another program).  Kept 60 days.
+BASES_KEEP = 60 * 86400
+
+
+def base_put(text):
+    try:
+        d = os.path.join(CACHE, 'bases')
+        os.makedirs(d, exist_ok=True)
+        p = os.path.join(d, sha(text))
+        if os.path.exists(p):
+            os.utime(p)
+            return
+        tmp = p + '.tmp'
+        with open(tmp, 'w', encoding='utf-8', newline='') as f:
+            f.write(text)
+        os.replace(tmp, p)
+        now = time.time()
+        for b in os.listdir(d):
+            q = os.path.join(d, b)
+            if now - os.path.getmtime(q) > BASES_KEEP:
+                os.unlink(q)
+    except OSError:
+        pass
+
+
+def base_get(h):
+    if not re.fullmatch(r'[0-9a-f]{40}', h or ''):
+        return None
+    for p in (os.path.join(CACHE, 'bases', h), os.path.join(history_dir(), 'blobs', h)):
+        if os.path.exists(p):
+            with open(p, encoding='utf-8', newline='') as f:
+                return f.read()
+    return None
+
+
+def merge3(mine, base, disk):
+    """Three-way merge of the page's edits and the file on disk (git merge-file).
+
+    Returns (merged text or None, the lines of the file on disk where both
+    changed the same place)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = []
+        for n, t in (('mine', mine), ('base', base), ('disk', disk)):
+            paths.append(os.path.join(tmp, n))
+            with open(paths[-1], 'w', encoding='utf-8', newline='') as f:
+                f.write(t)
+        r = subprocess.run(['git', 'merge-file', '-p', '-L', 'mine', '-L', 'base', '-L', 'disk'] + paths,
+                           capture_output=True)
+    if r.returncode < 0 or r.returncode > 127:
+        raise RuntimeError((r.stderr or b'').decode(errors='replace').strip() or 'git merge-file failed')
+    out = r.stdout.decode('utf-8', errors='replace')
+    if r.returncode == 0:
+        return out, []
+    # the line on disk where each conflict starts
+    lines, where, line, part = out.splitlines(), [], 1, None
+    for x in lines:
+        if x.startswith('<<<<<<< mine'):
+            part = 'mine'
+            where.append(line)
+        elif part == 'mine' and x.startswith('||||||| base'):
+            part = 'base'     # merge.conflictStyle diff3
+        elif part in ('mine', 'base') and x.startswith('======='):
+            part = 'disk'
+        elif part == 'disk' and x.startswith('>>>>>>> disk'):
+            part = None
+        elif part not in ('mine', 'base'):
+            line += 1
+    return None, where
 
 
 def history_put(text):

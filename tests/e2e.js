@@ -576,6 +576,46 @@ done.`));
     onlyChange(env, 'sections/body.tex', 'Detail text', 'Detail text mine');
   },
 
+  async 'external change to an edited file: Merge keeps both where they touch different lines'(env, page) {
+    await page.select('Detail text', 'end');
+    await page.type(' mine');
+    await page.eval(`lastTyping = 0`);
+    env.write('sections/body.tex', BODY.replace('Body text with', 'Their body text with'));
+    await page.waitFor(`!$('#external').hidden`, 8000, 'the conflict dialog');
+    await page.eval(`$('#external-merge').click()`);
+    await page.waitFor(`$('#external').hidden && FILES['sections/body.tex'].text.includes('Their body')`, 8000, 'the merge');
+    await page.save();
+    await page.waitFor(`editedFiles().length === 0`);
+    eq(env.read('sections/body.tex'), BODY.replace('Body text with', 'Their body text with').replace('Detail text', 'Detail text mine'), 'both changes on disk');
+  },
+
+  async 'external change to an edited file: Merge refuses where both changed the same line'(env, page) {
+    await page.select('Detail text', 'end');
+    await page.type(' mine');
+    await page.eval(`lastTyping = 0`);
+    env.write('sections/body.tex', BODY.replace('Detail text', 'Theirs'));
+    await page.waitFor(`!$('#external').hidden`, 8000, 'the conflict dialog');
+    await page.eval(`$('#external-merge').click()`);
+    await page.waitFor(`!$('#banner').hidden && $('#banner').textContent.includes('Not merged')`, 8000, 'the refusal');
+    has(await page.eval(`$('#banner').textContent`), 'line 5', 'where they clash');
+    eq(await page.eval(`$('#external').hidden`), false, 'the choices stay');
+    has(await page.pageText(), 'Detail text mine', 'my edit is kept');
+  },
+
+  async 'a command the page does not know is typeset by LaTeX'(env, page) {
+    env.write('sections/body.tex', BODY.replace('Detail text lives here.', 'Detail text \\fbox{boxed words} lives here.'));
+    await page.waitFor(`document.querySelector('#doc .chip.snippet')`, 8000, 'the chip');
+    await page.waitFor(`document.querySelector('#doc .chip.snippet.drawn img')`, 60000, 'the picture from LaTeX');
+    const r = await page.eval(`(() => { const i = document.querySelector('#doc .chip.snippet.drawn img');
+      return { src: i.closest('.chip').dataset.src, h: parseFloat(i.style.height), ok: i.complete && i.naturalWidth > 0 }; })()`);
+    eq(r.src, '\\fbox{boxed words}', 'the chip keeps its source');
+    eq(r.h > 0.5 && r.h < 3, true, 'about a line high: ' + r.h);
+    await page.select('Detail text', 'end');
+    await page.type(' mine');
+    await page.save();
+    eq(env.read('sections/body.tex'), BODY.replace('Detail text lives here.', 'Detail text mine \\fbox{boxed words} lives here.'), 'the source after saving');
+  },
+
   async 'external change to an edited file: Later keeps my edits through reloads'(env, page) {
     await page.select('Detail text', 'end');
     await page.type(' mine');

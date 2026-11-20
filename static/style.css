@@ -805,6 +805,15 @@ body { overflow-x: clip; }
 /* the formula editor also serves the figure window: above it */
 #drawer { z-index: 48; }
 .chip.src.textmacro { font: inherit; color: inherit; background: none; padding: 0; }
+/* a command typeset by LaTeX (snippets in app.js): sized in em of the text
+   around it, transparent, its ink inverted in the dark theme */
+.chip.snippet.drawn { font: inherit; color: inherit; background: none; padding: 0; }
+.chip.snippet.drawn img { display: inline-block; max-width: 100%; object-fit: contain; }
+.chip.snippet.snippet-center.drawn { display: block; text-align: center; margin: .4em 0; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .chip.snippet.drawn img { filter: invert(.92) hue-rotate(180deg); }
+}
+:root[data-theme="dark"] .chip.snippet.drawn img { filter: invert(.92) hue-rotate(180deg); }
 #chrome button > i:not(.em) { opacity: .85; margin-right: .1em; }
 /* the help can be longer than the window: it scrolls inside */
 #helpbox { max-height: calc(100vh - 6em); overflow: auto; }

@@ -134,6 +134,64 @@ class BackendTest(unittest.TestCase):
             f.write(line(2, 'Included'))
         self.assertEqual([h['num'] for h in server.load_aux()['heads']], ['1', '2', '3'])
 
+    def test_label_kind_from_hyperref_anchor_without_cleveref(self):
+        stem = os.path.join(server.PAPER, server.stem())
+        with open(stem + '.aux', 'w') as f:
+            f.write('\\newlabel{thm:a}{{1}{2}{}{theorem.1}{}}\n'
+                    '\\newlabel{sec:s}{{1.2}{2}{Sub}{subsection.1.2}{}}\n'
+                    '\\newlabel{sec:n}{{}{2}{Star}{section*.3}{}}\n'
+                    '\\newlabel{it:x}{{3}{2}{}{Item.3}{}}\n'
+                    '\\newlabel{lem:c}{{4}{3}{}{theorem.4}{}}\n'
+                    '\\newlabel{lem:c@cref}{{[lemma][4][]4}{[1][3][]3}}\n')
+        labels = server.load_aux()['labels']
+        self.assertEqual({k: v['type'] for k, v in labels.items()},
+                         {'thm:a': 'theorem', 'sec:s': 'subsection', 'sec:n': 'section', 'it:x': 'enumi',
+                          'lem:c': 'lemma'})   # cleveref's kind wins over the anchor's
+
+    def test_merge3_merges_separate_lines_and_reports_clashes(self):
+        base = 'a\nb\nc\nd\ne\n'
+        self.assertEqual(server.merge3('A\nb\nc\nd\ne\n', base, 'a\nb\nc\nd\nE\n'), ('A\nb\nc\nd\nE\n', []))
+        self.assertEqual(server.merge3('a\nb\nmine\nd\ne\n', base, 'x\na\nb\ntheirs\nd\ne\n'), (None, [4]))
+
+    def test_merge_endpoint_needs_the_version_edits_started_from(self):
+        start = 'one\ntwo\nthree\n'
+        server.base_put(start)
+        with open(self.main, 'w') as f:
+            f.write('one\ntwo\nTHREE\n')
+        req = lambda body: urllib.request.Request(self.url + '/api/merge', data=json.dumps(body).encode(),
+                                                  headers={'X-Token': server.TOKEN, 'Content-Type': 'application/json'})
+        res = json.loads(urllib.request.urlopen(req({'name': 'main.tex', 'base': server.sha(start), 'text': 'ONE\ntwo\nthree\n'})).read())
+        self.assertEqual(res['merged'], 'ONE\ntwo\nTHREE\n')
+        self.assertEqual(res['hash'], server.sha('one\ntwo\nTHREE\n'))
+        with self.assertRaises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(req({'name': 'main.tex', 'base': server.sha('unknown'), 'text': 'x'}))
+        self.assertEqual(e.exception.code, 404)
+
+    def test_clients_survive_a_suspend(self):
+        # the wall clock jumps by an hour between two ticks: the open page
+        # is not taken for gone and the server keeps running
+        clock = [1000.0]
+        server.CLIENTS.clear()
+        server.CLIENTS['page'] = 1000.0
+        server.LIFE.update(last=1000.0, seen=True)
+        stopped = []
+
+        class Srv:
+            def shutdown(self):
+                stopped.append(True)
+                raise SystemExit
+
+        def tick(_):
+            clock[0] += 3600 if clock[0] == 1001.0 else 1
+            if clock[0] > 1000 + 3600 + 20:
+                raise KeyboardInterrupt
+        with mock.patch.object(server.time, 'time', lambda: clock[0]), mock.patch.object(server.time, 'sleep', tick):
+            with self.assertRaises(KeyboardInterrupt):
+                server.watch_clients(Srv())
+        self.assertEqual(stopped, [])
+        self.assertIn('page', server.CLIENTS)
+        server.CLIENTS.clear()
+
     def test_citation_numbers_from_natbib_and_biblatex(self):
         stem = os.path.join(server.PAPER, server.stem())
         with open(stem + '.aux', 'w') as f:
