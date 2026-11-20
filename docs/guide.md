@@ -138,7 +138,9 @@ under ⋯. In narrow windows both show icons only; hovering a button names it.
   `Ctrl+Shift+A` marks every occurrence in the paper (in the find bar: every
   match of the search, maths searches included), `Ctrl+Shift+D` every
   occurrence in the paragraph and, pressed again, in the paper,
-  `Ctrl+Shift+C` puts a cursor on each line of the selection, and
+  `Ctrl+Shift+C` puts a cursor on each line of the selection (as drawn),
+  `Ctrl+Shift+L` one on each line of its LaTeX source (with one sentence
+  per line, each sentence), and
   `Ctrl+Shift+N` inserts 0, 1, 2, … at the cursors (the Chrome app window
   keeps `Ctrl+Shift+C` and `Ctrl+Shift+N` for itself; the Electron window
   does not, and **Keys…** can move them). `Ctrl+Shift`+click adds a cursor (or
@@ -337,7 +339,7 @@ under ⋯. In narrow windows both show icons only; hovering a button names it.
 | `Ctrl++` | expand the selection: word, line, paragraph |
 | `Ctrl+>`, `Ctrl+Alt+>` | multiple cursors: mark the next, previous occurrence of the word at the cursor or of the selection |
 | `Ctrl+<`, `Ctrl+Alt+<` | drop the last, the first cursor |
-| `Ctrl+Shift+C`, then `Ctrl+Shift+A` / `D` / `C` / `N` | cursors on every occurrence (in the find bar: every match) / in the paragraph, then the paper / on each line of the selection; insert 0, 1, 2, … |
+| `Ctrl+Shift+C`, then `Ctrl+Shift+A` / `D` / `C` / `L` / `N` | cursors on every occurrence (in the find bar: every match) / in the paragraph, then the paper / on each line of the selection / on each line of its source; insert 0, 1, 2, … |
 | `Ctrl+Shift`+click | add a cursor, or take away the one there |
 | `Ctrl+Shift+V` | the kill ring: pick one of the last 30 copies and cuts (of the paper and the source view) to paste, by words of its text |
 | `Ctrl+.` | spelling: correct the misspelled word at or before the cursor with the first suggestion; pressed again at once, the next suggestion (and at the end the word as it was); one `Ctrl+Z` takes it back |

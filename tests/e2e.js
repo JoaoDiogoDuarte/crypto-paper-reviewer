@@ -893,6 +893,18 @@ const TESTS = {
     onlyChange(env, 'sections/body.tex', 'Body text with a formula $\\Adv$ and more words.\n\n\\subsection{Details}\nDetail text', 'Body 0text with a formula $\\Adv$ and more words.\n\n\\subsection{Details}\nDetail 1text');
   },
 
+  async 'multi: a cursor on each line of the source (each sentence, one per line) from the paper view'(env, page) {
+    const body = '\\section{Body}\\label{sec:body}\nFirst sentence here.\nSecond one follows.\nThird ends it.\n\nAnother paragraph.\n';
+    await mergeFresh(env, page, { 'sections/body.tex': body });
+    await page.eval(`(() => { const ed = mcEditables().find((e) => mcText(e).startsWith('First')); const a = mcPoint(ed, 0), b = mcPoint(ed, mcText(ed).length);
+      ed.focus(); getSelection().setBaseAndExtent(b[0], b[1], a[0], a[1]); })()`);   // backwards: the column of the end is 0
+    await mcChord(page, 'l');
+    eq(await page.eval('MC.cursors.length'), 3, 'one cursor per source line');
+    await page.typeKeys('Q');
+    await page.save();
+    eq(env.read('sections/body.tex'), body.replace('First', 'QFirst').replace('Second', 'QSecond').replace('Third', 'QThird'), 'Q at the start of each line');
+  },
+
   async 'multi: a cursor on each line of a selection longer than the window'(env, page) {
     const paras = Array.from({ length: 40 }, (_, i) => `Line ${i} of the long text.`);
     await mergeFresh(env, page, { 'sections/body.tex': '\\section{Body}\n' + paras.join('\n\n') + '\n' });

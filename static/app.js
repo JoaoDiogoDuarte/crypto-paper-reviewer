@@ -9174,6 +9174,7 @@ const ACTION_DEFS = [
   ['mcdwim', 'Multiple cursors: mark every occurrence in the paragraph, then, pressed again, in the paper', 'global', ['C-C C-D'], () => mcDwim()],
   ['mclines', 'Multiple cursors: a cursor on each line of the selection', 'global', ['C-C C-C'], () => mcLines()],
   ['mcnumbers', 'Multiple cursors: insert 0, 1, 2, … at the cursors', 'global', ['C-C C-N'], () => mcNumbers()],
+  ['mcsrclines', 'Multiple cursors: a cursor on each line of the LaTeX source in the selection (with one sentence per line, each sentence)', 'global', ['C-C C-L'], () => mcSourceLines()],
   // the chrome: every button of the bars and the ☰ menu has a key too
   ['menu', 'Open or close the ☰ menu', 'global', ['C-M-m'], () => $('#menubtn').click()],
   ['open', 'Open a paper directory…', 'global', ['C-o', 'C-M-o'], () => $('#openbtn').click()],
@@ -10321,6 +10322,58 @@ function mcLines() {
     cs.push({ ed, a: off, f: off });
   }
   if (cs.length < 2) { toast('The selection is one line'); return; }
+  mcClear();
+  MC.cursors = cs; MC.primary = cs[cs.length - 1]; MC.word = false;
+  mcSettle();
+  mcShowPrimary();
+  mcDraw();
+  mcCount(`${MC.cursors.length} cursors`);
+}
+// A cursor on each line of the source that the selection covers, at the
+// column (in the line) of the selection's end, as Emacs's edit-lines on the
+// .tex file.  A line break of the source is a chip in the page (.nl, or a
+// paragraph break), so the lines of a block are the pieces between them.
+function mcSourceLines() {
+  if (SRC.on) return smcLines();
+  const r = selRange(), s = getSelection();
+  if (!r || r.collapsed) { banner('Select the lines first: a cursor goes on each line of the source in the selection.'); return; }
+  // the source lines of a block, as [start, end] offsets
+  const linesOf = (ed) => {
+    const out = [];
+    let start = 0, off = 0;
+    const walk = (p) => {
+      for (const c of p.childNodes) {
+        if (c.nodeType === 3) { off += c.data.length; continue; }
+        if (c.nodeType !== 1) continue;
+        if (!mcAtom(c)) { walk(c); continue; }
+        if (c.classList.contains('nl') || c.classList.contains('parbreak')) { out.push([start, off]); start = off + 1; }
+        off += 1;
+      }
+    };
+    walk(ed);
+    out.push([start, off]);
+    return out;
+  };
+  const fed = hostOf(s.focusNode);
+  let col = 0;
+  if (mcUsable(fed)) {
+    const f = mcOff(fed, s.focusNode, s.focusOffset);
+    const line = linesOf(fed).find(([a, b]) => f >= a && f <= b);
+    col = line ? f - line[0] : 0;
+  }
+  const cs = [];
+  for (const ed of mcEditables()) {
+    if (!r.intersectsNode(ed)) continue;
+    const lo = ed.contains(r.startContainer) ? mcOff(ed, r.startContainer, r.startOffset) : 0;
+    const len = mcText(ed).length;
+    const hi = ed.contains(r.endContainer) ? mcOff(ed, r.endContainer, r.endOffset) : len;
+    for (const [a, b] of linesOf(ed)) {
+      if (b < lo || a > hi || (a === hi && hi > lo)) continue;
+      const o = Math.min(a + col, b);
+      cs.push({ ed, a: o, f: o });
+    }
+  }
+  if (cs.length < 2) { toast('The selection is on one line of the source'); return; }
   mcClear();
   MC.cursors = cs; MC.primary = cs[cs.length - 1]; MC.word = false;
   mcSettle();

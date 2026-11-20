@@ -509,7 +509,9 @@ both views, 16 seeds of 70 steps pass; see its header). Departures:
   other carets are placed by line and column in the monospaced font with
   Wrap off; with Wrap on they are not drawn (a toast says so), and their
   selections are not drawn either way. They work in both.
-- Not done: a cursor per source line from the paper view.
+- A cursor per source line from the paper view: `C-S-c C-S-l` (added
+  2026-11-20), at the column of the selection's end in its source line; a
+  line break of the source is an `.nl` (or paragraph break) chip in the page.
 - `tests/electron_test.js` runs the e2e tests in the Electron window
   (`shell/main.js --test-window`: hidden, drawn offscreen, a profile of its
   own, outside the single-instance lock, no dialogs), through
