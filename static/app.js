@@ -5438,6 +5438,64 @@ function deleteKeepingEnvs(r) {
   return keep.length > 0;
 }
 
+// ------------------------------------------------- the balance check
+//
+// An edit the browser makes in a block (Backspace, Delete, typing, typing
+// over a selection) must not change the block's balance of { and }, or of
+// \begin and \end of any environment, and must not remove \maketitle or
+// \documentclass.  Such an edit would leave LaTeX that does not build, or a
+// paper without its title, often with nothing on screen to show it, so it
+// is undone and a toast names what it removed.
+function latexTokens(src) {
+  const s = src.replace(/\\verb\*?([^A-Za-z\s]).*?\1/g, '').replace(/\\[\\{}%]/g, '').replace(/%.*$/gm, '');
+  const n = { '{': 0, '}': 0 };
+  for (const c of s) if (c === '{' || c === '}') n[c]++;
+  for (const m of s.matchAll(/\\(begin|end)\s*\{([^}]*)\}|\\(maketitle|documentclass)(?![A-Za-z@])/g)) {
+    const k = m[3] ? '\\' + m[3] : '\\' + m[1] + '{' + m[2] + '}';
+    n[k] = (n[k] || 0) + 1;
+  }
+  return n;
+}
+// What an edit from `before` to `after` broke: the tokens it removed (or,
+// if none, added), or null if it broke nothing.
+function brokenBalance(before, after) {
+  const a = latexTokens(before), b = latexTokens(after);
+  const at = (x, k) => x[k] || 0;
+  const net = (x, open, close) => at(x, open) - at(x, close);
+  const keys = [...new Set([...Object.keys(a), ...Object.keys(b)])];
+  const envs = [...new Set(keys.filter((k) => /^\\(begin|end)\{/.test(k)).map((k) => k.replace(/^\\(begin|end)/, '')))];
+  const broken = net(a, '{', '}') !== net(b, '{', '}') ||
+    envs.some((e) => net(a, '\\begin' + e, '\\end' + e) !== net(b, '\\begin' + e, '\\end' + e)) ||
+    ['\\maketitle', '\\documentclass'].some((k) => at(b, k) < at(a, k));
+  if (!broken) return null;
+  const removed = keys.filter((k) => at(b, k) < at(a, k));
+  return { removed: removed.length > 0, tokens: removed.length ? removed : keys.filter((k) => at(b, k) > at(a, k)) };
+}
+// The block's source as it is now, without the house rules.
+function blockSource(seg) {
+  flushEdits();
+  return seg.touched ? segSource(seg, [], null, false) : seg.src;
+}
+let BALANCE = null;   // the block before the edit under way
+doc.addEventListener('beforeinput', (e) => {
+  BALANCE = null;
+  if (e.defaultPrevented) return;
+  const edit = e.target.closest && e.target.closest('#doc [contenteditable=true]');
+  const seg = edit && segOf(edit);
+  if (!seg || seg.edit !== edit) return;
+  BALANCE = { seg, edit, src: blockSource(seg), nodes: [...edit.childNodes].map((n) => n.cloneNode(true)), caret: captureEditorState() };
+});
+doc.addEventListener('input', (e) => {
+  const g = BALANCE;
+  BALANCE = null;
+  if (!g || !g.edit.isConnected || !(e.target.closest && e.target.closest('#doc [contenteditable=true]') === g.edit)) return;
+  const bad = brokenBalance(g.src, blockSource(g.seg));
+  if (!bad) return;
+  g.edit.replaceChildren(...g.nodes);
+  restoreEditorState(g.caret);
+  toast(`Undid that edit, which ${bad.removed ? 'removed' : 'added'} ${bad.tokens.join(', ')} on its own. The source view can change it.`);
+}, true);
+
 function neighbours(r) {
   const skip = (n, dir) => { while (n && n.nodeType === 3 && !n.data) n = n[dir]; return n; };
   const c = r.startContainer, o = r.startOffset;

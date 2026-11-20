@@ -944,6 +944,25 @@ done.`));
     hasNot(text, 'Second abstract', 'the selected text goes');
   },
 
+  async 'frontmatter: an edit that takes a hidden \\maketitle is undone'(env, page) {
+    const src = ['\\documentclass{article}', '\\begin{document}', '', 'Some text \\maketitle more text.', '', 'Plain words here.', '', '\\end{document}', ''].join('\n');
+    env.write('main.tex', src);
+    await page.eval('load(true)');
+    await page.waitFor(`[...document.querySelectorAll('#doc [contenteditable=true]')].some((e) => e.textContent.includes('Some text'))`, 8000, 'the paragraph');
+    const nodeOf = (t) => `(() => { for (const ed of document.querySelectorAll('#doc [contenteditable=true]')) { const w = document.createTreeWalker(ed, 4); let n; while ((n = w.nextNode())) if (n.data.includes(${JSON.stringify(t)})) return n; } })()`;
+    // a selection over the hidden \maketitle, deleted by the browser
+    await page.eval(`(() => { const a = ${nodeOf('Some text')}, b = ${nodeOf('more text')}; const r = document.createRange(); r.setStart(a, 5); r.setEnd(b, 4); a.parentElement.closest('[contenteditable=true]').focus(); getSelection().removeAllRanges(); getSelection().addRange(r); })()`);
+    await page.key('Backspace');
+    await page.save();
+    eq(env.read('main.tex'), src, 'the deletion is undone');
+    // a deletion that keeps the balance goes through
+    await page.select('here.', 'end');
+    for (let i = 0; i < 6; i++) await page.key('Backspace');
+    await page.save();
+    has(env.read('main.tex'), 'Plain words\n', 'a plain deletion is kept');
+    has(env.read('main.tex'), '\\maketitle', 'the title stays');
+  },
+
   async 'a caption or heading never gets a blank line'(env, page) {
     env.write('main.tex', [
       '\\documentclass{article}', '\\begin{document}',

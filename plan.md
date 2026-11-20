@@ -22,7 +22,7 @@ and the editor's keymap (`ACTION_DEFS`, `TEXT_KEYS`, `GLOBAL_KEYS`), find
 7. One sentence per line on save (section 7). Done 2026-11-19.
 8. Merging sections, subsections and subsubsections (section 8).
 9. Deleting text before the abstract must not break the PDF (section 9).
-   Steps 1 and 2 done 2026-11-19; step 3 (the general check) open.
+   Steps 1 and 2 done 2026-11-19, step 3 (the general check) 2026-11-20.
 
 Every step adds `tests/e2e.js` cases (headless Chrome only, no visible
 windows). They check the files on disk after the change, and that a single
@@ -732,6 +732,13 @@ before, or text joined into a hidden command's argument). Reproduce first.
    count of commands that may appear once, `\maketitle`,
    `\begin{document}`) before and after. If the change breaks it, undo it
    and say what it would have removed.
+   Done 2026-11-20 for every edit the browser makes in a block (Backspace,
+   Delete, typing, typing over a selection): `brokenBalance` compares the
+   block's source before and after; the block is put back as it was and a
+   toast names what went. It counts `{`/`}`, `\begin`/`\end` per
+   environment, `\maketitle` and `\documentclass`. Edits made by the
+   editor's own code (cut, delete line, a selection across blocks) are not
+   checked: they go through `deleteKeepingEnvs` or `deleteAcross`.
 
 ### Tests (`node tests/e2e.js frontmatter`)
 
